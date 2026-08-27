@@ -3,6 +3,8 @@ import { t, getLocale, setLocale } from "./i18n";
 import { callSidecar } from "./lib/sidecar";
 import FindInput from "./components/FindInput";
 import ResultsTable from "./components/ResultsTable";
+import ChapterList from "./components/ChapterList";
+import { useChapterList } from "./hooks/useChapterList";
 import { useDebouncedSearch } from "./hooks/useDebouncedSearch";
 
 export default function App(): JSX.Element {
@@ -13,6 +15,14 @@ export default function App(): JSX.Element {
   const [selectedUrl, setSelectedUrl] = useState<string | null>(null);
   const ctaRef = useRef<HTMLButtonElement>(null);
   const { searching, results, error } = useDebouncedSearch(query, 400);
+
+  // Chapter List state — Core owns list/cache/selection (epic-1-context.md:13), GUI thin
+  const { loading: chapterLoading, list: chapterList, error: chapterError } = useChapterList(selectedUrl);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [from, setFrom] = useState<number>(1);
+  const [to, setTo] = useState<number>(30);
+  const [anchor, setAnchor] = useState<number | null>(null);
+  const retryRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     // Demo sidecar round-trip on mount (AD-4 spike)
@@ -45,6 +55,32 @@ export default function App(): JSX.Element {
     }
   }, [results, selectedUrl]);
 
+  // reset selection when selectedUrl changes (FR1→FR2 discovery standalone demo)
+  useEffect(() => {
+    setSelected(new Set());
+    setAnchor(null);
+    setFrom(1);
+    setTo(30);
+  }, [selectedUrl]);
+
+  // clamp from/to when chapter list loads or N changes
+  useEffect(() => {
+    if (chapterList.length > 0) {
+      const N = chapterList.length;
+      let a = from;
+      let b = to;
+      if (a < 1) a = 1;
+      if (b < 1) b = 1;
+      if (a > N) a = N;
+      if (b > N) b = N;
+      // don't auto-swap here; keep user intent, swap on Zaznacz
+      if (a !== from || b !== to) {
+        setFrom(a);
+        setTo(b);
+      }
+    }
+  }, [chapterList.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const toggleLocale = (): void => {
     const next = locale === "en" ? "pl" : "en";
     setLocale(next);
@@ -53,6 +89,21 @@ export default function App(): JSX.Element {
 
   const trimmedQuery = query.trim();
   const showNoResults = !searching && trimmedQuery.length > 0 && results.length === 0;
+
+  const handleRangeChange = (nextFrom: number, nextTo: number): void => {
+    setFrom(nextFrom);
+    setTo(nextTo);
+  };
+
+  const handlePreview = (idx: number): void => {
+    // Placeholder for Epic 2 full preview
+    console.log(`Preview placeholder for chapter ${idx}`);
+  };
+
+  const hasSelectedUrl = !!(selectedUrl && selectedUrl.trim());
+  const showChapterSkeleton = hasSelectedUrl && chapterLoading;
+  const showChapterList = hasSelectedUrl && !chapterLoading && chapterList.length > 0 && !chapterError;
+  const showChapterError = hasSelectedUrl && !chapterLoading && !!chapterError;
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -220,6 +271,91 @@ export default function App(): JSX.Element {
             </div>
           ) : null}
         </section>
+
+        {/* Chapter List surface — spec 1.4 */}
+        {selectedUrl ? (
+          <section className="mt-6 rounded-lg border bg-card p-6 shadow-sm" aria-label={t("chapterList.title")}>
+            <h2 className="text-heading font-semibold">{t("chapterList.title")}</h2>
+
+            {/* loading skeleton 6 rows */}
+            {showChapterSkeleton ? (
+              <div className="mt-4" aria-busy="true" aria-live="polite" data-testid="chapter-skeleton">
+                <p className="mb-2 text-body-sm text-muted-foreground">{t("chapterList.loading")}</p>
+                <div className="overflow-hidden rounded-lg border">
+                  <div className="sticky top-0 border-b bg-card px-4 py-2 text-body-sm font-semibold text-muted-foreground">
+                    <div className="grid grid-cols-3 gap-2">
+                      <span>✓</span>
+                      <span>#</span>
+                      <span>{t("chapterList.title")}</span>
+                    </div>
+                  </div>
+                  <div className="divide-y">
+                    {[0, 1, 2, 3, 4, 5].map((i) => (
+                      <div key={i} className="grid grid-cols-3 gap-2 px-4 py-3">
+                        <div className="h-4 animate-pulse rounded bg-muted" />
+                        <div className="h-4 animate-pulse rounded bg-muted" />
+                        <div className="h-4 animate-pulse rounded bg-muted" />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {/* error empty state */}
+            {showChapterError ? (
+              <div className="mt-4 space-y-3">
+                <div
+                  role="alert"
+                  aria-live="assertive"
+                  className="rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-body-sm text-destructive"
+                >
+                  {t("toast.searchFailed")}: {chapterError}
+                </div>
+                <div className="rounded-lg border border-dashed bg-card p-6 text-center">
+                  <p className="text-body font-semibold">{t("chapterList.empty")}</p>
+                  <button
+                    ref={retryRef}
+                    type="button"
+                    onClick={() => {
+                      // retry: reset selectedUrl to trigger refetch via useChapterList
+                      const url = selectedUrl;
+                      setSelectedUrl(null);
+                      window.setTimeout(() => setSelectedUrl(url), 0);
+                    }}
+                    className="mt-3 rounded-md bg-accent px-4 py-2 text-body font-medium text-accent-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    {t("chapterList.retry")}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {/* actual list */}
+            {showChapterList ? (
+              <div className="mt-4">
+                <ChapterList
+                  chapters={chapterList}
+                  selected={selected}
+                  from={from}
+                  to={to}
+                  anchor={anchor}
+                  onSelectedChange={setSelected}
+                  onRangeChange={handleRangeChange}
+                  onAnchorChange={setAnchor}
+                  onPreview={handlePreview}
+                />
+              </div>
+            ) : null}
+
+            {/* empty list but no error (filtered?) — still show Brak listy if needed */}
+            {!chapterLoading && !chapterError && hasSelectedUrl && chapterList.length === 0 ? (
+              <div className="mt-4 rounded-lg border border-dashed bg-card p-6 text-center">
+                <p className="text-body font-semibold">{t("chapterList.empty")}</p>
+              </div>
+            ) : null}
+          </section>
+        ) : null}
       </div>
     </div>
   );

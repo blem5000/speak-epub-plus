@@ -118,10 +118,10 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
     Returns response dict {id, result} or {id, error}.
     Spike supports ping/hello; other methods return NotImplemented mock.
 
-    Exception note (AD-1): core.config handles `search` / `listChaptersCount`
-    via dynamic importlib import of adapters inside handle_rpc. This preserves
-    GUI→Core→Port→Adapter direction and avoids import-time cycles; static
-    importlinter still sees core→core only. Documented exception for importlinter
+    Exception note (AD-1): core.config handles `search` / `listChapters` /
+    `listChaptersCount` via dynamic importlib import of adapters inside handle_rpc.
+    This preserves GUI→Core→Port→Adapter direction and avoids import-time cycles;
+    static importlinter still sees core→core only. Documented exception for importlinter
     `core-no-adapters` — see .importlinter and pyproject.toml. Dynamic import is
     intentional to keep the contract while allowing the aggregator.
     """
@@ -226,7 +226,86 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
                 continue
         return {"id": rid, "result": serialized}
 
-    if method in ("listChaptersCount", "listChapters", "guessAndCount", "guessAdapter"):
+    if method == "listChapters":
+        # Real listChapters — dynamic importlib to preserve GUI→Core→Port→Adapter (AD-1)
+        params = request.get("params")
+        url: Any = None
+        if isinstance(params, dict):
+            url = params.get("url", params.get("link", params.get("href")))
+        elif isinstance(params, str):
+            url = params
+        else:
+            url = params
+        if isinstance(url, str):
+            url = url.strip()
+        if not isinstance(url, str) or not url:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must be non-empty"}}
+        import re
+        from urllib.parse import urlparse
+
+        if not re.match(r"^https?://", url, re.I):
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must be http(s)"}}
+        try:
+            parsed = urlparse(url)
+            host = (parsed.netloc or "").lower()
+            if not host:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must contain host"}}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+        # host guard ==/endswith not blocking — guess None → — (jak 1.3)
+        # Dynamic import NovelPhoenixAdapter (importlinter exception documented in module docstring)
+        try:
+            import importlib
+
+            _mod = importlib.import_module("adapters.novelphoenix")
+            NovelPhoenixAdapter = getattr(_mod, "NovelPhoenixAdapter")
+        except Exception as e:
+            return {"id": rid, "error": {"code": "IMPORT_FAILED", "message": str(e)}}
+        try:
+            adapter = NovelPhoenixAdapter()
+            lst = adapter.listChapters(url)
+            # Serialize ChapterInfo index/title/url + cover_url if available (hook expects cover)
+            serialized: list[dict[str, Any]] = []
+            cover_from_adapter: str | None = None
+            try:
+                # adapters/novelphoenix may expose last cover via _last_cover_url or similar
+                cover_from_adapter = getattr(adapter, "_last_cover_url", None) or getattr(adapter, "last_cover_url", None)
+            except Exception:
+                pass
+            for ci in lst:
+                title = getattr(ci, "title", "") or "—"
+                if not isinstance(title, str) or not title.strip():
+                    title = "—"
+                url_val = getattr(ci, "url", "") or ""
+                cover_val = getattr(ci, "cover_url", None)
+                if cover_val is None:
+                    cover_val = cover_from_adapter
+                serialized.append(
+                    {
+                        "index": getattr(ci, "index", None),
+                        "title": title,
+                        "url": str(url_val),
+                        "cover_url": cover_val,
+                    }
+                )
+            # Include cover_url as separate top-level if needed via adapter._last_cover_url;
+            # result is list for verification compat. Cover exposed via additional field in hook if needed.
+            # To avoid breaking {result: [...] } shape, keep list; cover can be fetched from adapter state if caller needs.
+            return {"id": rid, "result": serialized}
+        except ValueError as e:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+        except Exception as e:
+            # Map AdapterError LIST_FAILED → {"error":{"code":"LIST_FAILED",...}} not []
+            code = getattr(e, "code", None)
+            if code == "LIST_FAILED" or "LIST_FAILED" in str(e):
+                return {"id": rid, "error": {"code": "LIST_FAILED", "message": str(e)}}
+            # Also handle requests HTTP errors as LIST_FAILED
+            msg = str(e)
+            if "404" in msg or "timeout" in msg.lower() or "5xx" in msg.lower():
+                return {"id": rid, "error": {"code": "LIST_FAILED", "message": msg}}
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": msg}}
+
+    if method in ("listChaptersCount", "guessAndCount", "guessAdapter"):
         params = request.get("params")
         url: Any = None
         if isinstance(params, dict):
