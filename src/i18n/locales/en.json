@@ -5,6 +5,13 @@
   "find.cta": "Find",
   "find.hint": "Title search checks supported sites in parallel (<5s per site).",
   "find.noResults": "No results — try pasting a direct URL.",
+  "find.searching": "Searching NovelPhoenix…",
+  "find.noResultsTitle": "No results for ‘{query}’",
+  "find.ctaPasteUrl": "Paste URL",
+  "find.paste": "Paste",
+  "find.clear": "Clear",
+  "find.noResultsHint": "Try pasting a direct NovelPhoenix link.",
+  "find.linkFallback": "Or open NovelPhoenix directly",
   "chapterList.title": "Chapters",
   "chapterList.selected": "Selected {count} of {total}",
   "range.from": "From",
@@ -27,5 +34,13 @@
   "tokens.storePreview": "store.json preview:",
   "tokens.windowNote": "Window 960px / min 900 — resize below 900 is blocked by Tauri config.",
   "tokens.buildEpub": "Build EPUB",
-  "placeholder.discovery": "Discovery surfaces (Find + Chapter List) are mocks in Story 1.1 — real UI lands in 1.3/1.4. ScraperPort + sidecar contract is ready."
+  "placeholder.discovery": "Discovery surfaces (Find + Chapter List) are mocks in Story 1.1 — real UI lands in 1.3/1.4. ScraperPort + sidecar contract is ready.",
+  "results.headers.site": "Site",
+  "results.headers.title": "Title",
+  "results.headers.chapters": "Chapters",
+  "results.headers.link": "Link",
+  "results.region": "Search results",
+  "results.selectedLabel": "Selected",
+  "find.title": "Find",
+  "toast.searchFailed": "Search failed"
 }

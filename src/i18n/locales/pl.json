@@ -5,6 +5,13 @@
   "find.cta": "Szukaj",
   "find.hint": "Wyszukiwanie tytułu sprawdza obsługiwane strony równolegle (<5s na stronę).",
   "find.noResults": "Brak wyników — spróbuj wkleić bezpośredni URL.",
+  "find.searching": "Przeszukuję NovelPhoenix…",
+  "find.noResultsTitle": "Brak wyników dla ‘{query}’",
+  "find.ctaPasteUrl": "Wklej URL",
+  "find.paste": "Wklej",
+  "find.clear": "Wyczyść",
+  "find.noResultsHint": "Spróbuj wkleić bezpośredni link NovelPhoenix.",
+  "find.linkFallback": "Lub otwórz NovelPhoenix bezpośrednio",
   "chapterList.title": "Rozdziały",
   "chapterList.selected": "Wybrano {count} z {total}",
   "range.from": "Od",
@@ -27,5 +34,13 @@
   "tokens.storePreview": "podgląd store.json:",
   "tokens.windowNote": "Okno 960px / min 900 — zmiana rozmiaru poniżej 900 blokowana przez Tauri.",
   "tokens.buildEpub": "Buduj EPUB",
-  "placeholder.discovery": "Powierzchnie discovery (Find + Chapter List) to mocki w Story 1.1 — prawdziwe UI w 1.3/1.4. Kontrakt ScraperPort + sidecar gotowy."
+  "placeholder.discovery": "Powierzchnie discovery (Find + Chapter List) to mocki w Story 1.1 — prawdziwe UI w 1.3/1.4. Kontrakt ScraperPort + sidecar gotowy.",
+  "results.headers.site": "Serwis",
+  "results.headers.title": "Tytuł",
+  "results.headers.chapters": "Rozdziały",
+  "results.headers.link": "Link",
+  "results.region": "Wyniki wyszukiwania",
+  "results.selectedLabel": "Wybrano",
+  "find.title": "Znajdź",
+  "toast.searchFailed": "Wyszukiwanie nie powiodło się"
 }

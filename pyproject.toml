@@ -6,7 +6,8 @@ build-backend = "setuptools.build_meta"
 root_packages = ["core", "adapters"]
 
 [tool.importlinter.contracts.core-no-adapters]
-name = "Core must not depend on adapters (AD-1)"
+# Exception documented in .importlinter: core.config uses importlib dynamic import for search — keeps GUI→Core→Port→Adapter.
+name = "Core must not depend on adapters (AD-1) — exception: core.config dynamic import (see core/config.py)"
 type = "forbidden"
 source_modules = ["core"]
 forbidden_modules = ["adapters"]

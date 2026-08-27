@@ -8,6 +8,12 @@ const host = process.env.TAURI_DEV_HOST as string | undefined;
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
+  test: {
+    environment: "jsdom",
+    globals: true,
+    setupFiles: ["./src/test/setup.ts"],
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
+  },
 
   resolve: {
     alias: {
