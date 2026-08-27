@@ -50,7 +50,16 @@ DEFAULT_STORE: Dict[str, Any] = {
     "keepMP3": True,
     "keepM4B": True,
     "filters": [],
+    "selection": [],
+    "selection_from": 1,
+    "selection_to": 30,
+    "selection_url": None,
 }
+
+# Simple in-memory cache for listChapters url -> serialized list (FR2) — KEEP per re-review decision
+# Politely caches last 20 url→list to avoid re-fetch same novel; no TTL, LRU evict oldest.
+# Documented exception to Never:cache (Epics2-3) — lightweight chapter list cache is allowed for FR2.
+_CHAPTER_CACHE: Dict[str, Any] = {}
 
 
 def get_store_path() -> Path:
@@ -247,12 +256,17 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must be http(s)"}}
         try:
             parsed = urlparse(url)
-            host = (parsed.netloc or "").lower()
+            # use hostname (strips userinfo and port) + lower + strip trailing dot
+            host = (parsed.hostname or "").lower().rstrip(".")
             if not host:
                 return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must contain host"}}
+            host_no_port = host  # already stripped
+            # host guard — only novelphoenix allowed for real listChapters; others → LIST_FAILED (jak search spec)
+            allowed = host_no_port == "novelphoenix.com" or host_no_port == "www.novelphoenix.com" or host_no_port.endswith(".novelphoenix.com")
+            if not allowed:
+                return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {host_no_port}"}}
         except Exception as e:
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
-        # host guard ==/endswith not blocking — guess None → — (jak 1.3)
         # Dynamic import NovelPhoenixAdapter (importlinter exception documented in module docstring)
         try:
             import importlib
@@ -261,9 +275,16 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
             NovelPhoenixAdapter = getattr(_mod, "NovelPhoenixAdapter")
         except Exception as e:
             return {"id": rid, "error": {"code": "IMPORT_FAILED", "message": str(e)}}
+        # cache hit before network — return deep copy to prevent poisoning
+        if url in _CHAPTER_CACHE:
+            cached = _CHAPTER_CACHE[url]
+            if isinstance(cached, list):
+                return {"id": rid, "result": [dict(item) if isinstance(item, dict) else item for item in cached]}
         try:
             adapter = NovelPhoenixAdapter()
             lst = adapter.listChapters(url)
+            if lst is None or not isinstance(lst, (list, tuple)):
+                return {"id": rid, "error": {"code": "LIST_FAILED", "message": "adapter returned non-list"}}
             # Serialize ChapterInfo index/title/url + cover_url if available (hook expects cover)
             serialized: list[dict[str, Any]] = []
             cover_from_adapter: str | None = None
@@ -272,7 +293,7 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
                 cover_from_adapter = getattr(adapter, "_last_cover_url", None) or getattr(adapter, "last_cover_url", None)
             except Exception:
                 pass
-            for ci in lst:
+            for enum_idx, ci in enumerate(lst, start=1):
                 title = getattr(ci, "title", "") or "—"
                 if not isinstance(title, str) or not title.strip():
                     title = "—"
@@ -280,18 +301,31 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
                 cover_val = getattr(ci, "cover_url", None)
                 if cover_val is None:
                     cover_val = cover_from_adapter
+                raw_idx = getattr(ci, "index", None)
+                try:
+                    idx_val = int(raw_idx) if raw_idx is not None else enum_idx
+                    if not isinstance(idx_val, int) or idx_val < 1:
+                        idx_val = enum_idx
+                except Exception:
+                    idx_val = enum_idx
                 serialized.append(
                     {
-                        "index": getattr(ci, "index", None),
+                        "index": idx_val,
                         "title": title,
                         "url": str(url_val),
                         "cover_url": cover_val,
                     }
                 )
-            # Include cover_url as separate top-level if needed via adapter._last_cover_url;
-            # result is list for verification compat. Cover exposed via additional field in hook if needed.
-            # To avoid breaking {result: [...] } shape, keep list; cover can be fetched from adapter state if caller needs.
-            return {"id": rid, "result": serialized}
+            # cache serialized result (cap 20 entries)
+            if len(_CHAPTER_CACHE) >= 20:
+                # evict oldest (simple pop first)
+                try:
+                    _CHAPTER_CACHE.pop(next(iter(_CHAPTER_CACHE)))
+                except Exception:
+                    pass
+            _CHAPTER_CACHE[url] = serialized
+            # return deep copy to prevent caller mutation poisoning cache
+            return {"id": rid, "result": [dict(item) for item in serialized]}
         except ValueError as e:
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
         except Exception as e:
@@ -299,11 +333,89 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
             code = getattr(e, "code", None)
             if code == "LIST_FAILED" or "LIST_FAILED" in str(e):
                 return {"id": rid, "error": {"code": "LIST_FAILED", "message": str(e)}}
-            # Also handle requests HTTP errors as LIST_FAILED
+            # Also handle requests HTTP errors as LIST_FAILED (403/429/5xx/timeout)
             msg = str(e)
-            if "404" in msg or "timeout" in msg.lower() or "5xx" in msg.lower():
+            if re.search(r"\b(4\d\d|5\d\d)\b", msg) or "timeout" in msg.lower() or "5xx" in msg.lower():
                 return {"id": rid, "error": {"code": "LIST_FAILED", "message": msg}}
             return {"id": rid, "error": {"code": "EXCEPTION", "message": msg}}
+
+    # Selection persistence — Core owns selection (D2/D3 patch)
+    if method == "getSelection":
+        try:
+            data = load_store()
+            sel = data.get("selection", [])
+            if not isinstance(sel, list):
+                sel = []
+            # sanitize to ints 1..N if possible
+            sanitized: list[int] = []
+            for v in sel:
+                try:
+                    iv = int(v)
+                    if iv >= 1:
+                        sanitized.append(iv)
+                except Exception:
+                    continue
+            return {
+                "id": rid,
+                "result": {
+                    "selection": sanitized,
+                    "from": data.get("selection_from", 1),
+                    "to": data.get("selection_to", 30),
+                    "url": data.get("selection_url"),
+                },
+            }
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+    if method == "setSelection":
+        try:
+            params = request.get("params") or {}
+            if not isinstance(params, dict):
+                params = {"selection": params}
+            sel = params.get("selection", params.get("selected", []))
+            frm = params.get("from", params.get("selection_from"))
+            to = params.get("to", params.get("selection_to"))
+            url_sel = params.get("url", params.get("selection_url"))
+            if sel is None:
+                sel = []
+            if not isinstance(sel, list):
+                sel = [sel]
+            sanitized: list[int] = []
+            for v in sel:
+                try:
+                    iv = int(v)
+                    if iv >= 1:
+                        sanitized.append(iv)
+                except Exception:
+                    continue
+            # dedup + sort + cap
+            sanitized = sorted(set(sanitized))
+            patch: Dict[str, Any] = {"selection": sanitized}
+            if frm is not None:
+                try:
+                    fv = int(frm)
+                    fv = max(1, min(fv, 100000))
+                    patch["selection_from"] = fv
+                except Exception:
+                    pass
+            if to is not None:
+                try:
+                    tv = int(to)
+                    tv = max(1, min(tv, 100000))
+                    patch["selection_to"] = tv
+                except Exception:
+                    pass
+            if "selection_from" in patch and "selection_to" in patch:
+                a, b = patch["selection_from"], patch["selection_to"]
+                if a > b:
+                    patch["selection_from"], patch["selection_to"] = b, a
+            if isinstance(url_sel, str) and url_sel.strip():
+                if url_sel.strip().lower().startswith(("http://", "https://")):
+                    patch["selection_url"] = url_sel.strip()[:500]
+            save_store(patch)
+            return {"id": rid, "result": {"saved": True, "selection": sanitized}}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
 
     if method in ("listChaptersCount", "guessAndCount", "guessAdapter"):
         params = request.get("params")

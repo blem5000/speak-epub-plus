@@ -18,7 +18,6 @@ export function clamp(n: number, min: number, max: number): number {
 export function rangeToSet(from: unknown, to: unknown, total: number): Set<number> {
   const N = Math.trunc(total);
   if (!Number.isFinite(N) || N < 1) return new Set();
-  // guard non-numeric / empty → no-op
   if (from === "" || to === "" || from == null || to == null) return new Set();
   const f = Number(from);
   const t = Number(to);
@@ -30,12 +29,15 @@ export function rangeToSet(from: unknown, to: unknown, total: number): Set<numbe
     a = b;
     b = tmp;
   }
+  // cap huge range to prevent freeze (still >500 warning but avoid 1M Set)
+  if (b - a > 5000) return new Set();
   const out = new Set<number>();
   for (let i = a; i <= b; i++) out.add(i);
   return out;
 }
 
 export function toggleSet(set: Set<number>, n: number): Set<number> {
+  if (!Number.isInteger(n) || !Number.isFinite(n) || n < 1) return new Set(set);
   const next = new Set(set);
   if (next.has(n)) next.delete(n);
   else next.add(n);
@@ -55,11 +57,16 @@ export function bulkShift(
   clicked: number,
   selected: Set<number>
 ): Set<number> {
-  if (anchor == null || !Number.isFinite(anchor)) {
+  if (anchor == null || !Number.isFinite(anchor) || !Number.isInteger(clicked) || !Number.isFinite(clicked) || clicked < 1) {
     return toggleSet(selected, clicked);
   }
-  const lo = Math.min(anchor, clicked);
-  const hi = Math.max(anchor, clicked);
+  // clamp to >=1 and ensure ints
+  const a = Math.trunc(anchor);
+  const c = Math.trunc(clicked);
+  if (!Number.isFinite(a) || !Number.isFinite(c) || a < 1 || c < 1) return toggleSet(selected, clicked);
+  const lo = Math.min(a, c);
+  const hi = Math.max(a, c);
+  if (hi - lo > 5000) return new Set(selected); // cap
   const next = new Set(selected);
   for (let i = lo; i <= hi; i++) next.add(i);
   return next;

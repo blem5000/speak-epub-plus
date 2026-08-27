@@ -103,7 +103,7 @@ describe("ChapterList 1.4 - selection helpers", () => {
     expect(label.textContent).toMatch(/142/);
     const row1 = screen.getByTestId("chapter-row-1");
     expect(row1.className).toContain("border-accent");
-    expect(row1.className).toContain("bg-[#EFF3FF]");
+    expect(row1.className).toContain("bg-accent/10");
   });
 
   it("clamp od<1→1 do>N→N swap works via RangeBar", async () => {

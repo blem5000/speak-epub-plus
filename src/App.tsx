@@ -16,13 +16,44 @@ export default function App(): JSX.Element {
   const ctaRef = useRef<HTMLButtonElement>(null);
   const { searching, results, error } = useDebouncedSearch(query, 400);
 
-  // Chapter List state — Core owns list/cache/selection (epic-1-context.md:13), GUI thin
-  const { loading: chapterLoading, list: chapterList, error: chapterError } = useChapterList(selectedUrl);
+  // Chapter List state — GUI thin, Core owns persistence via getSelection/setSelection (D2/D3)
+  const { loading: chapterLoading, list: chapterList, error: chapterError, cover: chapterCover } = useChapterList(selectedUrl);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [from, setFrom] = useState<number>(1);
   const [to, setTo] = useState<number>(30);
   const [anchor, setAnchor] = useState<number | null>(null);
   const retryRef = useRef<HTMLButtonElement>(null);
+  const retryTimeoutRef = useRef<number | null>(null);
+
+  // Load persisted selection from Core on mount (D3) — with unmount guard
+  useEffect(() => {
+    let alive = true;
+    callSidecar("getSelection", {})
+      .then((res) => {
+        if (!alive) return;
+        const r = res as { result?: { selection?: number[]; from?: number; to?: number; url?: string | null } };
+        if (r?.result?.selection && Array.isArray(r.result.selection)) {
+          const arr = r.result.selection.filter((n) => Number.isInteger(n) && n >= 1);
+          if (arr.length > 0) setSelected(new Set(arr));
+          if (Number.isFinite(r.result.from as number)) setFrom(Number(r.result.from));
+          if (Number.isFinite(r.result.to as number)) setTo(Number(r.result.to));
+        }
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Persist selection to Core on change (D2/D3)
+  useEffect(() => {
+    const selArray = Array.from(selected);
+    // fire-and-forget, debounce 300ms
+    const id = window.setTimeout(() => {
+      callSidecar("setSelection", { selection: selArray, from, to, url: selectedUrl }).catch(() => {});
+    }, 300);
+    return () => window.clearTimeout(id);
+  }, [selected, from, to, selectedUrl]);
 
   useEffect(() => {
     // Demo sidecar round-trip on mount (AD-4 spike)
@@ -63,23 +94,51 @@ export default function App(): JSX.Element {
     setTo(30);
   }, [selectedUrl]);
 
-  // clamp from/to when chapter list loads or N changes
+  // clamp from/to when chapter list loads or N changes + prune selection out-of-range
+  // Only trigger on length/loading change to avoid loop from selected dep
   useEffect(() => {
-    if (chapterList.length > 0) {
-      const N = chapterList.length;
-      let a = from;
-      let b = to;
-      if (a < 1) a = 1;
-      if (b < 1) b = 1;
-      if (a > N) a = N;
-      if (b > N) b = N;
-      // don't auto-swap here; keep user intent, swap on Zaznacz
-      if (a !== from || b !== to) {
-        setFrom(a);
-        setTo(b);
-      }
+    const N = chapterList.length;
+    if (N > 0) {
+      // clamp from/to without depending on selected
+      setFrom((prevFrom) => {
+        let a = prevFrom;
+        if (!Number.isFinite(a)) a = 1;
+        a = Math.trunc(a);
+        if (a < 1) a = 1;
+        if (a > N) a = N;
+        return a;
+      });
+      setTo((prevTo) => {
+        let b = prevTo;
+        if (!Number.isFinite(b)) b = 1;
+        b = Math.trunc(b);
+        if (b < 1) b = 1;
+        if (b > N) b = N;
+        return b;
+      });
+      // swap if needed after clamp (handle via next tick)
+      // prune selected indices that are now out-of-range
+      setSelected((prev) => {
+        const filtered = Array.from(prev).filter((n) => Number.isInteger(n) && n >= 1 && n <= N);
+        if (filtered.length !== prev.size) return new Set(filtered);
+        return prev;
+      });
+      setAnchor((prev) => {
+        if (prev != null && (prev < 1 || prev > N || !Number.isInteger(prev))) return null;
+        return prev;
+      });
+    } else if (!chapterLoading) {
+      // only clear when not loading (avoid wiping persist during skeleton)
+      setSelected((prev) => (prev.size > 0 ? new Set() : prev));
+      setAnchor((prev) => (prev != null ? null : prev));
     }
-  }, [chapterList.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [chapterList.length, chapterLoading]);
+
+  useEffect(() => {
+    return () => {
+      if (retryTimeoutRef.current && typeof window !== "undefined") window.clearTimeout(retryTimeoutRef.current);
+    };
+  }, []);
 
   const toggleLocale = (): void => {
     const next = locale === "en" ? "pl" : "en";
@@ -96,14 +155,18 @@ export default function App(): JSX.Element {
   };
 
   const handlePreview = (idx: number): void => {
-    // Placeholder for Epic 2 full preview
-    console.log(`Preview placeholder for chapter ${idx}`);
+    // Preview placeholder for Epic 2 — log only in dev
+    if (import.meta.env.DEV) {
+      // eslint-disable-next-line no-console
+      console.debug(`Preview placeholder for chapter ${idx}`);
+    }
   };
 
   const hasSelectedUrl = !!(selectedUrl && selectedUrl.trim());
   const showChapterSkeleton = hasSelectedUrl && chapterLoading;
   const showChapterList = hasSelectedUrl && !chapterLoading && chapterList.length > 0 && !chapterError;
   const showChapterError = hasSelectedUrl && !chapterLoading && !!chapterError;
+  const showChapterEmpty = hasSelectedUrl && !chapterLoading && !chapterError && chapterList.length === 0;
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -273,13 +336,31 @@ export default function App(): JSX.Element {
         </section>
 
         {/* Chapter List surface — spec 1.4 */}
-        {selectedUrl ? (
+        {hasSelectedUrl ? (
           <section className="mt-6 rounded-lg border bg-card p-6 shadow-sm" aria-label={t("chapterList.title")}>
-            <h2 className="text-heading font-semibold">{t("chapterList.title")}</h2>
+            <div className="flex items-start justify-between gap-4">
+              <h2 className="text-heading font-semibold">{t("chapterList.title")}</h2>
+              {chapterCover ? (
+                <img
+                  src={chapterCover}
+                  alt="Cover"
+                  loading="lazy"
+                  onError={(e) => {
+                    (e.currentTarget as HTMLImageElement).style.display = "none";
+                  }}
+                  className="h-12 w-8 rounded object-cover border"
+                  data-testid="chapter-cover"
+                />
+              ) : null}
+            </div>
+            {/* aria-live for selection changes */}
+            <div className="sr-only" aria-live="polite" aria-atomic="true" data-testid="selection-live">
+              {t("chapterList.selected", { count: selected.size, total: chapterList.length })}
+            </div>
 
             {/* loading skeleton 6 rows */}
             {showChapterSkeleton ? (
-              <div className="mt-4" aria-busy="true" aria-live="polite" data-testid="chapter-skeleton">
+              <div className="mt-4" role="status" aria-busy="true" aria-live="polite" data-testid="chapter-skeleton">
                 <p className="mb-2 text-body-sm text-muted-foreground">{t("chapterList.loading")}</p>
                 <div className="overflow-hidden rounded-lg border">
                   <div className="sticky top-0 border-b bg-card px-4 py-2 text-body-sm font-semibold text-muted-foreground">
@@ -310,7 +391,8 @@ export default function App(): JSX.Element {
                   aria-live="assertive"
                   className="rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-body-sm text-destructive"
                 >
-                  {t("toast.searchFailed")}: {chapterError}
+                  {t(chapterError === "VALUE_ERROR" ? "chapterList.errorValue" : "chapterList.errorList", { defaultValue: t("toast.searchFailed") })}:{" "}
+                  {chapterError}
                 </div>
                 <div className="rounded-lg border border-dashed bg-card p-6 text-center">
                   <p className="text-body font-semibold">{t("chapterList.empty")}</p>
@@ -318,10 +400,11 @@ export default function App(): JSX.Element {
                     ref={retryRef}
                     type="button"
                     onClick={() => {
-                      // retry: reset selectedUrl to trigger refetch via useChapterList
                       const url = selectedUrl;
+                      if (typeof window === "undefined") return;
+                      if (retryTimeoutRef.current) window.clearTimeout(retryTimeoutRef.current);
                       setSelectedUrl(null);
-                      window.setTimeout(() => setSelectedUrl(url), 0);
+                      retryTimeoutRef.current = window.setTimeout(() => setSelectedUrl(url), 0);
                     }}
                     className="mt-3 rounded-md bg-accent px-4 py-2 text-body font-medium text-accent-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
@@ -348,9 +431,9 @@ export default function App(): JSX.Element {
               </div>
             ) : null}
 
-            {/* empty list but no error (filtered?) — still show Brak listy if needed */}
-            {!chapterLoading && !chapterError && hasSelectedUrl && chapterList.length === 0 ? (
-              <div className="mt-4 rounded-lg border border-dashed bg-card p-6 text-center">
+            {/* empty list but no error — still show Brak listy if needed */}
+            {showChapterEmpty ? (
+              <div className="mt-4 rounded-lg border border-dashed bg-card p-6 text-center" role="status" aria-live="polite">
                 <p className="text-body font-semibold">{t("chapterList.empty")}</p>
               </div>
             ) : null}

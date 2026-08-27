@@ -106,6 +106,7 @@ export default function ChapterList({
       handleToggle(chapterIdx, withShift);
     } else if ((e.ctrlKey || e.metaKey) && (e.key === "a" || e.key === "A")) {
       e.preventDefault();
+      e.stopPropagation();
       const all = new Set<number>();
       for (let i = 1; i <= N; i++) all.add(i);
       onSelectedChange(all);
@@ -137,7 +138,8 @@ export default function ChapterList({
       role="region"
       aria-label={t("chapterList.title") ?? "Chapters"}
       onKeyDown={handleSelectAllKey}
-      tabIndex={-1}
+      tabIndex={0}
+      aria-roledescription="chapter list"
     >
       <div className="border-b bg-card px-4 py-3">
         <RangeBar
@@ -157,7 +159,7 @@ export default function ChapterList({
         </div>
       ) : null}
 
-      <div className="max-h-[480px] overflow-auto">
+      <div className="max-h-[480px] overflow-auto" role="grid" aria-rowcount={N} aria-colcount={3}>
         <table className="w-full border-collapse text-left">
           <thead className="sticky top-0 z-10 border-b bg-card backdrop-blur supports-[backdrop-filter]:bg-card/95">
             <tr className="h-9 text-body-sm text-muted-foreground">
@@ -168,24 +170,23 @@ export default function ChapterList({
               <th className="px-4 py-2 font-semibold">{t("chapterList.title")}</th>
             </tr>
           </thead>
-          <tbody className="text-body">
-            {chapters.map((ch) => {
+          <tbody className="text-body" role="rowgroup">
+            {chapters.map((ch, arrIdx) => {
               const idx = ch.index;
               const selectedRow = isSelected(idx);
-              const rowPos = idx - 1; // 0-based position for roving
+              const rowPos = arrIdx; // use array order for roving, not idx-1
               const isFocused = focusedIndex === rowPos;
-              const inRangeHighlight = selectedRow; // highlight selected as accent/10
               return (
                 <tr
-                  key={ch.url + idx}
+                  key={`${ch.url}::${idx}::${arrIdx}`}
                   ref={(el) => {
                     rowRefs.current[rowPos] = el;
                   }}
-                  role="button"
+                  role="row"
                   tabIndex={isFocused ? 0 : -1}
                   aria-selected={selectedRow}
-                  aria-checked={selectedRow}
                   data-index={idx}
+                  data-selected={selectedRow}
                   data-testid={`chapter-row-${idx}`}
                   onClick={(e) => {
                     const withShift = (e as React.MouseEvent).shiftKey;
@@ -193,19 +194,19 @@ export default function ChapterList({
                   }}
                   onDoubleClick={() => {
                     if (onPreview) onPreview(idx);
-                    else console.log(`Preview placeholder for chapter ${idx}`);
+                    else if (import.meta.env.DEV) console.debug(`Preview placeholder for chapter ${idx}`);
                   }}
                   onKeyDown={(e) => handleKeyDownRow(e, rowPos, idx)}
                   onFocus={() => setFocusedIndex(rowPos)}
                   className={
                     "group h-9 cursor-pointer border-b last:border-b-0 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset " +
                     (selectedRow
-                      ? "border-l-2 border-accent bg-[#EFF3FF] "
+                      ? "border-l-2 border-accent bg-accent/10 "
                       : "border-l-2 border-transparent hover:bg-muted ") +
-                    (inRangeHighlight ? " bg-accent/10 " : "") +
                     " "
                   }
                   style={{ height: "36px" }}
+                  aria-rowindex={arrIdx + 1}
                 >
                   <td className="px-2 py-1 text-center">
                     <input

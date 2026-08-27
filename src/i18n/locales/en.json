@@ -17,6 +17,8 @@
   "chapterList.loading": "Fetching list…",
   "chapterList.empty": "No list",
   "chapterList.retry": "Retry",
+  "chapterList.errorValue": "Invalid URL",
+  "chapterList.errorList": "Failed to fetch list",
   "range.from": "From",
   "range.to": "To",
   "range.select": "Select range",

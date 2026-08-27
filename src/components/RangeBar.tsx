@@ -1,5 +1,6 @@
+import { useEffect, useState } from "react";
 import { t } from "@/i18n";
-import { clamp } from "@/lib/selection";
+import { clampRange } from "@/lib/selection";
 
 type RangeBarProps = {
   from: number;
@@ -21,43 +22,73 @@ export default function RangeBar({
   onClear,
 }: RangeBarProps): JSX.Element {
   const N = total;
+  const disabled = N === 0;
+
+  // local string state to allow empty field while typing
+  const [fromStr, setFromStr] = useState(String(from));
+  const [toStr, setToStr] = useState(String(to));
+
+  useEffect(() => {
+    setFromStr(String(from));
+  }, [from]);
+  useEffect(() => {
+    setToStr(String(to));
+  }, [to]);
 
   const handleFromChange = (val: string): void => {
-    if (val === "") {
-      // empty → no-op, keep current but allow user to clear field? Treat as ignore
-      // we keep previous value
-      return;
-    }
-    const num = Number(val);
-    if (!Number.isFinite(num)) return;
-    // immediate update without clamp; clamp onBlur / onSelect
-    onChangeRange(num, to);
-  };
-
-  const handleToChange = (val: string): void => {
+    setFromStr(val);
     if (val === "") return;
     const num = Number(val);
     if (!Number.isFinite(num)) return;
-    onChangeRange(from, num);
+    // propagate immediate without clamp, but trunc decimals before parent
+    onChangeRange(Math.trunc(num), to);
+  };
+
+  const handleToChange = (val: string): void => {
+    setToStr(val);
+    if (val === "") return;
+    const num = Number(val);
+    if (!Number.isFinite(num)) return;
+    onChangeRange(from, Math.trunc(num));
   };
 
   const handleFromBlur = (): void => {
-    if (!N) return;
-    const clamped = clamp(Number(from), 1, N);
-    // also swap if needed? spec says clamp od<1→1 do>N→N od>do swap
-    let a = clamped;
-    let b = clamp(Number(to), 1, N);
-    if (a > b) [a, b] = [b, a];
-    onChangeRange(a, b);
+    if (!N) {
+      setFromStr(String(from));
+      return;
+    }
+    const clamped = clampRange(fromStr === "" ? from : fromStr, toStr === "" ? to : toStr, N);
+    if (clamped) {
+      const [a, b] = clamped;
+      onChangeRange(a, b);
+      setFromStr(String(a));
+      setToStr(String(b));
+    } else {
+      setFromStr(String(from));
+      setToStr(String(to));
+    }
   };
 
   const handleToBlur = (): void => {
-    if (!N) return;
-    let a = clamp(Number(from), 1, N);
-    let b = clamp(Number(to), 1, N);
-    if (a > b) [a, b] = [b, a];
-    onChangeRange(a, b);
+    if (!N) {
+      setToStr(String(to));
+      return;
+    }
+    const clamped = clampRange(fromStr === "" ? from : fromStr, toStr === "" ? to : toStr, N);
+    if (clamped) {
+      const [a, b] = clamped;
+      onChangeRange(a, b);
+      setFromStr(String(a));
+      setToStr(String(b));
+    } else {
+      setFromStr(String(from));
+      setToStr(String(to));
+    }
   };
+
+  // aria-invalid when value out of bounds (empty while typing is not invalid)
+  const fromInvalid = N > 0 && fromStr !== "" && (!Number.isFinite(Number(fromStr)) || Number(fromStr) < 1 || Number(fromStr) > N);
+  const toInvalid = N > 0 && toStr !== "" && (!Number.isFinite(Number(toStr)) || Number(toStr) < 1 || Number(toStr) > N);
 
   return (
     <div className="flex flex-wrap items-center gap-3">
@@ -70,12 +101,16 @@ export default function RangeBar({
           data-testid="range-from"
           type="number"
           inputMode="numeric"
+          step={1}
           min={1}
           max={N || undefined}
-          value={from}
+          value={fromStr}
           onChange={(e) => handleFromChange(e.target.value)}
           onBlur={handleFromBlur}
-          className="h-9 w-20 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          disabled={disabled}
+          aria-disabled={disabled}
+          aria-invalid={fromInvalid || undefined}
+          className="h-9 w-20 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
           aria-label={t("range.from")}
         />
         <span className="text-muted-foreground">–</span>
@@ -87,12 +122,16 @@ export default function RangeBar({
           data-testid="range-to"
           type="number"
           inputMode="numeric"
+          step={1}
           min={1}
           max={N || undefined}
-          value={to}
+          value={toStr}
           onChange={(e) => handleToChange(e.target.value)}
           onBlur={handleToBlur}
-          className="h-9 w-20 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          disabled={disabled}
+          aria-disabled={disabled}
+          aria-invalid={toInvalid || undefined}
+          className="h-9 w-20 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
           aria-label={t("range.to")}
         />
       </div>
@@ -102,7 +141,9 @@ export default function RangeBar({
           type="button"
           data-testid="range-select"
           onClick={onSelectRange}
-          className="rounded-md bg-accent px-4 py-2 text-body font-medium text-accent-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          disabled={disabled}
+          aria-disabled={disabled}
+          className="rounded-md bg-accent px-4 py-2 text-body font-medium text-accent-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {t("range.select")}
         </button>
@@ -110,7 +151,9 @@ export default function RangeBar({
           type="button"
           data-testid="range-deselect"
           onClick={onClear}
-          className="rounded-md border bg-card px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          disabled={disabled && selectedCount === 0}
+          aria-disabled={disabled && selectedCount === 0}
+          className="rounded-md border bg-card px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {t("range.deselect")}
         </button>

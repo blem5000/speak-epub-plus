@@ -17,6 +17,8 @@
   "chapterList.loading": "Pobieram listę…",
   "chapterList.empty": "Brak listy",
   "chapterList.retry": "Spróbuj ponownie",
+  "chapterList.errorValue": "Nieprawidłowy URL",
+  "chapterList.errorList": "Nie udało się pobrać listy",
   "range.from": "Od",
   "range.to": "Do",
   "range.select": "Zaznacz zakres",

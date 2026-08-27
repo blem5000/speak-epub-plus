@@ -69,17 +69,22 @@ export function useChapterList(url: string | null): UseChapterListReturn {
         reject(new Error("timeout"));
       }, 5000);
     });
+    // attach catch before race to avoid unhandled rejection if fetch wins early
+    timeoutPromise.catch(() => {});
 
     const fetchPromise = (async () => {
-      const res = await callSidecar("listChapters", { url: trimmed });
+      const res = await callSidecar("listChapters", { url: trimmed }, { signal: controller.signal });
+      // handle abort quickly
+      if (controller.signal.aborted) throw Object.assign(new Error("aborted"), { code: "ABORTED" });
       if ((res as { error?: unknown }).error) {
         const err = (res as { error: { code?: string; message?: string } }).error;
         const code = err?.code ?? "LIST_FAILED";
         const msg = err?.message ?? code;
+        // ABORTED maps to LIST_FAILED for UI
+        if (code === "ABORTED") throw Object.assign(new Error("aborted"), { code: "ABORTED" });
         throw Object.assign(new Error(msg), { code });
       }
       const data = (res as { result?: unknown }).result;
-      // result should be array of ChapterInfo ; also handle {chapters: []}
       let arr: unknown = data;
       let coverUrl: string | null = null;
       if (data != null && typeof data === "object" && !Array.isArray(data) && "chapters" in (data as Record<string, unknown>)) {
@@ -87,10 +92,10 @@ export function useChapterList(url: string | null): UseChapterListReturn {
         coverUrl = (data as { cover_url?: string }).cover_url ?? null;
       }
       if (!Array.isArray(arr)) arr = [];
-      // normalize each entry
       const normalized: ChapterInfo[] = (arr as Array<Record<string, unknown>>).map((r, idx) => {
         const indexRaw = r.index ?? r.Index ?? idx + 1;
-        const index = Number.isFinite(Number(indexRaw)) ? Number(indexRaw) : idx + 1;
+        const rawNum = Number(indexRaw);
+        const index = Number.isFinite(rawNum) ? Math.max(1, Math.trunc(rawNum)) : idx + 1;
         let title = (r.title as string) ?? (r.name as string) ?? "";
         if (typeof title !== "string" || !title.trim()) title = "—";
         const urlVal = (r.url as string) ?? (r.link as string) ?? "";
@@ -98,12 +103,10 @@ export function useChapterList(url: string | null): UseChapterListReturn {
         if (cu && !coverUrl) coverUrl = cu;
         return { index, title: String(title).trim() || "—", url: String(urlVal), cover_url: cu };
       });
-      // ensure ordered 1..N contiguous if needed — already by index, but sort by index
       normalized.sort((a, b) => a.index - b.index);
       return { list: normalized, cover: coverUrl };
     })();
 
-    // prevent unhandled rejection if timeout wins
     fetchPromise.catch(() => {});
 
     Promise.race([fetchPromise, timeoutPromise])
@@ -117,10 +120,12 @@ export function useChapterList(url: string | null): UseChapterListReturn {
       })
       .catch((e: unknown) => {
         if (id !== callIdRef.current) return;
-        // if aborted and timeout, map to LIST_FAILED style
         const msg = e instanceof Error ? e.message : String(e);
         const code = (e as { code?: string })?.code;
-        if (controller.signal.aborted && msg === "timeout") {
+        if (code === "ABORTED" || msg === "aborted") {
+          // silent cancel — rapid URL change, keep previous state, no toast
+          return;
+        } else if (controller.signal.aborted && msg === "timeout") {
           setList([]);
           setCover(null);
           setError("LIST_FAILED");
@@ -144,11 +149,6 @@ export function useChapterList(url: string | null): UseChapterListReturn {
           return;
         }
         if (timeoutId && typeof window !== "undefined") window.clearTimeout(timeoutId);
-        if (controller.signal.aborted) {
-          setLoading(false);
-          abortRef.current = null;
-          return;
-        }
         setLoading(false);
         abortRef.current = null;
       });
