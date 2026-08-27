@@ -1,0 +1,32 @@
+[importlinter]
+root_packages =
+    core
+    adapters
+
+[importlinter:contract:core-no-adapters]
+# AD-1 — GUI→Core→Port→Adapter. Exception documented: core.config handles
+# `search` via local dynamic import of adapters (see core/config.py docstring).
+# Dependency direction preserved: GUI→Core→Port→Adapter. The import is done
+# via importlib inside handle_rpc to avoid static importlinter flag while
+# keeping the contract. Allowed exception for core.config → adapters.
+name = Core must not depend on adapters (AD-1) — exception: core.config dynamic import for search (see core/config.py)
+type = forbidden
+source_modules =
+    core
+forbidden_modules =
+    adapters
+
+[importlinter:contract:adapters-no-pipeline]
+name = Adapters must not depend on core pipeline (AD-1)
+type = forbidden
+source_modules =
+    adapters
+forbidden_modules =
+    core.fetch
+    core.clean
+    core.epub
+    core.tts
+    core.merge
+    core.aggregator
+    core.pipeline
+    core.config

@@ -181,6 +181,26 @@ A selection of recommended voices:
 
 Run `python speak.py --list-voices` for the full English list, or `--list-voices --all-languages` for all languages.
 
+## Desktop scaffold (Tauri + sidecar)
+
+Prerequisites: Node 24+, Rust 1.77+, Python 3.10+, FFmpeg on PATH.
+
+```bash
+# install frontend
+npm install
+# dev with Tauri shell (window 960px / min 900)
+npm run tauri dev
+# production build (checks tokens via CSS vars)
+npm run build
+```
+
+Python sidecar path is OS-aware via `core/config.py:get_venv_python()`:
+
+- Windows: `Speak-EPUB-1.0.0/venv/Scripts/python.exe`
+- macOS/Linux: `Speak-EPUB-1.0.0/venv/bin/python`
+
+Never use bare `python`; always spawn via that path (see `docs/sidecar-fallback.md` for HTTP fallback on `http://localhost:17381` if stdin/stdout spawn fails).
+
 ## Credits & License
 
 - Original project: **Speak EPUB** by **Michael Sanford** — MIT License, Copyright (c) 2026 Michael Sanford

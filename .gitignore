@@ -42,3 +42,14 @@ Speak-EPUB-1.0.0/__pycache__/
 Speak-EPUB-1.0.0/*.mp3
 Speak-EPUB-1.0.0/*.m4b
 Speak-EPUB-1.0.0/*_audiobook/
+
+# Node / Tauri
+node_modules/
+dist/
+dist-ssr/
+*.local
+/src-tauri/target/
+/src-tauri/gen/
+
+# Store
+store.json
