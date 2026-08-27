@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+*.egg-info/
+.env
+
+# Output
+*_audiobook/
+*.mp3
+*.m4b
+*.m4a
+
+# FFmpeg temp files
+_concat.txt
+_metadata.txt
+*.concat.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# BMad / internal tooling - not part of distributed app
+_bmad/
+_bmad-output/
+.agents/
+.opencode/
+AGENTS.md
+
+# Keep original snapshot but don't double-track venv inside it
+Speak-EPUB-1.0.0/venv/
+Speak-EPUB-1.0.0/__pycache__/
+Speak-EPUB-1.0.0/*.mp3
+Speak-EPUB-1.0.0/*.m4b
+Speak-EPUB-1.0.0/*_audiobook/
