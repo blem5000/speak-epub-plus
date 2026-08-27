@@ -29,6 +29,8 @@ class SearchResult:
     title: str
     url: str
     chapter_count: Optional[int] = None
+    author: Optional[str] = None
+    cover_url: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,14 @@ class ChapterContent:
     title: str
     html: str
     text: str
+
+
+class AdapterError(Exception):
+    """Adapter failure with machine-readable code (e.g. LIST_FAILED)."""
+
+    def __init__(self, message: str, code: str = "UNKNOWN") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ScraperPort(ABC):
