@@ -4,6 +4,7 @@ import { callSidecar } from "./lib/sidecar";
 import FindInput from "./components/FindInput";
 import ResultsTable from "./components/ResultsTable";
 import ChapterList from "./components/ChapterList";
+import Preview from "./components/Preview";
 import { useChapterList } from "./hooks/useChapterList";
 import { useDebouncedSearch } from "./hooks/useDebouncedSearch";
 import { useFetcher } from "./hooks/useFetcher";
@@ -181,13 +182,11 @@ export default function App(): JSX.Element {
     setTo(nextTo);
   };
 
+  const [previewIdx, setPreviewIdx] = useState<number | null>(null);
   const handlePreview = (idx: number): void => {
-    // Preview placeholder for Epic 2 — log only in dev
-    if (import.meta.env.DEV) {
-      // eslint-disable-next-line no-console
-      console.debug(`Preview placeholder for chapter ${idx}`);
-    }
+    setPreviewIdx(idx);
   };
+  const previewChapter = previewIdx != null ? chapterList.find((c) => c.index === previewIdx) ?? null : null;
 
   const hasSelectedUrl = !!(selectedUrl && selectedUrl.trim());
   const showChapterSkeleton = hasSelectedUrl && chapterLoading;
@@ -610,6 +609,15 @@ export default function App(): JSX.Element {
               )}
             </div>
           </section>
+        ) : null}
+        {previewChapter ? (
+          <Preview
+            open={previewIdx != null}
+            onClose={() => setPreviewIdx(null)}
+            chapterUrl={previewChapter.url}
+            chapterTitle={previewChapter.title}
+            chapterIndex={previewChapter.index}
+          />
         ) : null}
       </div>
     </div>

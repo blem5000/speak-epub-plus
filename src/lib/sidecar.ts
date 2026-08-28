@@ -222,6 +222,69 @@ export async function getCacheStatus(
   return callSidecar("getCacheStatus", payload, opts);
 }
 
+// Preview & selector boundary — AD-7 Story 2.2
+export type PreviewParams = { url: string; start?: string | null; end?: string | null };
+export type PreviewResult = {
+  url: string;
+  originalHtml: string;
+  originalText: string;
+  html: string;
+  text: string;
+  start: string | null;
+  end: string | null;
+};
+export type SelectorsResult = {
+  site: string;
+  start: string | null;
+  end: string | null;
+  defaultStart: string | null;
+  defaultEnd: string | null;
+  override: { start: string | null; end: string | null } | null;
+};
+
+export async function previewChapter(
+  params: PreviewParams,
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  if (!params.url || !params.url.trim()) throw new Error("url must be non-empty");
+  const payload: Record<string, unknown> = { url: params.url.trim() };
+  if (params.start !== undefined) payload.start = params.start?.trim() ?? null;
+  if (params.end !== undefined) payload.end = params.end?.trim() ?? null;
+  return callSidecar("previewChapter", payload, opts);
+}
+
+export async function getSelectors(
+  params: { url?: string; site?: string },
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  const payload: Record<string, unknown> = {};
+  if (params.url) payload.url = params.url.trim();
+  if (params.site) payload.site = params.site.trim().toLowerCase().replace(/\/$/, "");
+  return callSidecar("getSelectors", payload, opts);
+}
+
+export async function saveSelectors(
+  params: { url?: string; site?: string; start: string | null; end: string | null },
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  const payload: Record<string, unknown> = {};
+  if (params.url) payload.url = params.url.trim();
+  if (params.site) payload.site = params.site.trim();
+  if (params.start !== undefined) payload.start = params.start?.trim() ?? null;
+  if (params.end !== undefined) payload.end = params.end?.trim() ?? null;
+  return callSidecar("saveSelectors", payload, opts);
+}
+
+export async function clearSelectors(
+  params: { url?: string; site?: string },
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  const payload: Record<string, unknown> = {};
+  if (params.url) payload.url = params.url.trim();
+  if (params.site) payload.site = params.site.trim();
+  return callSidecar("clearSelectors", payload, opts);
+}
+
 // Type guards for fetchChapter(s) responses — strict shape
 export function isFetchChapterResult(res: RpcResponse): boolean {
   if (!res.result || typeof res.result !== "object") return false;
@@ -232,4 +295,14 @@ export function isFetchChaptersResult(res: RpcResponse): boolean {
   if (!res.result || typeof res.result !== "object") return false;
   const r = res.result as Record<string, unknown>;
   return Array.isArray(r.chapters) && typeof r.total === "number" && typeof r.skipped === "number";
+}
+export function isPreviewResult(res: RpcResponse): boolean {
+  if (!res.result || typeof res.result !== "object") return false;
+  const r = res.result as Record<string, unknown>;
+  return typeof r.html === "string" && typeof r.text === "string" && typeof r.originalHtml === "string";
+}
+export function isSelectorsResult(res: RpcResponse): boolean {
+  if (!res.result || typeof res.result !== "object") return false;
+  const r = res.result as Record<string, unknown>;
+  return typeof r.site === "string" && "start" in r && "end" in r;
 }

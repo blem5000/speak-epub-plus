@@ -878,6 +878,249 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
                 return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
         return _handle_list_chapters_count(rid, url)
 
+    # Preview & selector boundary — AD-7 (Story 2.2)
+    if method in ("getSelectors", "previewChapter", "saveSelectors", "clearSelectors"):
+        import re as _re3
+        from urllib.parse import urlparse as _urlparse3
+
+        def _site_from_url(u: str) -> str | None:
+            try:
+                p = _urlparse3(u.strip())
+                host = (p.hostname or "").lower().rstrip(".")
+                if host and host.startswith("www."):
+                    host = host[4:]
+                return host or None
+            except Exception:
+                return None
+
+        # Dynamic import adapter + clean
+        try:
+            import importlib as _il5
+
+            _mod5 = _il5.import_module("adapters.novelphoenix")
+            NovelPhoenixAdapter5 = getattr(_mod5, "NovelPhoenixAdapter")
+            _cmod = _il5.import_module("core.clean")
+            resolve_selectors_fn = getattr(_cmod, "resolve_selectors")
+            clean_html_fn = getattr(_cmod, "clean_html")
+            load_overrides_fn = getattr(_cmod, "load_overrides")
+            save_overrides_fn = getattr(_cmod, "save_overrides")
+            clear_overrides_fn = getattr(_cmod, "clear_overrides")
+        except Exception as e:
+            return {"id": rid, "error": {"code": "IMPORT_FAILED", "message": str(e)}}
+
+        params = request.get("params")
+        url_param: Any = None
+        site_param: Any = None
+        start_param: Any = None
+        end_param: Any = None
+        if isinstance(params, dict):
+            url_param = params.get("url", params.get("link", params.get("href")))
+            site_param = params.get("site", params.get("hostname", params.get("host")))
+            start_param = params.get("start", params.get("startSelector", params.get("selectorStart")))
+            end_param = params.get("end", params.get("endSelector", params.get("selectorEnd")))
+            # also handle start/end inside selectors dict
+            sel_dict = params.get("selectors")
+            if isinstance(sel_dict, dict):
+                start_param = sel_dict.get("start", start_param)
+                end_param = sel_dict.get("end", end_param)
+        elif isinstance(params, str):
+            url_param = params
+
+        # helper to resolve site — normalize www. strip for canonical overrides/<site>.json
+        def _resolve_site() -> str | None:
+            if isinstance(url_param, str) and url_param.strip():
+                s = _site_from_url(url_param.strip())
+                if s:
+                    return s
+            if isinstance(site_param, str) and site_param.strip():
+                host = site_param.strip().lower().rstrip(".")
+                if host.startswith("www."):
+                    host = host[4:]
+                return host
+            return None
+
+        if method == "getSelectors":
+            site = _resolve_site()
+            if not site:
+                # fallback to novelphoenix default
+                site = "novelphoenix.com"
+            # validate host if url provided
+            if isinstance(url_param, str) and url_param.strip():
+                if not _re3.match(r"^https?://", url_param.strip(), _re3.I):
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must be http(s)"}}
+                try:
+                    p = _urlparse3(url_param.strip())
+                    host = (p.hostname or "").lower().rstrip(".")
+                    if not host:
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must contain host"}}
+                    allowed = host == "novelphoenix.com" or host == "www.novelphoenix.com" or host.endswith(".novelphoenix.com")
+                    if not allowed:
+                        return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {host}"}}
+                except Exception as e:
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+            try:
+                adapter = NovelPhoenixAdapter5()
+                default_sel = adapter.getSelectors()
+                site_key = site
+                ov = load_overrides_fn(site_key)
+                # resolve effective
+                eff = resolve_selectors_fn(adapter)  # uses override if exists
+                return {"id": rid, "result": {
+                    "site": site_key,
+                    "start": eff.start,
+                    "end": eff.end,
+                    "defaultStart": getattr(default_sel, "start", None),
+                    "defaultEnd": getattr(default_sel, "end", None),
+                    "override": {"start": ov.start, "end": ov.end} if ov else None,
+                }}
+            except Exception as e:
+                return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+        if method == "previewChapter":
+            # requires url
+            if not isinstance(url_param, str) or not url_param.strip():
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must be non-empty"}}
+            url_param = url_param.strip()
+            if not _re3.match(r"^https?://", url_param, _re3.I):
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must be http(s)"}}
+            try:
+                p = _urlparse3(url_param)
+                host = (p.hostname or "").lower().rstrip(".")
+                if not host:
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must contain host"}}
+                allowed = host == "novelphoenix.com" or host == "www.novelphoenix.com" or host.endswith(".novelphoenix.com")
+                if not allowed:
+                    return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {host}"}}
+            except Exception as e:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+            # normalize start/end (None if empty string)
+            start_eff: str | None = None
+            end_eff: str | None = None
+            if isinstance(start_param, str):
+                start_eff = start_param.strip() or None
+            elif start_param is None:
+                start_eff = None
+            else:
+                start_eff = str(start_param).strip() or None if start_param is not None else None
+            if isinstance(end_param, str):
+                end_eff = end_param.strip() or None
+            elif end_param is None:
+                end_eff = None
+            else:
+                end_eff = str(end_param).strip() or None if end_param is not None else None
+            # if not provided, use resolved selectors from override/default
+            if start_eff is None and end_eff is None:
+                try:
+                    adapter_tmp = NovelPhoenixAdapter5()
+                    eff = resolve_selectors_fn(adapter_tmp)
+                    start_eff = eff.start
+                    end_eff = eff.end
+                except Exception:
+                    start_eff = "div#chapter-content"
+                    end_eff = None
+            # get raw html from cache (AD-9) or fallback fetch
+            raw_html: str | None = None
+            try:
+                import importlib as _il6
+                _fmod = _il6.import_module("core.fetch")
+                read_cache_fn = getattr(_fmod, "read_cache")
+                raw_html = read_cache_fn(url_param)
+            except Exception:
+                raw_html = None
+            if raw_html is None:
+                # fallback: try adapters._http._get raw fetch without cache (no write)
+                try:
+                    from adapters._http import _get as _http_get
+
+                    resp = _http_get(url_param, timeout=12, retries=2)
+                    raw_html = resp.text or ""
+                except Exception as e:
+                    return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"no cache and fetch failed: {e}"}}
+                if not raw_html:
+                    return {"id": rid, "error": {"code": "LIST_FAILED", "message": "empty html"}}
+            # clean via core.clean
+            try:
+                cleaned_html, cleaned_text = clean_html_fn(raw_html, start_eff, end_eff)
+            except ValueError as ve:
+                # invalid selector -> return error with code VALUE_ERROR for GUI muted
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(ve)}}
+            except Exception as e:
+                return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+            # also provide original cleaned via default? For diff, original is raw stripped of scripts but not isolated? We return raw snippet for Original tab = raw limited
+            original_text = ""
+            try:
+                from bs4 import BeautifulSoup as _BS
+                _soup = _BS(raw_html, "lxml")
+                for tag in _soup(["script", "style"]):
+                    tag.decompose()
+                original_text = _soup.get_text(separator=" ", strip=True)
+                original_text = _re3.sub(r"\s+", " ", original_text).strip()
+                # truncate original for preview? keep full for diff
+            except Exception:
+                original_text = ""
+            return {"id": rid, "result": {
+                "url": url_param,
+                "originalHtml": raw_html,
+                "originalText": original_text[:8000],
+                "html": cleaned_html,
+                "text": cleaned_text,
+                "start": start_eff,
+                "end": end_eff,
+            }}
+
+        if method == "saveSelectors":
+            site = _resolve_site()
+            if not site:
+                site = "novelphoenix.com"
+            # host allowlist even for site-only save (prevent arbitrary override)
+            allowed_site = site == "novelphoenix.com" or site.endswith(".novelphoenix.com")
+            if not allowed_site:
+                return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {site}"}}
+            # validate start/end selectors syntax by trying soup.select_one dummy (optional) — but delegate to clean validation
+            s_start: str | None = None
+            s_end: str | None = None
+            if isinstance(start_param, str):
+                s_start = start_param.strip() or None
+            if isinstance(end_param, str):
+                s_end = end_param.strip() or None
+            # need at least one?
+            if s_start is None and s_end is None:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "start or end required"}}
+            # validate selectors by test parse (invalid -> VALUE_ERROR)
+            try:
+                from bs4 import BeautifulSoup as _BS2
+                _dummy = _BS2("<div></div>", "lxml")
+                if s_start is not None:
+                    _dummy.select_one(s_start)
+                if s_end is not None:
+                    _dummy.select_one(s_end)
+            except Exception as e:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid selector: {e}"}}
+            # validate host if url provided
+            if isinstance(url_param, str) and url_param.strip():
+                if not _re3.match(r"^https?://", url_param.strip(), _re3.I):
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must be http(s)"}}
+            try:
+                from core.ports import Selectors as _Sel
+                sel = _Sel(start=s_start, end=s_end)
+                save_overrides_fn(site, sel)
+                return {"id": rid, "result": {"saved": True, "site": site, "start": sel.start, "end": sel.end}}
+            except Exception as e:
+                return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+        if method == "clearSelectors":
+            site = _resolve_site()
+            if not site:
+                site = "novelphoenix.com"
+            allowed_site = site == "novelphoenix.com" or site.endswith(".novelphoenix.com")
+            if not allowed_site:
+                return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {site}"}}
+            try:
+                cleared = clear_overrides_fn(site)
+                return {"id": rid, "result": {"cleared": cleared, "site": site}}
+            except Exception as e:
+                return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
     # For future methods, indicate mock only
     return {
         "id": rid,
