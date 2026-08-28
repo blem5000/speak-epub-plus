@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { t, getLocale, setLocale } from "./i18n";
-import { callSidecar } from "./lib/sidecar";
+import { buildEpub, callSidecar, isEpubResult, type EpubResult } from "./lib/sidecar";
 import FindInput from "./components/FindInput";
 import ResultsTable from "./components/ResultsTable";
 import ChapterList from "./components/ChapterList";
 import Preview from "./components/Preview";
 import Filters from "./components/Filters";
+import Result from "./components/Result";
 import { useChapterList } from "./hooks/useChapterList";
 import { useDebouncedSearch } from "./hooks/useDebouncedSearch";
 import { useFetcher } from "./hooks/useFetcher";
@@ -196,8 +197,22 @@ export default function App(): JSX.Element {
   const showChapterEmpty = hasSelectedUrl && !chapterLoading && !chapterError && chapterList.length === 0;
 
   // Fetcher — polite sequential, cache resume, throttle badge
-  const { fetching, logs, throttle, statuses, badge, error: fetcherError, start: startFetcher } = useFetcher();
+  const { fetching, logs, throttle, statuses, badge, error: fetcherError, start: startFetcher, appendLogs, setStatuses } = useFetcher();
   const N = chapterList.length;
+
+  // EPUB Result — Story 2.4
+  const [epubResult, setEpubResult] = useState<EpubResult | null>(null);
+  const [epubBuilding, setEpubBuilding] = useState(false);
+  const [epubError, setEpubError] = useState<string | null>(null);
+  const [epubMissing, setEpubMissing] = useState<string[] | null>(null);
+  const logPaneRef = useRef<HTMLDivElement>(null);
+
+  // auto-scroll log pane when logs change (reuse queue logic)
+  useEffect(() => {
+    if (logPaneRef.current) {
+      logPaneRef.current.scrollTop = logPaneRef.current.scrollHeight;
+    }
+  }, [logs]);
   const selectedUrlsForFetch = (() => {
     if (selected.size > 0) {
       return chapterList.filter((ch) => selected.has(ch.index)).map((ch) => ch.url);
@@ -216,11 +231,122 @@ export default function App(): JSX.Element {
     if (!hasSelectedUrl || chapterLoading || N === 0 || fetching) return;
     const urls = selectedUrlsForFetch;
     if (urls.length === 0) return;
-    // Determine from/to for badge: use current from/to, if open-ended to is N means not bounded?
-    // For open-ended detection, if to === N and selected includes tail, still bounded; open-ended is when to is null/undefined
-    // Here we pass from/to for backend to handle bounded vs open-ended re-validate
     void startFetcher({ urls, novelUrl: selectedUrl ?? undefined, from, to });
   };
+
+  // EPUB build — Story 2.4
+  const selectedResult = results.find((r) => r.url === selectedUrl) ?? null;
+  const buildTitle = selectedResult?.title ?? chapterList[0]?.title ?? "book";
+  const buildAuthor = (selectedResult as unknown as { author?: string })?.author ?? null;
+  const canBuild = !!(hasSelectedUrl && !chapterLoading && N > 0 && !fetching && !epubBuilding);
+
+  const handleBuildEpub = useCallback(async (): Promise<void> => {
+    if (!canBuild) return;
+    const urls = selectedUrlsForFetch;
+    if (urls.length === 0) return;
+    setEpubBuilding(true);
+    setEpubError(null);
+    setEpubMissing(null);
+    // mark cleaning for each chapter in range
+    const fromC = Math.max(1, Math.min(from, N));
+    const toC = Math.max(1, Math.min(to, N));
+    const lo = Math.min(fromC, toC);
+    const hi = Math.max(fromC, toC);
+    // set all in range to cleaning — only existing indices
+    setStatuses((prev) => {
+      const next = { ...prev };
+      const existing = new Set(chapterList.map((c) => c.index));
+      for (let i = lo; i <= hi; i++) {
+        if (!existing.has(i)) continue;
+        if (selectedUrlsForFetch.some((u) => chapterList.find((c) => c.url === u && c.index === i))) {
+          next[i] = "cleaning";
+        } else if (selected.size === 0) {
+          next[i] = "cleaning";
+        }
+      }
+      return next;
+    });
+    appendLogs([`building epub ${lo}->${hi}`, `cleaning chapter ${lo}`]);
+    try {
+      const res = await buildEpub({
+        novelUrl: selectedUrl ?? "",
+        from: lo,
+        to: hi,
+        title: buildTitle,
+        author: buildAuthor ?? undefined,
+        coverUrl: chapterCover ?? undefined,
+        urls,
+      });
+      if (res.error) {
+        const code = res.error.code;
+        const msg = res.error.message;
+        if (code === "CACHE_MISS") {
+          const missing = (res.error as unknown as { missing?: string[] }).missing ?? [];
+          setEpubMissing(missing);
+          setEpubError(`CACHE_MISS: ${msg}`);
+          const missLogs = missing.length > 0 ? missing.map((m) => `cache miss ${m}`) : [`cache miss ${msg}`];
+          appendLogs([...missLogs, `CACHE_MISS ${msg}`]);
+          // mark missing as error with per-chapter granularity
+          setStatuses((prev) => {
+            const next = { ...prev };
+            const urlToIdx = new Map<string, number>();
+            for (const ch of chapterList) urlToIdx.set(ch.url, ch.index);
+            let anyMatched = false;
+            for (const mu of missing) {
+              const idx = urlToIdx.get(mu);
+              if (idx !== undefined && next[idx] === "cleaning") {
+                next[idx] = "error";
+                anyMatched = true;
+              }
+            }
+            if (!anyMatched) {
+              for (let i = lo; i <= hi; i++) {
+                if (next[i] === "cleaning") next[i] = "error";
+              }
+            }
+            return next;
+          });
+        } else if (code === "VALUE_ERROR") {
+          setEpubError(`VALUE_ERROR: ${msg}`);
+          appendLogs([`VALUE_ERROR ${msg}`]);
+        } else {
+          setEpubError(`${code}: ${msg}`);
+          appendLogs([`error ${code}: ${msg}`]);
+        }
+        return;
+      }
+      if (isEpubResult(res)) {
+        const data = res.result as unknown as EpubResult;
+        setEpubResult(data);
+        setEpubError(null);
+        // map cleaning->done for built range — only existing
+        setStatuses((prev) => {
+          const next = { ...prev };
+          const existing = new Set(chapterList.map((c) => c.index));
+          for (let i = lo; i <= hi; i++) {
+            if (!existing.has(i)) continue;
+            next[i] = "done";
+          }
+          return next;
+        });
+        const logLines = (data.logs as string[] | undefined) ?? [];
+        if (logLines.length > 0) appendLogs(logLines);
+        else appendLogs([`epub built ${data.path}`, `epubcheck ${data.epubcheck_ok ? "✓" : "✗"}`]);
+        // also log epubcheck
+        if (Array.isArray(data.messages) && data.messages.length > 0) {
+          appendLogs(data.messages.map((m) => `epubcheck ${m}`));
+        }
+      } else {
+        setEpubError("unknown epub result");
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setEpubError(msg);
+      appendLogs([`epub error ${msg}`]);
+    } finally {
+      setEpubBuilding(false);
+    }
+  }, [canBuild, selectedUrl, from, to, buildTitle, buildAuthor, chapterCover, selectedUrlsForFetch, N, chapterList, selected.size, appendLogs, setStatuses]);
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -591,9 +717,10 @@ export default function App(): JSX.Element {
             ) : null}
 
             <div
+              ref={logPaneRef}
               role="log"
               aria-live="polite"
-              aria-busy={fetching}
+              aria-busy={fetching || epubBuilding}
               aria-label="Log pobierania"
               tabIndex={0}
               data-testid="log-pane"
@@ -610,7 +737,21 @@ export default function App(): JSX.Element {
               )}
             </div>
            </section>
-         ) : null}
+          ) : null}
+
+        {/* Result — Story 2.4 EPUB assembly + epubcheck */}
+        <div className="mt-6">
+          <Result
+            result={epubResult}
+            building={epubBuilding}
+            error={epubError}
+            missing={epubMissing}
+            canBuild={canBuild}
+            onBuild={() => void handleBuildEpub()}
+            from={from}
+            to={to}
+          />
+        </div>
 
         {/* Filters — Story 2.3 plain+regex gate */}
         <div className="mt-6">

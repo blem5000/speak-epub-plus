@@ -57,7 +57,7 @@ DEFAULT_STORE: Dict[str, Any] = {
 }
 
 # Simple in-memory cache for listChapters url -> serialized list (FR2) — KEEP per re-review decision
-# Politely caches last 20 url→list to avoid re-fetch same novel; no TTL, LRU evict oldest.
+# Politely caches last 20 url->list to avoid re-fetch same novel; no TTL, LRU evict oldest.
 # Documented exception to Never:cache (Epics2-3) — lightweight chapter list cache is allowed for FR2.
 _CHAPTER_CACHE: Dict[str, Any] = {}
 
@@ -149,8 +149,8 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
 
     Exception note (AD-1): core.config handles `search` / `listChapters` /
     `listChaptersCount` via dynamic importlib import of adapters inside handle_rpc.
-    This preserves GUI→Core→Port→Adapter direction and avoids import-time cycles;
-    static importlinter still sees core→core only. Documented exception for importlinter
+    This preserves GUI->Core->Port->Adapter direction and avoids import-time cycles;
+    static importlinter still sees core->core only. Documented exception for importlinter
     `core-no-adapters` — see .importlinter and pyproject.toml. Dynamic import is
     intentional to keep the contract while allowing the aggregator.
     """
@@ -175,11 +175,11 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
         else:
             title = params
 
-        # Validation without network: empty/whitespace → ValueError
+        # Validation without network: empty/whitespace -> ValueError
         if not isinstance(title, str) or not title.strip():
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "title must be non-empty"}}
         title = title.strip()
-        # Truncate len>300 →200 before request (spec) — strip first
+        # Truncate len>300 ->200 before request (spec) — strip first
         if len(title) > 300:
             title = title[:200]
 
@@ -188,7 +188,7 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
             # reuse listChaptersCount logic for URL
             return _handle_list_chapters_count(rid, title.strip())
 
-        # Title mode → aggregator parallel 5s via search_all + NovelPhoenixAdapter
+        # Title mode -> aggregator parallel 5s via search_all + NovelPhoenixAdapter
         # Local import for aggregator (core->core, allowed). Adapter loaded via
         # importlib to keep static importlinter happy (documented exception).
         try:
@@ -231,11 +231,11 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
                 # explicit no-results mock for test string
                 results = []
         except Exception as e:
-            # 4xx/5xx/timeout → [] per spec, no crash — return empty result
+            # 4xx/5xx/timeout -> [] per spec, no crash — return empty result
             # but ValueError already handled above
             return {"id": rid, "result": []}
 
-        # Serialize SearchResult → JSON-friendly dict with site|title|chapters|link
+        # Serialize SearchResult -> JSON-friendly dict with site|title|chapters|link
         serialized: list[dict[str, Any]] = []
         for r in results:
             try:
@@ -256,7 +256,7 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
         return {"id": rid, "result": serialized}
 
     if method == "listChapters":
-        # Real listChapters — dynamic importlib to preserve GUI→Core→Port→Adapter (AD-1)
+        # Real listChapters — dynamic importlib to preserve GUI->Core->Port->Adapter (AD-1)
         params = request.get("params")
         url: Any = None
         if isinstance(params, dict):
@@ -281,7 +281,7 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
             if not host:
                 return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must contain host"}}
             host_no_port = host  # already stripped
-            # host guard — only novelphoenix allowed for real listChapters; others → LIST_FAILED (jak search spec)
+            # host guard — only novelphoenix allowed for real listChapters; others -> LIST_FAILED (jak search spec)
             allowed = host_no_port == "novelphoenix.com" or host_no_port == "www.novelphoenix.com" or host_no_port.endswith(".novelphoenix.com")
             if not allowed:
                 return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {host_no_port}"}}
@@ -361,7 +361,7 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
         except ValueError as e:
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
         except Exception as e:
-            # Map AdapterError LIST_FAILED → {"error":{"code":"LIST_FAILED",...}} not []
+            # Map AdapterError LIST_FAILED -> {"error":{"code":"LIST_FAILED",...}} not []
             code = getattr(e, "code", None)
             if code == "LIST_FAILED" or "LIST_FAILED" in str(e):
                 return {"id": rid, "error": {"code": "LIST_FAILED", "message": str(e)}}
@@ -372,7 +372,7 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
             return {"id": rid, "error": {"code": "EXCEPTION", "message": msg}}
 
     if method in ("fetchChapter", "fetchChapters", "getCacheStatus"):
-        # AD-1: dynamic import preserves GUI→Core→Port→Adapter, reuse _normalize_cache_key & cache_key from core.fetch
+        # AD-1: dynamic import preserves GUI->Core->Port->Adapter, reuse _normalize_cache_key & cache_key from core.fetch
         import re as _re2
         from urllib.parse import urlparse as _urlparse2
 
@@ -543,7 +543,7 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
             if isinstance(novelUrl, str) and not novelUrl.strip():
                 novelUrl = None
 
-        # ensure tuple → list for downstream fetch_many
+        # ensure tuple -> list for downstream fetch_many
         if isinstance(urls, tuple):
             urls = list(urls)  # type: ignore
         if not urls and not novelUrl:
@@ -1328,6 +1328,447 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
                     sanitized.append({"pattern": pat2, "isRegex": is_r2})
                 save_store({"filters": sanitized})
                 return {"id": rid, "result": {"filters": sanitized, "saved": True}}
+
+    # EPUB Assembly + Result card + epubcheck — Story 2.4
+    if method in ("buildEpub", "build_epub", "buildEPUB"):
+        # AD-1: dynamic import preserves GUI->Core->Port->Adapter
+        import re as _re_epub
+        from urllib.parse import urlparse as _up_epub
+
+        def _site_from_url_epub(u: str) -> str | None:
+            try:
+                p = _up_epub(u.strip())
+                host = (p.hostname or "").lower().rstrip(".")
+                if host and host.startswith("www."):
+                    host = host[4:]
+                return host or None
+            except Exception:
+                return None
+
+        params = request.get("params")
+        # support multiple param shapes: dict with novelUrl/coverUrl/title/author/from/to/outputDir/urls
+        novelUrl: Any = None
+        title_p: Any = None
+        author_p: Any = None
+        coverUrl_p: Any = None
+        from_p: Any = None
+        to_p: Any = None
+        outputDir_p: Any = None
+        urls_p: Any = None
+        # also support generic filters param? core loads from store, so ignore
+        if isinstance(params, dict):
+            novelUrl = params.get("novelUrl", params.get("novel_url", params.get("novelURL", params.get("url", params.get("link")))))
+            title_p = params.get("title", params.get("bookTitle", params.get("book_title")))
+            author_p = params.get("author", params.get("bookAuthor", params.get("authorName")))
+            coverUrl_p = params.get("coverUrl", params.get("cover_url", params.get("cover", params.get("coverURL"))))
+            from_p = params.get("from", params.get("from_idx", params.get("fromIdx", params.get("selection_from", params.get("start")))))
+            to_p = params.get("to", params.get("to_idx", params.get("toIdx", params.get("selection_to", params.get("end")))))
+            outputDir_p = params.get("outputDir", params.get("output_dir", params.get("output", params.get("dir"))))
+            urls_p = params.get("urls", params.get("chapterUrls", params.get("chapter_urls", params.get("links"))))
+            # if novelUrl still None but urls contains first url, infer?
+            if isinstance(urls_p, str):
+                urls_p = [urls_p]
+            if isinstance(urls_p, dict):
+                urls_p = [urls_p]
+            # also handle single url param
+            if novelUrl is None and isinstance(params.get("url"), str):
+                novelUrl = params.get("url")
+        elif isinstance(params, str):
+            novelUrl = params
+        else:
+            novelUrl = None
+
+        if isinstance(novelUrl, str):
+            novelUrl = novelUrl.strip()
+        if not isinstance(novelUrl, str) or not novelUrl:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must be non-empty"}}
+        if not _re_epub.match(r"^https?://", novelUrl, _re_epub.I):
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must be http(s)"}}
+        try:
+            parsed_epub = _up_epub(novelUrl)
+            host_epub = (parsed_epub.hostname or "").lower().rstrip(".")
+            if not host_epub:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must contain host"}}
+            allowed_epub = host_epub == "novelphoenix.com" or host_epub == "www.novelphoenix.com" or host_epub.endswith(".novelphoenix.com")
+            if not allowed_epub:
+                return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {host_epub}"}}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+
+        # sanitize title/author ≤200 chars
+        if isinstance(title_p, str):
+            title_p = title_p.strip()
+            if len(title_p) > 200:
+                title_p = title_p[:200]
+            if not title_p:
+                title_p = None
+        else:
+            title_p = None
+            # fallback title from store? keep None -> slug book
+        if isinstance(author_p, str):
+            author_p = author_p.strip()
+            if len(author_p) > 200:
+                author_p = author_p[:200]
+            if not author_p:
+                author_p = None
+        else:
+            author_p = None
+        # cover_url sanitization
+        if isinstance(coverUrl_p, str):
+            coverUrl_p = coverUrl_p.strip()
+            if not coverUrl_p:
+                coverUrl_p = None
+            elif coverUrl_p.lower().startswith("data:"):
+                # keep but will be skipped in epub build (data-url guard)
+                pass
+            elif not _re_epub.match(r"^https?://", coverUrl_p, _re_epub.I):
+                coverUrl_p = None
+            elif len(coverUrl_p) > 500:
+                coverUrl_p = coverUrl_p[:500]
+        else:
+            coverUrl_p = None
+
+        # from/to parsing with clamp — keep raw for logging
+        def _parse_epub_idx_raw(v):
+            if v is None or v == "":
+                return None
+            try:
+                return int(v)  # type: ignore
+            except Exception:
+                return None
+
+        def _parse_epub_idx(v, default=None):
+            iv = _parse_epub_idx_raw(v)
+            if iv is None:
+                return default
+            if iv < 1:
+                return 1
+            return max(1, min(iv, 100000))
+
+        raw_from = _parse_epub_idx_raw(from_p)
+        raw_to = _parse_epub_idx_raw(to_p)
+        from_idx = _parse_epub_idx(from_p, 1)
+        to_idx = _parse_epub_idx(to_p, None)
+        if from_idx is None:
+            from_idx = 1
+        if to_idx is None:
+            to_idx = from_idx
+        # handle swap if inverted (even before N)
+        if from_idx > to_idx:
+            from_idx, to_idx = to_idx, from_idx
+            if raw_from is not None and raw_to is not None:
+                raw_from, raw_to = raw_to, raw_from
+
+        # Determine N via _CHAPTER_CACHE or adapter listChapters for clamp
+        N: int | None = None
+        chapter_infos_for_clamp: Any = None
+        try:
+            cache_key_epub = _normalize_cache_key(novelUrl)
+            if cache_key_epub in _CHAPTER_CACHE:
+                cached_epub = _CHAPTER_CACHE[cache_key_epub]
+                if isinstance(cached_epub, list):
+                    N = len(cached_epub)
+                    chapter_infos_for_clamp = cached_epub
+        except Exception:
+            pass
+        if N is None:
+            # try adapter listChapters without network fallback? best-effort
+            try:
+                import importlib as _il_epub
+                _mod_epub = _il_epub.import_module("adapters.novelphoenix")
+                AdapterEp = getattr(_mod_epub, "NovelPhoenixAdapter")
+                adapter_ep = AdapterEp()
+                lst_ep = adapter_ep.listChapters(novelUrl)
+                if lst_ep and isinstance(lst_ep, (list, tuple)):
+                    N = len(lst_ep)
+                    chapter_infos_for_clamp = list(lst_ep)
+                    # cache it for future offline
+                    try:
+                        if len(_CHAPTER_CACHE) >= 20:
+                            _CHAPTER_CACHE.pop(next(iter(_CHAPTER_CACHE)))
+                    except Exception:
+                        pass
+                    try:
+                        _CHAPTER_CACHE[cache_key_epub] = [
+                            {"index": getattr(ci, "index", i + 1), "title": getattr(ci, "title", ""), "url": getattr(ci, "url", "")}
+                            for i, ci in enumerate(lst_ep)
+                        ]
+                    except Exception:
+                        pass
+            except Exception:
+                N = None
+
+        # clamp to N if known — use raw for original log to show 0->1
+        logs_epub: List[str] = []
+        if N is not None:
+            # orig for log is raw if available else from_idx
+            orig_from_log = raw_from if raw_from is not None else from_idx
+            orig_to_log = raw_to if raw_to is not None else to_idx
+            clamped_from = max(1, min(from_idx, N))
+            clamped_to = max(1, min(to_idx, N))
+            if clamped_from > clamped_to:
+                clamped_from, clamped_to = clamped_to, clamped_from
+            if clamped_from != orig_from_log or clamped_to != orig_to_log:
+                logs_epub.append(f"clamped {orig_from_log}->{clamped_from}, {orig_to_log}->{clamped_to}")
+            from_idx, to_idx = clamped_from, clamped_to
+            # also show raw clamp if from was 0? ensure log shows 0->1
+            # if raw was 0 and clamped is 1, above handles
+        else:
+            if (to_idx - from_idx) > 500:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "range too large (max 500 without cache)"}}
+            # still ensure within 1..100000 and swap already done
+
+        # Handle urls_p normalization
+        desired_urls_norm: List[str] | None = None
+        if isinstance(urls_p, (list, tuple)) and len(urls_p) > 0:
+            cleaned_urls: List[str] = []
+            for u in urls_p:  # type: ignore
+                if isinstance(u, str) and u.strip():
+                    cleaned_urls.append(u.strip())
+                elif isinstance(u, dict):
+                    uu = u.get("url") or u.get("link") or u.get("href")
+                    if isinstance(uu, str) and uu.strip():
+                        cleaned_urls.append(uu.strip())
+            # dedup preserve order
+            try:
+                cleaned_urls = list(dict.fromkeys(cleaned_urls))
+            except Exception:
+                pass
+            if not cleaned_urls:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "urls empty after trim/dedup"}}
+            # validate each url host allowlist
+            for u in cleaned_urls:
+                if not _re_epub.match(r"^https?://", u, _re_epub.I):
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"url must be http(s) {u}"}}
+                try:
+                    p2 = _up_epub(u)
+                    h2 = (p2.hostname or "").lower().rstrip(".")
+                    if not h2:
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"url must contain host {u}"}}
+                    allowed2 = h2 == "novelphoenix.com" or h2 == "www.novelphoenix.com" or h2.endswith(".novelphoenix.com")
+                    if not allowed2:
+                        return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {h2}"}}
+                except Exception as e:
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+            # If cleaned urls length mismatch with from/to, we keep as is but ensure chapter_count = len
+            # For filename we keep from_idx/to_idx as clamped above, but also could infer from urls length?
+            desired_urls_norm = cleaned_urls
+            # If urls provided, chapter count is len(desired_urls_norm), but from/to remain for naming
+            # Ensure from/to reflect actual urls count if N unknown? Keep original clamped.
+        else:
+            desired_urls_norm = None
+
+        # If desired_urls_norm is None, we will derive via chapter_infos_for_clamp or synthetic inside epub
+        # But we need to do CACHE_MISS check before calling epub if we have derived urls
+        # For urls provided, check missing now
+        if desired_urls_norm is not None:
+            # check missing via core.fetch.read_cache
+            try:
+                import importlib as _il_fetch_epub
+                _fmod_epub = _il_fetch_epub.import_module("core.fetch")
+                read_cache_epub = getattr(_fmod_epub, "read_cache")
+            except Exception as e:
+                return {"id": rid, "error": {"code": "IMPORT_FAILED", "message": str(e)}}
+            missing_urls: List[str] = []
+            for u in desired_urls_norm:
+                try:
+                    rc = read_cache_epub(u)
+                except Exception:
+                    rc = None
+                if rc is None:
+                    missing_urls.append(u)
+            if missing_urls:
+                for mu in missing_urls:
+                    logs_epub.append(f"cache miss {mu}")
+                return {"id": rid, "error": {"code": "CACHE_MISS", "message": f"cache miss {len(missing_urls)}", "missing": missing_urls}}
+        else:
+            # derive desired via chapter_infos_for_clamp or synthetic for missing check?
+            # We'll let core.epub.build_epub handle missing check, but we can pre-check by asking fetch for each index url
+            # Build synthetic list for pre-check
+            synthetic_for_check: List[str] = []
+            if chapter_infos_for_clamp is not None and isinstance(chapter_infos_for_clamp, list):
+                # map index->url
+                idx_to_url_check: Dict[int, str] = {}
+                for item in chapter_infos_for_clamp:  # type: ignore
+                    try:
+                        if isinstance(item, dict):
+                            idx = item.get("index")
+                            url = item.get("url") or item.get("link")
+                        else:
+                            idx = getattr(item, "index", None)
+                            url = getattr(item, "url", None)
+                        if idx is not None and url:
+                            idx_to_url_check[int(idx)] = str(url).strip()
+                    except Exception:
+                        continue
+                for idx in range(from_idx, to_idx + 1):
+                    if idx in idx_to_url_check:
+                        synthetic_for_check.append(idx_to_url_check[idx])
+                    else:
+                        synthetic_for_check.append(f"{novelUrl.rstrip('/')}/chapter/{idx}")
+            else:
+                for idx in range(from_idx, to_idx + 1):
+                    synthetic_for_check.append(f"{novelUrl.rstrip('/')}/chapter/{idx}")
+            # check missing
+            try:
+                import importlib as _il_fetch2
+                _fmod2 = _il_fetch2.import_module("core.fetch")
+                read_cache2 = getattr(_fmod2, "read_cache")
+            except Exception as e:
+                return {"id": rid, "error": {"code": "IMPORT_FAILED", "message": str(e)}}
+            missing2: List[str] = []
+            for u in synthetic_for_check:
+                try:
+                    rc2 = read_cache2(u)
+                except Exception:
+                    rc2 = None
+                if rc2 is None:
+                    missing2.append(u)
+            if missing2:
+                for mu in missing2:
+                    logs_epub.append(f"cache miss {mu}")
+                return {"id": rid, "error": {"code": "CACHE_MISS", "message": f"cache miss {len(missing2)}", "missing": missing2}}
+
+        # Load filters from store (core filters)
+        # outputDir handling: if not provided, use ./output
+        if isinstance(outputDir_p, str):
+            outputDir_p = outputDir_p.strip() or None
+            if isinstance(outputDir_p, str) and outputDir_p:
+                if ".." in outputDir_p or "\0" in outputDir_p:
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "outputDir invalid"}}
+        elif outputDir_p is not None and not isinstance(outputDir_p, (str, Path)):
+            outputDir_p = str(outputDir_p)
+            if ".." in outputDir_p or "\0" in outputDir_p:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "outputDir invalid"}}
+
+        # Dynamic import core.epub build
+        try:
+            import importlib as _il_epub_build
+            _epub_mod = _il_epub_build.import_module("core.epub")
+            build_epub_fn = getattr(_epub_mod, "build_epub")
+        except Exception as e:
+            return {"id": rid, "error": {"code": "IMPORT_FAILED", "message": str(e)}}
+
+        # KeepEPUB from store (AD-10) — file still written per build, but reflect
+        try:
+            store_keep = load_store()
+            keep_epub_val = store_keep.get("keepEPUB", True)
+        except Exception:
+            keep_epub_val = True
+
+        try:
+            # call build_epub with chapter_urls if we have desired_urls_norm
+            result_epub = build_epub_fn(
+                novel_url=novelUrl,
+                from_idx=from_idx,
+                to_idx=to_idx,
+                title=title_p,
+                author=author_p,
+                cover_url=coverUrl_p,
+                output_dir=outputDir_p or "output",
+                filters=None,  # let epub load from store
+                chapter_urls=desired_urls_norm,
+            )
+            # result_epub contains path,size,chapter_count,epubcheck_ok,messages,logs
+            # merge our clamp logs
+            if logs_epub:
+                # prepend clamp logs
+                existing_logs = result_epub.get("logs", [])
+                result_epub["logs"] = logs_epub + existing_logs
+            # ensure keepEPUB reflected
+            result_epub["keepEPUB"] = bool(keep_epub_val)
+            # Map per-chapter cleaning->done for GUI via logs already
+            # Return result with badge handling
+            return {"id": rid, "result": result_epub}
+        except Exception as e:
+            code = getattr(e, "code", None)
+            if code == "CACHE_MISS":
+                # try to extract missing from exception
+                msg = str(e)
+                # try to get missing attribute if exists
+                missing_attr = getattr(e, "missing", None)
+                if missing_attr is None:
+                    # fallback to synthetic missing already computed?
+                    missing_attr = []
+                return {"id": rid, "error": {"code": "CACHE_MISS", "message": msg, "missing": missing_attr if isinstance(missing_attr, list) else []}}
+            if isinstance(e, ValueError):
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+            if code == "LIST_FAILED":
+                return {"id": rid, "error": {"code": "LIST_FAILED", "message": str(e)}}
+            # epubcheck dirty is not error, should have been returned as ok false
+            # For other exceptions, map to EXCEPTION
+            msg2 = str(e)
+            if "VALUE_ERROR" in msg2:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": msg2}}
+            if "CACHE_MISS" in msg2:
+                return {"id": rid, "error": {"code": "CACHE_MISS", "message": msg2}}
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": msg2}}
+
+    if method in ("getEpubStatus", "get_epub_status"):
+        params = request.get("params") or {}
+        if not isinstance(params, dict):
+            params = {}
+        novelUrl = params.get("novelUrl", params.get("novel_url", params.get("url")))
+        from_p = params.get("from", params.get("from_idx", params.get("fromIdx")))
+        to_p = params.get("to", params.get("to_idx", params.get("toIdx")))
+        outputDir_p = params.get("outputDir", params.get("output_dir", params.get("output")))
+        if isinstance(outputDir_p, str) and outputDir_p:
+            if ".." in outputDir_p or "\0" in outputDir_p:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "outputDir invalid"}}
+        # try to locate latest epub file for that novel
+        try:
+            import re as _re_stat
+            from pathlib import Path as _Path_stat
+
+            base_dir = _Path_stat(outputDir_p) if isinstance(outputDir_p, (str, _Path_stat)) and str(outputDir_p).strip() else _Path_stat("output")
+            if not base_dir.exists():
+                return {"id": rid, "result": {"exists": False, "path": None}}
+            # Find most recent .epub file
+            candidates = list(base_dir.glob("*.epub"))
+            if not candidates:
+                # also check subdirs?
+                candidates = list(base_dir.rglob("*.epub"))
+            if not candidates:
+                return {"id": rid, "result": {"exists": False, "path": None}}
+            # filter by novelUrl slug if possible
+            # Use title slug? just return latest by mtime
+            try:
+                latest = max(candidates, key=lambda p: p.stat().st_mtime)
+                size = latest.stat().st_size
+            except OSError:
+                return {"id": rid, "result": {"exists": False, "path": None}}
+            # Try to check epub validity
+            try:
+                import importlib as _il_stat
+                _epub_mod_stat = _il_stat.import_module("core.epub")
+                run_check = getattr(_epub_mod_stat, "run_epubcheck")
+                ok, msgs = run_check(latest)
+            except Exception:
+                ok, msgs = True, []
+            return {"id": rid, "result": {"exists": True, "path": str(latest), "size": size, "epubcheck_ok": ok, "messages": msgs}}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+    if method in ("getStore", "get_store", "getConfig"):
+        try:
+            data = load_store()
+            return {"id": rid, "result": data}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+    if method in ("setStore", "saveStore", "patchStore"):
+        params = request.get("params") or {}
+        if not isinstance(params, dict):
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "patch must be dict"}}
+        # allow keepEPUB etc.
+        try:
+            # sanitize keepEPUB bool if present?
+            if "keepEPUB" in params:
+                params["keepEPUB"] = bool(params["keepEPUB"])
+            saved = save_store(params)
+            return {"id": rid, "result": saved}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
 
     # For future methods, indicate mock only
     return {

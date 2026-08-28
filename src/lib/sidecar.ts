@@ -348,6 +348,88 @@ export async function saveFilters(
   return callSidecar("saveFilters", { filters: sanitized }, opts);
 }
 
+// EPUB — Story 2.4 buildEpub gate
+export type EpubParams = {
+  novelUrl: string;
+  from?: number | null;
+  to?: number | null;
+  title?: string | null;
+  author?: string | null;
+  coverUrl?: string | null;
+  outputDir?: string | null;
+  urls?: string[];
+};
+export type EpubResult = {
+  path: string;
+  size: number;
+  chapter_count: number;
+  epubcheck_ok: boolean;
+  epubcheck_proxy?: boolean;
+  messages: string[];
+  logs?: string[];
+  keepEPUB?: boolean;
+  from?: number;
+  to?: number;
+  slug?: string;
+};
+
+export async function buildEpub(
+  params: EpubParams,
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  if (!params.novelUrl || !params.novelUrl.trim()) throw new Error("url must be non-empty");
+  const novelUrl = params.novelUrl.trim();
+  if (!/^https?:\/\//i.test(novelUrl)) throw new Error("url must be http(s)");
+  // trim url/title sanitization
+  const payload: Record<string, unknown> = { novelUrl };
+  if (params.from !== undefined && params.from !== null) payload.from = Math.trunc(Number(params.from));
+  if (params.to !== undefined && params.to !== null) payload.to = Math.trunc(Number(params.to));
+  if (params.title !== undefined && params.title !== null) {
+    const t = String(params.title).trim();
+    payload.title = t.slice(0, 200);
+  }
+  if (params.author !== undefined && params.author !== null) {
+    const a = String(params.author).trim();
+    payload.author = a.slice(0, 200);
+  }
+  if (params.coverUrl !== undefined && params.coverUrl !== null) {
+    const c = String(params.coverUrl).trim();
+    if (c) payload.coverUrl = c.slice(0, 500);
+  }
+  if (params.outputDir) {
+    const od = String(params.outputDir).trim();
+    if (od.includes("..") || od.includes("\0")) throw new Error("outputDir invalid");
+    payload.outputDir = od;
+  }
+  if (params.urls) {
+    if (!Array.isArray(params.urls)) throw new Error("urls must be array");
+    if (params.urls.length > 1000) throw new Error("too many urls");
+    if (!params.urls.every((u) => typeof u === "string")) throw new Error("urls must be strings");
+    const cleaned = params.urls.map((u) => u.trim()).filter(Boolean);
+    if (cleaned.length === 0) throw new Error("urls empty after trim");
+    payload.urls = cleaned;
+  }
+  return callSidecar("buildEpub", payload, opts);
+}
+
+export async function getEpubStatus(
+  params: { novelUrl?: string; from?: number; to?: number; outputDir?: string },
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  return callSidecar("getEpubStatus", params, opts);
+}
+
+export async function getStore(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
+  return callSidecar("getStore", {}, opts);
+}
+
+export async function setStore(
+  patch: Record<string, unknown>,
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  return callSidecar("setStore", patch, opts);
+}
+
 // Type guards for fetchChapter(s) responses — strict shape
 export function isFetchChapterResult(res: RpcResponse): boolean {
   if (!res.result || typeof res.result !== "object") return false;
@@ -373,4 +455,18 @@ export function isFiltersResult(res: RpcResponse): boolean {
   if (!res.result || typeof res.result !== "object") return false;
   const r = res.result as Record<string, unknown>;
   return Array.isArray(r.filters);
+}
+export function isEpubResult(res: RpcResponse): boolean {
+  if (!res.result || typeof res.result !== "object") return false;
+  const r = res.result as Record<string, unknown>;
+  const hasPath = typeof r.path === "string";
+  const hasSize = typeof r.size === "number";
+  const hasEpubCheck =
+    typeof r.epubcheck_ok === "boolean" ||
+    typeof (r as Record<string, unknown>).epubcheckOk === "boolean";
+  const hasCount =
+    typeof (r as Record<string, unknown>).chapter_count === "number" ||
+    typeof (r as Record<string, unknown>).chapterCount === "number";
+  const hasMessages = Array.isArray(r.messages);
+  return hasPath && hasSize && hasEpubCheck && hasCount && hasMessages;
 }

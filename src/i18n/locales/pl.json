@@ -62,5 +62,20 @@
   "results.region": "Wyniki wyszukiwania",
   "results.selectedLabel": "Wybrano",
   "find.title": "Znajdź",
-  "toast.searchFailed": "Wyszukiwanie nie powiodło się"
+  "toast.searchFailed": "Wyszukiwanie nie powiodło się",
+  "result.title": "Wynik EPUB",
+  "result.building": "Budowanie EPUB…",
+  "result.path": "Ścieżka",
+  "result.size": "Rozmiar",
+  "result.epubcheckOk": "epubcheck ✓ czysto",
+  "result.epubcheckProxy": "epubcheck ~ proxy",
+  "result.epubcheckFail": "epubcheck ✗ błąd",
+  "result.openFolder": "Otwórz folder",
+  "result.keepEpub": "Zachowaj EPUB",
+  "result.keepEpubSaved": "Zapisano",
+  "result.cacheMiss": "Brak w cache — uruchom fetcher",
+  "result.notBuilt": "Nie zbudowano",
+  "result.chaptersCount": "{count} rozdziałów",
+  "result.buildEpub": "Buduj EPUB",
+  "queue.cleaning": "Czyszczenie"
 }

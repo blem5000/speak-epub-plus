@@ -21,6 +21,10 @@ export type UseFetcherReturn = {
   error: string | null;
   start: (params: { urls?: string[]; novelUrl?: string; from?: number | null; to?: number | null }) => Promise<void>;
   abort: () => void;
+  setLogs: React.Dispatch<React.SetStateAction<string[]>>;
+  setStatuses: React.Dispatch<React.SetStateAction<Record<number, FetcherStatus>>>;
+  appendLogs: (lines: string[]) => void;
+  setStatus: (chapter: number, status: FetcherStatus) => void;
 };
 
 export function useFetcher(): UseFetcherReturn {
@@ -242,6 +246,15 @@ export function useFetcher(): UseFetcherReturn {
     []
   );
 
+  const appendLogs = useCallback((lines: string[]) => {
+    if (lines.length === 0) return;
+    setLogs((prev) => [...prev, ...lines].slice(-200));
+  }, []);
+
+  const setStatus = useCallback((chapter: number, status: FetcherStatus) => {
+    setStatuses((prev) => ({ ...prev, [chapter]: status }));
+  }, []);
+
   // cleanup on unmount
   useEffect(() => {
     return () => {
@@ -249,5 +262,5 @@ export function useFetcher(): UseFetcherReturn {
     };
   }, []);
 
-  return { fetching, logs, throttle, statuses, badge, error, start, abort };
+  return { fetching, logs, throttle, statuses, badge, error, start, abort, setLogs, setStatuses, appendLogs, setStatus };
 }

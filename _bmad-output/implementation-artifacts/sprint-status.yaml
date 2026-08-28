@@ -1,0 +1,106 @@
+﻿# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created, ready for development
+#   - in-progress: Developer actively working on implementation
+#   - review: Implementation complete, ready for review
+#   - done: Story completed
+
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when its first story starts (via build's sprint sync)
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates the next story after the previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; the status view surfaces open ones
+generated: 08-27-2026 07:30
+last_updated: 08-28-2026 11:30
+project: speak epub
+project_key: NOKEY
+tracking_system: file-system
+story_location: C:\Users\admin\Documents\programowanie\speak 
+  epub\_bmad-output\implementation-artifacts
+development_status:
+  epic-1: done
+  1-1-scaffold-tauri-python-sidecar-scraperport-tokeny: done
+  1-2-adapter-novelphoenix-search-listchapters-cover-metadata: done
+  1-3-powierzchnia-find-input-agregator-tabela-wynikÃ³w: done
+  1-4-powierzchnia-chapter-list-from-to-checkboxes: done
+  epic-1-retrospective: done
+
+  epic-2: in-progress
+  2-1-polite-fetcher-cache-adaptive-429-resume: done
+  2-2-content-boundary-selektory-per-adapter-heuristic-preview-kor: done
+  2-3-filtry-plain-regex-na-etapie-epub-build: done
+  2-4-epub-assembly-result-card-epubcheck: done
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-tts-chunking-partjob-queue-ratyfikacja-brownfield: backlog
+  3-2-edge-tts-parallel-2-3-retries-_parts-skip: backlog
+  3-3-ffmpeg-merge-per-chapter-single-m4b-z-markerami: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog
+  4-1-live-queue-expansion-event-bus-throttle-badge-log: backlog
+  4-2-settings-form-persist-store-json-i18n-auto-detect: backlog
+  4-3-filters-window-peÅ‚ny-integracja-z-preview-epub-gate: backlog
+  4-4-state-treatments-a11y-aa-responsive-platform: backlog
+  epic-4-retrospective: optional
+action_items:
+  - id: "epic-1-retro-item-1-close-virtualized-windowing-with-react-w"
+    epic: 1
+    action: "Close virtualized windowing with react-window/@tanstack/virtual replacing
+      cap 100 + Show all"
+    owner: "GUI"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-1-retro-08-28-2026.md"
+  - id: "epic-1-retro-item-2-wire-_chapter_cache-ttl-invalidation-vs"
+    epic: 1
+    action: "Wire _CHAPTER_CACHE TTL/invalidation vs Never:cache keep or document
+      as canonical"
+    owner: "Core"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-1-retro-08-28-2026.md"
+  - id: "epic-1-retro-item-3-add-cross-verification-venv-path-rust-vs"
+    epic: 1
+    action: "Add cross-verification venv path Rust vs Python"
+    owner: "Scaffold"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-1-retro-08-28-2026.md"
+  - id: "epic-1-retro-item-4-drain-rust-sidecar-stderr-and-kill-child"
+    epic: 1
+    action: "Drain Rust sidecar stderr and kill child on timeout"
+    owner: "Sidecar"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-1-retro-08-28-2026.md"
+  - id: "epic-1-retro-item-5-harden-tauri-csp-and-http-fallback-isola"
+    epic: 1
+    action: "Harden Tauri CSP and http fallback isolation"
+    owner: "Security"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-1-retro-08-28-2026.md"
+  - id: "epic-1-retro-item-6-pin-remaining-find-chapterlist-verificat"
+    epic: 1
+    action: "Pin remaining Find/ChapterList verification gaps (skeleton, cover, host
+      guard, clamp/prune)"
+    owner: "QA"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-1-retro-08-28-2026.md"
+
+

@@ -62,5 +62,20 @@
   "results.region": "Search results",
   "results.selectedLabel": "Selected",
   "find.title": "Find",
-  "toast.searchFailed": "Search failed"
+  "toast.searchFailed": "Search failed",
+  "result.title": "EPUB Output",
+  "result.building": "Building EPUB…",
+  "result.path": "Path",
+  "result.size": "Size",
+  "result.epubcheckOk": "epubcheck ✓ clean",
+  "result.epubcheckProxy": "epubcheck ~ proxy",
+  "result.epubcheckFail": "epubcheck ✗ fail",
+  "result.openFolder": "Open folder",
+  "result.keepEpub": "Keep EPUB",
+  "result.keepEpubSaved": "Saved",
+  "result.cacheMiss": "Cache miss — fetcher first",
+  "result.notBuilt": "Not built yet",
+  "result.chaptersCount": "{count} chapters",
+  "result.buildEpub": "Build EPUB",
+  "queue.cleaning": "Cleaning"
 }
