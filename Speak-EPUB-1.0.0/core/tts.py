@@ -323,8 +323,16 @@ def ffprobe_available() -> bool:
 
 
 def concat_mp3_files(input_paths: List[str], output_path: str) -> None:
+    if not input_paths:
+        raise ValueError("no input paths")
     if not ffmpeg_available():
         raise RuntimeError("ffmpeg is not available")
+
+    # ensure parent exists (convert ensures output_dir but direct API may not)
+    try:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
 
     concat_file = str(Path(output_path).with_suffix(".concat.txt"))
     try:
@@ -340,36 +348,53 @@ def concat_mp3_files(input_paths: List[str], output_path: str) -> None:
             stderr=subprocess.DEVNULL,
         )
     finally:
-        if os.path.exists(concat_file):
-            os.remove(concat_file)
+        try:
+            if os.path.exists(concat_file):
+                os.remove(concat_file)
+        except OSError:
+            pass
 
 
 def get_duration_ms(path: str) -> int:
     if not ffprobe_available():
         return 0
 
-    result = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            path,
-        ],
-        capture_output=True,
-        text=True,
-    )
     try:
-        return int(float(result.stdout.strip()) * 1000)
-    except ValueError:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return 0
+    # robust returncode check — mock without int returncode treated as 0 for backward compat
+    rc = getattr(result, "returncode", 0)
+    if isinstance(rc, int) and rc != 0:
+        return 0
+    try:
+        raw = result.stdout.strip() if result.stdout else ""
+        if not raw:
+            return 0
+        return int(float(raw) * 1000)
+    except (ValueError, TypeError, OverflowError):
         return 0
 
 
 def escape_ffmeta(s: str) -> str:
-    return re.sub(r"([=;#\\])", r"\\\1", s).replace("\n", "\\n")
+    if not isinstance(s, str):
+        s = str(s) if s is not None else ""
+    # spec: escape =;#\ and \n ; also handle \r for robustness
+    return re.sub(r"([=;#\\])", r"\\\1", s).replace("\r", "\\r").replace("\n", "\\n")
 
 
 def finalize_chapter_audio(plans: List[ChapterPlan], keep_parts: bool) -> List[AudioEntry]:
@@ -384,43 +409,83 @@ def finalize_chapter_audio(plans: List[ChapterPlan], keep_parts: bool) -> List[A
 
         # Single-chunk chapter.
         if len(plan.part_paths) == 1 and plan.part_paths[0] == plan.chapter_mp3:
-            if os.path.exists(plan.chapter_mp3):
-                audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
-            else:
+            # validate exists and non-empty / is file
+            try:
+                if os.path.isfile(plan.chapter_mp3) and os.path.getsize(plan.chapter_mp3) > 0:
+                    audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
+                else:
+                    # zero-byte or not a file -> treat as missing
+                    if os.path.exists(plan.chapter_mp3):
+                        print(f"Warning: chapter MP3 exists but empty/corrupt: {plan.chapter_mp3}")
+                    print(f"Warning: missing chapter MP3: {plan.chapter_mp3}")
+            except OSError:
                 print(f"Warning: missing chapter MP3: {plan.chapter_mp3}")
             continue
 
         # Multi-part chapter.
-        if os.path.exists(plan.chapter_mp3):
-            audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
-            size_kb = os.path.getsize(plan.chapter_mp3) // 1024
-            print(f"Chapter {plan.chapter_number:03d}: existing merged file reused ({size_kb} KB)")
-            continue
+        if os.path.isfile(plan.chapter_mp3):
+            try:
+                size = os.path.getsize(plan.chapter_mp3)
+                if size == 0:
+                    print(f"Warning: existing merged file empty, will re-merge: {plan.chapter_mp3}")
+                else:
+                    audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
+                    size_kb = size // 1024
+                    print(f"Chapter {plan.chapter_number:03d}: existing merged file reused ({size_kb} KB)")
+                    continue
+            except OSError:
+                pass
 
         missing_parts = [p for p in plan.part_paths if not os.path.exists(p)]
         if missing_parts:
             print(f"Warning: Chapter {plan.chapter_number:03d} has missing part files; keeping available parts only.")
-            for entry in plan.marker_entries_if_unmerged:
-                if os.path.exists(entry[2]):
-                    audio_entries.append(entry)
+            for entry in (plan.marker_entries_if_unmerged or []):
+                try:
+                    if os.path.exists(entry[2]):
+                        audio_entries.append(entry)
+                except Exception:
+                    continue
             continue
 
         if has_ffmpeg:
             print(f"Chapter {plan.chapter_number:03d}: merging {len(plan.part_paths)} part(s)")
-            concat_mp3_files(plan.part_paths, plan.chapter_mp3)
-            audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
+            try:
+                concat_mp3_files(plan.part_paths, plan.chapter_mp3)
+                audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
+            except Exception as e:
+                print(f"Warning: Chapter {plan.chapter_number:03d} merge failed ({e}); keeping available parts only.")
+                # cleanup partial output if created
+                try:
+                    if os.path.exists(plan.chapter_mp3):
+                        os.remove(plan.chapter_mp3)
+                except OSError:
+                    pass
+                for entry in (plan.marker_entries_if_unmerged or []):
+                    try:
+                        if os.path.exists(entry[2]):
+                            audio_entries.append(entry)
+                    except Exception:
+                        continue
 
             if not keep_parts:
                 for part_path in plan.part_paths:
-                    if os.path.exists(part_path):
-                        os.remove(part_path)
+                    try:
+                        if os.path.exists(part_path):
+                            os.remove(part_path)
+                    except OSError:
+                        continue
         else:
             print(f"Chapter {plan.chapter_number:03d}: ffmpeg unavailable, keeping {len(plan.part_paths)} part files")
-            audio_entries.extend(plan.marker_entries_if_unmerged)
-
-    # Try to remove empty _parts folder.
+            for entry in (plan.marker_entries_if_unmerged or []):
+                try:
+                    if os.path.exists(entry[2]):
+                        audio_entries.append(entry)
+                except Exception:
+                    continue
+            # fallback: if marker entries contain missing paths, already filtered; extend only existing
+    # Try to remove empty _parts folder (exact name match).
     if not keep_parts:
-        part_dirs = sorted({str(Path(p).parent) for plan in plans for p in plan.part_paths if "_parts" in str(Path(p).parent)})
+        part_dirs = sorted({str(Path(p).parent) for plan in plans for p in plan.part_paths if Path(p).parent.name == "_parts"})
         for part_dir in part_dirs:
             try:
                 os.rmdir(part_dir)
@@ -432,6 +497,12 @@ def finalize_chapter_audio(plans: List[ChapterPlan], keep_parts: bool) -> List[A
 
 
 def build_m4b(output_dir: str, audio_entries: List[AudioEntry], book_title: str, ext: str = "m4b") -> None:
+    # defensive ext whitelist
+    if ext not in ("m4b", "m4a"):
+        ext = "m4b"
+    # defensive book_title sanitization (prevent traversal / illegal chars)
+    # caller already sanitizes via sanitize_filename, but re-sanitize defensively
+    book_title = sanitize_filename(book_title, fallback="audiobook", max_len=120)
     if not ffmpeg_available():
         print(f"\nWarning: ffmpeg not found on PATH - skipping {ext.upper()} creation.")
         print("Install FFmpeg from https://ffmpeg.org/download.html and add it to PATH.")
@@ -441,31 +512,46 @@ def build_m4b(output_dir: str, audio_entries: List[AudioEntry], book_title: str,
         print("ffprobe is normally installed together with FFmpeg.")
         return
 
+    # ensure output_dir exists for direct API callers
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+    except Exception:
+        pass
+
     print(f"\nBuilding {ext.upper()}...")
     concat_file = os.path.join(output_dir, "_concat.txt")
-
-    with open(concat_file, "w", encoding="utf-8") as f:
-        for _, _, path in audio_entries:
-            safe = os.path.abspath(path).replace("\\", "/").replace("'", "\\'")
-            f.write(f"file '{safe}'\n")
-
     metadata_file = os.path.join(output_dir, "_metadata.txt")
-    with open(metadata_file, "w", encoding="utf-8") as f:
-        f.write(";FFMETADATA1\n")
-        f.write(f"title={escape_ffmeta(book_title)}\n\n")
-        cursor = 0
-        for chapter_number, marker_title, path in audio_entries:
-            duration = get_duration_ms(path)
-            chapter_title = f"{chapter_number:03d} - {marker_title}"
-            f.write("[CHAPTER]\n")
-            f.write("TIMEBASE=1/1000\n")
-            f.write(f"START={cursor}\n")
-            f.write(f"END={cursor + duration}\n")
-            f.write(f"title={escape_ffmeta(chapter_title)}\n\n")
-            cursor += duration
-
     out_path = os.path.join(output_dir, f"{book_title}.{ext}")
     try:
+        with open(concat_file, "w", encoding="utf-8") as f:
+            for _, _, path in audio_entries:
+                safe = os.path.abspath(path).replace("\\", "/").replace("'", "\\'")
+                f.write(f"file '{safe}'\n")
+
+        with open(metadata_file, "w", encoding="utf-8") as f:
+            f.write(";FFMETADATA1\n")
+            f.write(f"title={escape_ffmeta(book_title)}\n\n")
+            cursor = 0
+            for chapter_number, marker_title, path in audio_entries:
+                try:
+                    duration = get_duration_ms(path)
+                except Exception:
+                    duration = 0
+                # defensive marker_title handling
+                try:
+                    marker_title_str = str(marker_title) if marker_title is not None else ""
+                    chapter_number_int = int(chapter_number)
+                except Exception:
+                    marker_title_str = str(marker_title) if marker_title is not None else ""
+                    chapter_number_int = 0
+                chapter_title = f"{chapter_number_int:03d} - {marker_title_str}"
+                f.write("[CHAPTER]\n")
+                f.write("TIMEBASE=1/1000\n")
+                f.write(f"START={cursor}\n")
+                f.write(f"END={cursor + duration}\n")
+                f.write(f"title={escape_ffmeta(chapter_title)}\n\n")
+                cursor += duration
+
         subprocess.run(
             [
                 "ffmpeg",
@@ -489,12 +575,22 @@ def build_m4b(output_dir: str, audio_entries: List[AudioEntry], book_title: str,
             check=True,
         )
     finally:
-        if os.path.exists(concat_file):
-            os.remove(concat_file)
-        if os.path.exists(metadata_file):
-            os.remove(metadata_file)
+        try:
+            if os.path.exists(concat_file):
+                os.remove(concat_file)
+        except OSError:
+            pass
+        try:
+            if os.path.exists(metadata_file):
+                os.remove(metadata_file)
+        except OSError:
+            pass
 
-    size_mb = os.path.getsize(out_path) / (1024 * 1024)
+    try:
+        size_mb = os.path.getsize(out_path) / (1024 * 1024)
+    except OSError:
+        print(f"Warning: expected output not found after ffmpeg: {out_path}")
+        return
     print(f"{ext.upper()} saved: {out_path} ({size_mb:.1f} MB)")
 
 
