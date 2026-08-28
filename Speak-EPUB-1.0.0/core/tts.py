@@ -16,10 +16,12 @@ Pure: only os/re/dataclasses/pathlib/typing — no adapters/*, no speak, no edge
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from dataclasses import dataclass
-from typing import List, Tuple
+from pathlib import Path
+from typing import List, Optional, Tuple
 
 Chapter = Tuple[int, str, str]
 AudioEntry = Tuple[int, str, str]
@@ -187,10 +189,135 @@ def build_generation_plan(
     return plans, jobs
 
 
+async def tts_text_to_mp3(text: str, output_path: str, voice: str, retries: int = 5) -> None:
+    """
+    Core-owned Edge TTS execution (ratyfikacja speak.py:116).
+
+    - edge_tts lazy import inside loop (CI without deps still imports core.tts)
+    - for attempt in 1..retries: edge_tts.Communicate(text,voice).save
+    - wait = min(20, 2*attempt) + asyncio.sleep + log retry {attempt}/{retries-1} for {name}
+    - raise RuntimeError after exhausting retries with last_error chained
+
+    Pure Core — no adapters/*, no FFmpeg/epub/filters.
+    """
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            import edge_tts  # lazy — keep core importable without edge-tts
+
+            communicate = edge_tts.Communicate(text, voice)
+            await communicate.save(output_path)
+            return
+        except (ModuleNotFoundError, ImportError) as e:
+            raise RuntimeError(f"edge-tts not installed for {output_path}: {e}") from e
+        except Exception as e:
+            last_error = e
+            # clean partial file left by failed save to avoid resume skipping corrupt file
+            try:
+                p = Path(output_path)
+                if p.is_file():
+                    p.unlink(missing_ok=True)
+            except Exception:
+                pass
+            if attempt < retries:
+                wait_seconds = min(20, 2 * attempt)
+                print(f"        retry {attempt}/{retries - 1} for {Path(output_path).name}: {e}")
+                await asyncio.sleep(wait_seconds)
+
+    raise RuntimeError(f"TTS failed after {retries} attempts for {output_path}: {last_error}") from last_error
+
+
+async def run_part_jobs(jobs: List[PartJob], voice: str, parallel: int, retries: int) -> None:
+    """
+    Global parallel PartJob queue — deterministyczny reading-order.
+
+    - asyncio.Queue[Optional[PartJob]] filled for job in jobs: put_nowait(job) then sentinel None×parallel
+    - workers parallel = asyncio.create_task(worker(i+1)) for i in range(parallel)
+    - worker while True: job=await queue.get(); if job is None: task_done/break
+    - skip if os.path.exists(output_path): log skip + size_kb, no TTS call
+    - else start/done logs + await tts_text_to_mp3
+    - progress completed/total with completed_lock, queue.task_done, queue.join, gather, cancel on exception
+    - empty jobs -> print No TTS jobs ... and return
+    """
+    if not jobs:
+        print("No TTS jobs to generate. Existing files will be reused.")
+        return
+
+    queue: asyncio.Queue[Optional[PartJob]] = asyncio.Queue()
+    for job in jobs:
+        queue.put_nowait(job)
+
+    for _ in range(parallel):
+        queue.put_nowait(None)
+
+    total_jobs = len(jobs)
+    completed = 0
+    completed_lock = asyncio.Lock()
+
+    async def worker(worker_id: int) -> None:
+        nonlocal completed
+        while True:
+            job = await queue.get()
+            if job is None:
+                queue.task_done()
+                break
+
+            try:
+                if os.path.exists(job.output_path):
+                    size_kb = os.path.getsize(job.output_path) // 1024
+                    print(
+                        f"worker {worker_id}: skip Chapter {job.chapter_number:03d} "
+                        f"part {job.part_number:03d}/{job.part_count:03d} ({size_kb} KB)"
+                    )
+                else:
+                    print(
+                        f"worker {worker_id}: start Chapter {job.chapter_number:03d} "
+                        f"part {job.part_number:03d}/{job.part_count:03d}"
+                    )
+                    await tts_text_to_mp3(job.text, job.output_path, voice, retries=retries)
+                    size_kb = os.path.getsize(job.output_path) // 1024
+                    print(
+                        f"worker {worker_id}: done  Chapter {job.chapter_number:03d} "
+                        f"part {job.part_number:03d}/{job.part_count:03d} ({size_kb} KB)"
+                    )
+
+                async with completed_lock:
+                    completed += 1
+                    print(f"progress: {completed}/{total_jobs} TTS part job(s) complete")
+            finally:
+                queue.task_done()
+
+    workers = [asyncio.create_task(worker(i + 1)) for i in range(parallel)]
+
+    try:
+        await asyncio.gather(*workers)
+        # ensure queue drained (workers already called task_done for each item)
+        try:
+            await asyncio.wait_for(queue.join(), timeout=0.1)
+        except asyncio.TimeoutError:
+            pass
+    except Exception:
+        for task in workers:
+            task.cancel()
+        # drain queue to unblock any waiting join
+        while True:
+            try:
+                queue.get_nowait()
+                queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+            except Exception:
+                break
+        raise
+
+
 __all__ = [
     "sanitize_filename",
     "PartJob",
     "ChapterPlan",
     "split_text_for_tts",
     "build_generation_plan",
+    "tts_text_to_mp3",
+    "run_part_jobs",
 ]

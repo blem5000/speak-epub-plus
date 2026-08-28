@@ -1,12 +1,23 @@
-"""Tests for core/tts.py — I/O matrix Story 3.1 (ratyfikacja brownfield)."""
+"""Tests for core/tts.py — I/O matrix Story 3.1 (ratyfikacja brownfield) + 3.2 Edge TTS + parallel + retries."""
+import asyncio
 import os
 import re
+import sys
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
-from core.tts import split_text_for_tts, PartJob, build_generation_plan, sanitize_filename, ChapterPlan
+from core.tts import (
+    build_generation_plan,
+    ChapterPlan,
+    PartJob,
+    run_part_jobs,
+    sanitize_filename,
+    split_text_for_tts,
+    tts_text_to_mp3,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -436,3 +447,371 @@ def test_parts_dir_created_on_multi(tmp_path):
     for j in jobs:
         assert Path(j.output_path).parent == parts_dir
         assert j.output_path.startswith(out)
+
+
+# ---------------------------------------------------------------------------
+# Story 3.2 — Edge TTS + parallel 2–3 + retries + _parts skip
+# ---------------------------------------------------------------------------
+
+
+def test_tts_retry_success_after_429(tmp_path, capsys):
+    """429/throttle retry: 2 fails then success, save called 3, log retry 1/4 captured."""
+    out = tmp_path / "retry_success.mp3"
+    voice = "en-US-AndrewNeural"
+
+    save_calls = {"count": 0}
+
+    class FakeCommunicate:
+        def __init__(self, text, voice_arg):
+            assert text == "hello world"
+            assert voice_arg == voice
+
+        async def save(self, path):
+            save_calls["count"] += 1
+            if save_calls["count"] <= 2:
+                raise Exception("429 Too Many Requests")
+            # success on 3rd
+            Path(path).write_text("fake-mp3", encoding="utf-8")
+
+    sleep_calls = []
+
+    async def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    async def _run():
+        with patch("edge_tts.Communicate", FakeCommunicate):
+            with patch("core.tts.asyncio.sleep", new=fake_sleep):
+                await tts_text_to_mp3("hello world", str(out), voice, retries=5)
+
+    asyncio.run(_run())
+
+    assert save_calls["count"] == 3
+    assert out.exists()
+    assert out.read_text(encoding="utf-8") == "fake-mp3"
+    # sleep waits = min(20,2*1)=2, min(20,2*2)=4
+    assert sleep_calls == [2, 4]
+    captured = capsys.readouterr().out.lower()
+    # spec says "retry 1/4 dla/for" — keep "for" but accept either case-insensitive
+    assert "retry 1/4" in captured
+    assert "retry 2/4" in captured
+    # check filename in log (case-insensitive)
+    assert "retry_success.mp3" in captured
+
+
+def test_tts_exhaust_retries_raises(tmp_path, capsys):
+    """Always raises → after 5 attempts raise RuntimeError with last_error chained."""
+    out = tmp_path / "exhaust.mp3"
+    voice = "en-US-AndrewNeural"
+
+    class FakeCommunicateAlwaysFail:
+        def __init__(self, text, voice_arg):
+            pass
+
+        async def save(self, path):
+            raise Exception("503 throttle")
+
+    sleep_calls = []
+
+    async def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    async def _run():
+        with patch("edge_tts.Communicate", FakeCommunicateAlwaysFail):
+            with patch("core.tts.asyncio.sleep", new=fake_sleep):
+                with pytest.raises(RuntimeError, match=r"TTS failed after 5 attempts"):
+                    await tts_text_to_mp3("hello", str(out), voice, retries=5)
+
+    asyncio.run(_run())
+
+    # 5 attempts → 4 sleeps (attempt 1..4 sleep, 5th raises)
+    assert sleep_calls == [2, 4, 6, 8]
+    assert len(sleep_calls) == 4
+    captured = capsys.readouterr().out
+    # 4 retry logs: 1/4,2/4,3/4,4/4
+    for i in range(1, 5):
+        assert f"retry {i}/4" in captured.lower() or f"retry {i}/4" in captured
+
+
+def test_run_part_jobs_parallel_3_queue_order(tmp_path, capsys):
+    """20 jobs parallel 3: all 20 done, progress 20/20, reading-order, workers 1,2,3 start first."""
+    out_dir = tmp_path / "out_parallel"
+    out_dir.mkdir()
+    # Build 20 jobs via manual PartJob list in reading order ch40 p1..20 before ch41
+    # Simpler: use single chapter 40 with 20 parts via "a"*70000
+    chapters = [(40, "C40", "a" * 70000)]  # 70000/3500=20
+    plans, jobs = build_generation_plan(chapters, str(out_dir), 3500)
+    assert len(jobs) == 20, f"expected 20 jobs, got {len(jobs)}; chunks {len(plans[0].part_paths)}"
+    # Ensure reading order: ch40 p1..20
+    for i, j in enumerate(jobs, 1):
+        assert j.chapter_number == 40
+        assert j.part_number == i
+        assert j.part_count == 20
+
+    call_order = []
+
+    async def fake_tts(text, output_path, voice, retries=5):
+        call_order.append(Path(output_path).name)
+        # Simulate file write to allow size_kb log and done log
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_text("x" * 1024, encoding="utf-8")  # 1KB
+        # small async yield to allow interleaving
+        await asyncio.sleep(0)
+
+    async def _run():
+        with patch("core.tts.tts_text_to_mp3", new=fake_tts):
+            await run_part_jobs(jobs, voice="en-US-AndrewNeural", parallel=3, retries=5)
+
+    asyncio.run(_run())
+
+    assert len(call_order) == 20
+    # reading-order preserved at queue level — first three dispatched should be p1,p2,p3
+    # Because workers start 1,2,3 concurrently, call_order first 3 should be p1,p2,p3 in some order but contains them
+    assert set(call_order[:3]) == {"040_C40_part001.mp3", "040_C40_part002.mp3", "040_C40_part003.mp3"}
+    # All jobs eventually called in order overall? With mocked immediate completion, order may be sequential due to async yield 0 but still global queue order ensures 4th starts only after one finishes.
+    # Check that all expected names present
+    expected_names = [f"040_C40_part{i:03d}.mp3" for i in range(1, 21)]
+    assert sorted(call_order) == sorted(expected_names)
+    # Progress logs
+    out = capsys.readouterr().out
+    assert "progress: 20/20" in out
+    # Workers 1,2,3 should have started first — check logs contain worker 1: start, worker 2: start, worker 3: start
+    assert "worker 1: start" in out
+    assert "worker 2: start" in out
+    assert "worker 3: start" in out
+    # Verify no skip logs (all fresh)
+    assert "skip" not in out.lower()
+
+
+def test_run_part_jobs_skip_existing_parts(tmp_path, capsys):
+    """Runtime skip guard: pre-create 1 file, mock tts not called for that job, skip log, progress counts skip."""
+    out_dir = tmp_path / "out_skip"
+    out_dir.mkdir()
+    parts_dir = out_dir / "_parts"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+
+    # Manually craft 2 jobs in same chapter, one already exists
+    job1_path = parts_dir / "040_C40_part001.mp3"
+    job2_path = parts_dir / "040_C40_part002.mp3"
+    job1_path.write_text("already-there", encoding="utf-8")
+    # size will be len /1024 = 0 KB
+
+    jobs = [
+        PartJob(chapter_number=40, chapter_title="C40", part_number=1, part_count=2, text="chunk1", output_path=str(job1_path), is_final_chapter_file=False),
+        PartJob(chapter_number=40, chapter_title="C40", part_number=2, part_count=2, text="chunk2", output_path=str(job2_path), is_final_chapter_file=False),
+    ]
+
+    tts_calls = []
+
+    async def fake_tts(text, output_path, voice, retries=5):
+        tts_calls.append(Path(output_path).name)
+        Path(output_path).write_text("generated", encoding="utf-8")
+
+    async def _run():
+        with patch("core.tts.tts_text_to_mp3", new=fake_tts):
+            await run_part_jobs(jobs, voice="en-US-AndrewNeural", parallel=2, retries=5)
+
+    asyncio.run(_run())
+
+    # Only job2 should have triggered TTS
+    assert tts_calls == ["040_C40_part002.mp3"]
+    assert job2_path.exists()
+    out = capsys.readouterr().out
+    # Skip log for job1
+    assert "skip Chapter 040 part 001/002" in out
+    assert "start Chapter 040 part 002/002" in out
+    assert "done  Chapter 040 part 002/002" in out
+    # Progress counts both: 1/2 and 2/2
+    assert "progress: 1/2" in out
+    assert "progress: 2/2" in out
+
+
+def test_run_part_jobs_empty_jobs(capsys):
+    """Empty jobs -> No TTS jobs message and no worker creation, no tts call."""
+    async def _run():
+        with patch("core.tts.tts_text_to_mp3") as mock_tts:
+            await run_part_jobs([], voice="en-US-AndrewNeural", parallel=3, retries=5)
+            mock_tts.assert_not_called()
+    asyncio.run(_run())
+    out = capsys.readouterr().out
+    assert "No TTS jobs" in out
+
+
+def test_retry_sleep_capped_at_20(tmp_path):
+    """Sleep never >20s even with higher retries — min(20,2*attempt) capped."""
+    out = tmp_path / "cap.mp3"
+    voice = "en-US-AndrewNeural"
+
+    class AlwaysFail:
+        def __init__(self, text, voice_arg):
+            pass
+
+        async def save(self, path):
+            raise Exception("fail")
+
+    sleep_calls = []
+
+    async def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    async def _run():
+        with patch("edge_tts.Communicate", AlwaysFail):
+            with patch("core.tts.asyncio.sleep", new=fake_sleep):
+                with pytest.raises(RuntimeError):
+                    await tts_text_to_mp3("hello", str(out), voice, retries=15)
+
+    asyncio.run(_run())
+
+    # retries 15 -> sleeps for attempts 1..14: 2,4,6,8,10,12,14,16,18,20,20,20,20,20
+    assert len(sleep_calls) == 14
+    assert sleep_calls[:9] == [2, 4, 6, 8, 10, 12, 14, 16, 18]
+    assert sleep_calls[9] == 20
+    # All subsequent capped at 20
+    assert all(s <= 20 for s in sleep_calls)
+    assert sleep_calls[10:] == [20, 20, 20, 20]
+
+
+def test_speak_delegation_parity(monkeypatch, tmp_path):
+    """speak.py wrappers must delegate to core.tts — verify forwarding and signature preservation."""
+    import speak as speak_mod
+    import core.tts as core_mod
+
+    # Check that speak wrappers exist and are coroutines
+    assert asyncio.iscoroutinefunction(speak_mod.tts_text_to_mp3)
+    assert asyncio.iscoroutinefunction(speak_mod.run_part_jobs)
+    # Check that speak module exposes PartJob as same class (core identity)
+    assert speak_mod.PartJob is core_mod.PartJob
+
+    # Verify delegation: patch core and check speak wrapper calls it
+    called = {}
+
+    async def fake_core_tts(text, output_path, voice, retries=5):
+        called["tts"] = (text, output_path, voice, retries)
+        Path(output_path).write_text("ok", encoding="utf-8")
+
+    async def fake_core_run(jobs, voice, parallel, retries):
+        called["run"] = (jobs, voice, parallel, retries)
+
+    monkeypatch.setattr(core_mod, "tts_text_to_mp3", fake_core_tts)
+    # Need to also patch the alias that speak imported at import time: _core_tts
+    monkeypatch.setattr(speak_mod, "_core_tts", fake_core_tts, raising=False)
+    monkeypatch.setattr(speak_mod, "_core_run", fake_core_run, raising=False)
+
+    async def _run():
+        # Test tts delegation
+        out = tmp_path / "deleg.mp3"
+        await speak_mod.tts_text_to_mp3("hi", str(out), "en-US-AriaNeural", retries=2)
+        assert called["tts"] == ("hi", str(out), "en-US-AriaNeural", 2)
+
+        # Test run delegation with parallel propagation 1..6
+        jobs = [
+            PartJob(chapter_number=1, chapter_title="T", part_number=1, part_count=1, text="hi", output_path=str(tmp_path / "a.mp3"), is_final_chapter_file=True)
+        ]
+        await speak_mod.run_part_jobs(jobs, voice="en-US-AriaNeural", parallel=3, retries=5)
+        assert called["run"][2] == 3  # parallel
+        assert called["run"][1] == "en-US-AriaNeural"
+
+    asyncio.run(_run())
+
+
+def test_run_part_jobs_parallel_2_vs_3(tmp_path):
+    """Both parallel 2 and 3 work; parallel 1 also valid (sequential)."""
+    out_dir2 = tmp_path / "out2"
+    out_dir3 = tmp_path / "out3"
+    out_dir2.mkdir()
+    out_dir3.mkdir()
+
+    chapters = [(1, "T", "a" * 4000)]  # 2 parts
+
+    _, jobs2 = build_generation_plan(chapters, str(out_dir2), 3500)
+    _, jobs3 = build_generation_plan(chapters, str(out_dir3), 3500)
+
+    async def fake_tts(text, output_path, voice, retries=5):
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_text("x", encoding="utf-8")
+
+    async def _run():
+        with patch("core.tts.tts_text_to_mp3", new=fake_tts):
+            await run_part_jobs(jobs2, voice="v", parallel=2, retries=5)
+            await run_part_jobs(jobs3, voice="v", parallel=3, retries=5)
+            # also parallel=1 sequential
+            out_dir1 = tmp_path / "out1"
+            out_dir1.mkdir()
+            _, jobs1 = build_generation_plan(chapters, str(out_dir1), 3500)
+            await run_part_jobs(jobs1, voice="v", parallel=1, retries=5)
+
+    asyncio.run(_run())
+
+    # All succeeded without exception
+    assert True
+
+
+def test_run_part_jobs_max_concurrency_and_exact_order(tmp_path, capsys):
+    """Verify max concurrency <= parallel and exact reading-order for 20 jobs."""
+    out_dir = tmp_path / "out_conc"
+    out_dir.mkdir()
+    chapters = [(40, "C40", "a" * 70000)]  # 20 parts
+    _, jobs = build_generation_plan(chapters, str(out_dir), 3500)
+    assert len(jobs) == 20
+    expected = [f"040_C40_part{i:03d}.mp3" for i in range(1, 21)]
+
+    concurrent = {"cur": 0, "max": 0}
+    call_order = []
+    lock = asyncio.Lock()
+
+    async def fake_tts(text, output_path, voice, retries=5):
+        async with lock:
+            concurrent["cur"] += 1
+            concurrent["max"] = max(concurrent["max"], concurrent["cur"])
+        call_order.append(Path(output_path).name)
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_text("x" * 1024, encoding="utf-8")
+        await asyncio.sleep(0.01)
+        async with lock:
+            concurrent["cur"] -= 1
+
+    async def _run():
+        with patch("core.tts.tts_text_to_mp3", new=fake_tts):
+            await run_part_jobs(jobs, voice="v", parallel=3, retries=5)
+
+    asyncio.run(_run())
+
+    assert call_order == expected, f"order mismatch {call_order[:5]}"
+    assert concurrent["max"] <= 3
+    assert concurrent["max"] == 3  # when jobs >= parallel, max should hit parallel
+    out = capsys.readouterr().out
+    assert "progress: 20/20" in out
+
+
+def test_run_part_jobs_propagates_tts_failure(tmp_path, capsys):
+    """Middle job failure after exhausting retries must propagate and cancel remaining."""
+    out_dir = tmp_path / "out_fail"
+    out_dir.mkdir()
+    chapters = [(40, "C40", "a" * 8000)]  # 3 parts: 3500,3500,1000
+    _, jobs = build_generation_plan(chapters, str(out_dir), 3500)
+    assert len(jobs) == 3
+
+    call_log = []
+
+    async def fake_tts(text, output_path, voice, retries=5):
+        name = Path(output_path).name
+        call_log.append(name)
+        if "part002" in name:
+            raise RuntimeError("TTS failed after 5 attempts")
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_text("ok", encoding="utf-8")
+        await asyncio.sleep(0.01)
+
+    async def _run():
+        with patch("core.tts.tts_text_to_mp3", new=fake_tts):
+            with pytest.raises(RuntimeError, match="TTS failed"):
+                await run_part_jobs(jobs, voice="v", parallel=1, retries=5)
+
+    asyncio.run(_run())
+
+    # with parallel 1, jobs sequential p1, p2(fail), p3 never started
+    assert "040_C40_part001.mp3" in call_log
+    assert "040_C40_part002.mp3" in call_log
+    assert "040_C40_part003.mp3" not in call_log
+    # progress should not reach 3/3
+    out = capsys.readouterr().out
+    assert "progress: 3/3" not in out

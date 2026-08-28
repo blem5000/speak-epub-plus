@@ -52,7 +52,7 @@ development_status:
 
   epic-3: in-progress
   3-1-tts-chunking-partjob-queue-ratyfikacja-brownfield: done
-  3-2-edge-tts-parallel-2-3-retries-_parts-skip: backlog
+  3-2-edge-tts-parallel-2-3-retries-_parts-skip: done
   3-3-ffmpeg-merge-per-chapter-single-m4b-z-markerami: backlog
   epic-3-retrospective: optional
 

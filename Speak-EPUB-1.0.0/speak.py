@@ -66,6 +66,8 @@ from core.tts import PartJob, ChapterPlan
 from core.tts import sanitize_filename as _core_sanitize
 from core.tts import split_text_for_tts as _core_split_tts
 from core.tts import build_generation_plan as _core_build_plan
+from core.tts import tts_text_to_mp3 as _core_tts
+from core.tts import run_part_jobs as _core_run
 
 
 def sanitize_filename(value: str, fallback: str = "chapter", max_len: int = 60) -> str:
@@ -114,21 +116,8 @@ def split_text_for_tts(text: str, max_chars: int = 3500) -> list[str]:
 
 
 async def tts_text_to_mp3(text: str, output_path: str, voice: str, retries: int = 5) -> None:
-    last_error: Optional[Exception] = None
-
-    for attempt in range(1, retries + 1):
-        try:
-            communicate = edge_tts.Communicate(text, voice)
-            await communicate.save(output_path)
-            return
-        except Exception as e:
-            last_error = e
-            if attempt < retries:
-                wait_seconds = min(20, 2 * attempt)
-                print(f"        retry {attempt}/{retries - 1} for {Path(output_path).name}: {e}")
-                await asyncio.sleep(wait_seconds)
-
-    raise RuntimeError(f"TTS failed after {retries} attempts for {output_path}: {last_error}")
+    # Delegates to core/tts.py — single source, no duplication (Story 3.2)
+    return await _core_tts(text, output_path, voice, retries=retries)
 
 
 async def list_voices(all_languages: bool = False) -> None:
@@ -205,63 +194,8 @@ def build_generation_plan(chapters: list[Chapter], output_dir: str, chunk_size: 
 
 
 async def run_part_jobs(jobs: list[PartJob], voice: str, parallel: int, retries: int) -> None:
-    if not jobs:
-        print("No TTS jobs to generate. Existing files will be reused.")
-        return
-
-    queue: asyncio.Queue[Optional[PartJob]] = asyncio.Queue()
-    for job in jobs:
-        queue.put_nowait(job)
-
-    for _ in range(parallel):
-        queue.put_nowait(None)
-
-    total_jobs = len(jobs)
-    completed = 0
-    completed_lock = asyncio.Lock()
-
-    async def worker(worker_id: int) -> None:
-        nonlocal completed
-        while True:
-            job = await queue.get()
-            if job is None:
-                queue.task_done()
-                break
-
-            try:
-                if os.path.exists(job.output_path):
-                    size_kb = os.path.getsize(job.output_path) // 1024
-                    print(
-                        f"worker {worker_id}: skip Chapter {job.chapter_number:03d} "
-                        f"part {job.part_number:03d}/{job.part_count:03d} ({size_kb} KB)"
-                    )
-                else:
-                    print(
-                        f"worker {worker_id}: start Chapter {job.chapter_number:03d} "
-                        f"part {job.part_number:03d}/{job.part_count:03d}"
-                    )
-                    await tts_text_to_mp3(job.text, job.output_path, voice, retries=retries)
-                    size_kb = os.path.getsize(job.output_path) // 1024
-                    print(
-                        f"worker {worker_id}: done  Chapter {job.chapter_number:03d} "
-                        f"part {job.part_number:03d}/{job.part_count:03d} ({size_kb} KB)"
-                    )
-
-                async with completed_lock:
-                    completed += 1
-                    print(f"progress: {completed}/{total_jobs} TTS part job(s) complete")
-            finally:
-                queue.task_done()
-
-    workers = [asyncio.create_task(worker(i + 1)) for i in range(parallel)]
-
-    try:
-        await queue.join()
-        await asyncio.gather(*workers)
-    except Exception:
-        for task in workers:
-            task.cancel()
-        raise
+    # Delegates to core/tts.py — single source, no duplication (Story 3.2)
+    return await _core_run(jobs, voice, parallel, retries)
 
 
 def finalize_chapter_audio(plans: list[ChapterPlan], keep_parts: bool) -> list[AudioEntry]:
