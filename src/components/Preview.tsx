@@ -19,6 +19,9 @@ export default function Preview({ open, onClose, chapterUrl, chapterTitle, chapt
   const [originalText, setOriginalText] = useState<string>("");
   const [cleanedHtml, setCleanedHtml] = useState<string>("");
   const [cleanedText, setCleanedText] = useState<string>("");
+  const [filteredText, setFilteredText] = useState<string>("");
+  const [filteredHtml, setFilteredHtml] = useState<string>("");
+  const [removedCount, setRemovedCount] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -92,7 +95,7 @@ export default function Preview({ open, onClose, chapterUrl, chapterTitle, chapt
     };
   }, [open, onClose]);
 
-  // live re-parse debounce 300ms via previewChapter — stale guard
+  // live re-parse debounce 300ms via previewChapter — stale guard + filter chip
   useEffect(() => {
     if (!open) return;
     if (abortRef.current) abortRef.current.abort();
@@ -111,15 +114,32 @@ export default function Preview({ open, onClose, chapterUrl, chapterTitle, chapt
               // keep previous cleaned
               return;
             }
+            if (code === "VALUE_ERROR" && res.error.message.includes("invalid regex")) {
+              setError(res.error.message);
+              return;
+            }
             setError(res.error.message);
             return;
           }
           if (isPreviewResult(res)) {
-            const r = res.result as { originalHtml: string; originalText: string; html: string; text: string; start: string | null; end: string | null };
+            const r = res.result as {
+              originalHtml: string;
+              originalText: string;
+              html: string;
+              text: string;
+              filteredHtml?: string;
+              filteredText?: string;
+              removedCount?: number;
+              start: string | null;
+              end: string | null;
+            };
             setOriginalHtml(r.originalHtml);
             setOriginalText(r.originalText);
             setCleanedHtml(r.html);
             setCleanedText(r.text);
+            setFilteredHtml(r.filteredHtml ?? r.html);
+            setFilteredText(r.filteredText ?? r.text);
+            setRemovedCount(typeof r.removedCount === "number" ? r.removedCount : 0);
             setError(null);
           }
         })
@@ -136,6 +156,41 @@ export default function Preview({ open, onClose, chapterUrl, chapterTitle, chapt
     };
   }, [open, chapterUrl, start, end]);
 
+  // reload on filters-updated event (dispatched by Filters.tsx after add/delete)
+  useEffect(() => {
+    if (!open) return;
+    const handler = (): void => {
+      // trigger re-fetch by bumping seq and calling preview again without waiting debounce
+      if (abortRef.current) abortRef.current.abort();
+      const ctl = new AbortController();
+      abortRef.current = ctl;
+      const seq = ++seqRef.current;
+      previewChapter({ url: chapterUrl, start: start || null, end: end || null }, { signal: ctl.signal })
+        .then((res) => {
+          if (ctl.signal.aborted) return;
+          if (seq !== seqRef.current) return;
+          if (res.error) {
+            if (res.error.code === "VALUE_ERROR" && res.error.message.includes("invalid regex")) {
+              setError(res.error.message);
+              return;
+            }
+            return;
+          }
+          if (isPreviewResult(res)) {
+            const r = res.result as { html: string; text: string; filteredHtml?: string; filteredText?: string; removedCount?: number; originalHtml: string; originalText: string };
+            setCleanedHtml(r.html);
+            setCleanedText(r.text);
+            setFilteredHtml(r.filteredHtml ?? r.html);
+            setFilteredText(r.filteredText ?? r.text);
+            setRemovedCount(typeof r.removedCount === "number" ? r.removedCount : 0);
+          }
+        })
+        .catch(() => {});
+    };
+    window.addEventListener("filters-updated", handler as EventListener);
+    return () => window.removeEventListener("filters-updated", handler as EventListener);
+  }, [open, chapterUrl, start, end]);
+
   // initial fetch on open without debounce? the effect above already handles, but ensure immediate on open
   useEffect(() => {
     if (!open) return;
@@ -145,6 +200,9 @@ export default function Preview({ open, onClose, chapterUrl, chapterTitle, chapt
     setOriginalText("");
     setCleanedHtml("");
     setCleanedText("");
+    setFilteredHtml("");
+    setFilteredText("");
+    setRemovedCount(0);
   }, [open, chapterUrl]);
 
   if (!open) return null;
@@ -275,9 +333,18 @@ export default function Preview({ open, onClose, chapterUrl, chapterTitle, chapt
           </div>
         ) : null}
         {hasContent ? (
-          <div className="mx-6 mt-2 flex items-center gap-2 text-body-sm text-muted-foreground" data-testid="preview-diff">
+          <div className="mx-6 mt-2 flex flex-wrap items-center gap-2 text-body-sm text-muted-foreground" data-testid="preview-diff">
             <span className="rounded-full bg-accent/10 px-2 py-0.5 text-accent">oczyszczone</span>
             <span>{cleanedText.length} znaków • usunięto ~{diffCount > 0 ? diffCount : 0} znaków nav</span>
+            {removedCount > 0 ? (
+              <span className="rounded-full bg-warning/10 px-2 py-0.5 text-warning border border-warning/20" data-testid="filter-chip">
+                Usunięto {removedCount} {removedCount === 1 ? "linia" : removedCount < 5 ? "linie" : "linii"} przez filtry
+              </span>
+            ) : (
+              <span className="rounded-full bg-muted px-2 py-0.5 text-muted-foreground" data-testid="filter-chip">
+                Usunięto 0 linii
+              </span>
+            )}
           </div>
         ) : null}
 
@@ -330,14 +397,21 @@ export default function Preview({ open, onClose, chapterUrl, chapterTitle, chapt
                 </div>
               ) : (
                 <div data-testid="preview-cleaned">
-                  {cleanedText ? (
-                    <p className="whitespace-pre-wrap text-body leading-relaxed">{cleanedText.slice(0, 8000)}</p>
+                  {(removedCount > 0 ? filteredText : cleanedText) ? (
+                    <p className="whitespace-pre-wrap text-body leading-relaxed">
+                      {(removedCount > 0 ? filteredText : cleanedText).slice(0, 8000)}
+                    </p>
                   ) : (
                     <p className="text-body-sm text-muted-foreground">— brak wyizolowanej treści —</p>
                   )}
+                  {removedCount > 0 ? (
+                    <p className="mt-2 text-body-sm text-muted-foreground">Wyświetlono po filtrach — usunięto {removedCount} linii</p>
+                  ) : null}
                   <details className="mt-4">
                     <summary className="cursor-pointer text-body-sm text-muted-foreground">Pokaż HTML</summary>
-                    <pre className="mono mt-2 max-h-40 overflow-auto rounded border bg-muted p-2 text-mono">{cleanedHtml.slice(0, 8000)}</pre>
+                    <pre className="mono mt-2 max-h-40 overflow-auto rounded border bg-muted p-2 text-mono">
+                      {(removedCount > 0 ? filteredHtml : cleanedHtml).slice(0, 8000)}
+                    </pre>
                   </details>
                 </div>
               )}
@@ -349,7 +423,7 @@ export default function Preview({ open, onClose, chapterUrl, chapterTitle, chapt
               {tab === "original" ? (
                 <div dangerouslySetInnerHTML={{ __html: originalHtml.slice(0, 20000) }} />
               ) : (
-                <div dangerouslySetInnerHTML={{ __html: cleanedHtml.slice(0, 20000) }} />
+                <div dangerouslySetInnerHTML={{ __html: (removedCount > 0 ? filteredHtml : cleanedHtml).slice(0, 20000) }} />
               )}
             </div>
           </div>

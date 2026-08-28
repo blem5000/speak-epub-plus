@@ -5,6 +5,7 @@ import FindInput from "./components/FindInput";
 import ResultsTable from "./components/ResultsTable";
 import ChapterList from "./components/ChapterList";
 import Preview from "./components/Preview";
+import Filters from "./components/Filters";
 import { useChapterList } from "./hooks/useChapterList";
 import { useDebouncedSearch } from "./hooks/useDebouncedSearch";
 import { useFetcher } from "./hooks/useFetcher";
@@ -608,17 +609,22 @@ export default function App(): JSX.Element {
                 ))
               )}
             </div>
-          </section>
-        ) : null}
-        {previewChapter ? (
-          <Preview
-            open={previewIdx != null}
-            onClose={() => setPreviewIdx(null)}
-            chapterUrl={previewChapter.url}
-            chapterTitle={previewChapter.title}
-            chapterIndex={previewChapter.index}
-          />
-        ) : null}
+           </section>
+         ) : null}
+
+        {/* Filters — Story 2.3 plain+regex gate */}
+        <div className="mt-6">
+          <Filters />
+        </div>
+         {previewChapter ? (
+           <Preview
+             open={previewIdx != null}
+             onClose={() => setPreviewIdx(null)}
+             chapterUrl={previewChapter.url}
+             chapterTitle={previewChapter.title}
+             chapterIndex={previewChapter.index}
+           />
+         ) : null}
       </div>
     </div>
   );

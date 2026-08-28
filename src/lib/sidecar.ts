@@ -230,6 +230,10 @@ export type PreviewResult = {
   originalText: string;
   html: string;
   text: string;
+  filteredHtml?: string;
+  filteredText?: string;
+  removedCount?: number;
+  filters?: FilterItem[];
   start: string | null;
   end: string | null;
 };
@@ -285,6 +289,65 @@ export async function clearSelectors(
   return callSidecar("clearSelectors", payload, opts);
 }
 
+// Filters — plain+regex AD-2 Story 2.3
+export type FilterItem = { pattern: string; isRegex: boolean };
+export type FiltersResult = { filters: FilterItem[] };
+
+export async function getFilters(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
+  return callSidecar("getFilters", {}, opts);
+}
+
+export async function addFilter(
+  params: { pattern: string; isRegex: boolean },
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  const pat = params.pattern?.trim();
+  if (!pat) throw new Error("pattern must be non-empty");
+  if (pat.length > 200) throw new Error("pattern too long");
+  if (params.isRegex) {
+    try {
+      new RegExp(pat);
+    } catch {
+      throw new Error(`invalid regex: ${pat}`);
+    }
+  }
+  return callSidecar("addFilter", { pattern: pat, isRegex: params.isRegex }, opts);
+}
+
+export async function removeFilter(
+  params: { index: number } | { pattern: string; isRegex?: boolean },
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  const payload: Record<string, unknown> = {};
+  if ("index" in params) payload.index = (params as { index: number }).index;
+  if ("pattern" in params) payload.pattern = (params as { pattern: string }).pattern.trim();
+  if ("isRegex" in params) payload.isRegex = (params as { isRegex?: boolean }).isRegex;
+  return callSidecar("removeFilter", payload, opts);
+}
+
+export async function saveFilters(
+  params: { filters: FilterItem[] },
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  if (params.filters.length > 100) throw new Error("too many filters");
+  const sanitized = params.filters.map((f) => ({
+    pattern: f.pattern.trim(),
+    isRegex: !!f.isRegex,
+  }));
+  for (const f of sanitized) {
+    if (!f.pattern) throw new Error("pattern must be non-empty");
+    if (f.pattern.length > 200) throw new Error("pattern too long");
+    if (f.isRegex) {
+      try {
+        new RegExp(f.pattern);
+      } catch {
+        throw new Error(`invalid regex: ${f.pattern}`);
+      }
+    }
+  }
+  return callSidecar("saveFilters", { filters: sanitized }, opts);
+}
+
 // Type guards for fetchChapter(s) responses — strict shape
 export function isFetchChapterResult(res: RpcResponse): boolean {
   if (!res.result || typeof res.result !== "object") return false;
@@ -305,4 +368,9 @@ export function isSelectorsResult(res: RpcResponse): boolean {
   if (!res.result || typeof res.result !== "object") return false;
   const r = res.result as Record<string, unknown>;
   return typeof r.site === "string" && "start" in r && "end" in r;
+}
+export function isFiltersResult(res: RpcResponse): boolean {
+  if (!res.result || typeof res.result !== "object") return false;
+  const r = res.result as Record<string, unknown>;
+  return Array.isArray(r.filters);
 }

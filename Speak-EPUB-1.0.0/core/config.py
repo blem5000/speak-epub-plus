@@ -1058,12 +1058,75 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
                 # truncate original for preview? keep full for diff
             except Exception:
                 original_text = ""
+            # Apply filters once after selector isolation (AD-2) — preview chip + filtered view
+            filtered_text = cleaned_text
+            filtered_html = cleaned_html
+            removed_count = 0
+            filters_for_preview: list[dict] = []
+            try:
+                # load filters from store (sanitized)
+                try:
+                    _store_preview = load_store()
+                    raw_filters = _store_preview.get("filters", [])
+                    # lazy import to keep linter happy
+                    import importlib as _il_f
+                    _fmod_f = _il_f.import_module("core.filters")
+                    _sanitize = getattr(_fmod_f, "sanitize_filters")
+                    _apply = getattr(_fmod_f, "apply_filters")
+                    filters_for_preview = _sanitize(raw_filters)
+                    if filters_for_preview:
+                        # HTML-aware filtering: remove matching <p>/blocks from cleaned_html, derive filtered_text from filtered_html
+                        try:
+                            _apply_html = getattr(_fmod_f, "apply_filters_to_html", None)
+                            if _apply_html is not None:
+                                filtered_html, removed_count = _apply_html(cleaned_html, filters_for_preview)
+                                # derive filtered_text from filtered_html
+                                try:
+                                    from bs4 import BeautifulSoup as _BSF
+                                    _soup_f = _BSF(filtered_html, "lxml") if filtered_html else None
+                                    if _soup_f is not None:
+                                        for _tag in _soup_f(["script", "style"]):
+                                            _tag.decompose()
+                                        ft = _soup_f.get_text(separator=" ", strip=True)
+                                        ft = _re3.sub(r"\s+", " ", ft).strip() if ft else ""
+                                        filtered_text = ft
+                                    else:
+                                        filtered_text = ""
+                                except Exception:
+                                    # fallback to text line filter
+                                    filtered_text, removed_count = _apply(cleaned_text, filters_for_preview)
+                            else:
+                                filtered_text, removed_count = _apply(cleaned_text, filters_for_preview)
+                                try:
+                                    filtered_html_candidate, _ = _apply(cleaned_html, filters_for_preview)
+                                    filtered_html = filtered_html_candidate
+                                except Exception:
+                                    filtered_html = cleaned_html
+                        except ValueError:
+                            raise
+                        except Exception:
+                            # fallback text filter
+                            filtered_text, removed_count = _apply(cleaned_text, filters_for_preview)
+                            filtered_html = cleaned_html
+                except ValueError as ve:
+                    # invalid regex in stored filters — surface as muted VALUE_ERROR but still return cleaned
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(ve)}}
+                except Exception:
+                    # non-fatal: keep cleaned
+                    filtered_text = cleaned_text
+                    removed_count = 0
+            except Exception:
+                filtered_text = cleaned_text
             return {"id": rid, "result": {
                 "url": url_param,
                 "originalHtml": raw_html,
                 "originalText": original_text[:8000],
                 "html": cleaned_html,
                 "text": cleaned_text,
+                "filteredHtml": filtered_html,
+                "filteredText": filtered_text,
+                "removedCount": removed_count,
+                "filters": filters_for_preview,
                 "start": start_eff,
                 "end": end_eff,
             }}
@@ -1120,6 +1183,151 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
                 return {"id": rid, "result": {"cleared": cleared, "site": site}}
             except Exception as e:
                 return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+    if method in ("getFilters", "addFilter", "removeFilter", "saveFilters", "updateFilter", "setFilters"):
+            # Filters CRUD — plain contains + regex, persisted via store.json AD-10
+            try:
+                import importlib as _il_ff
+                _fmod_ff = _il_ff.import_module("core.filters")
+                _sanitize_ff = getattr(_fmod_ff, "sanitize_filters")
+                _apply_ff = getattr(_fmod_ff, "apply_filters")
+            except Exception as e:
+                return {"id": rid, "error": {"code": "IMPORT_FAILED", "message": str(e)}}
+            if method == "getFilters":
+                try:
+                    data = load_store()
+                    raw = data.get("filters", [])
+                    sanitized = _sanitize_ff(raw)
+                    return {"id": rid, "result": {"filters": sanitized}}
+                except Exception as e:
+                    return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+            if method == "addFilter":
+                params = request.get("params") or {}
+                if not isinstance(params, dict):
+                    # allow pattern as string directly
+                    params = {"pattern": str(params), "isRegex": False}
+                pat = params.get("pattern", params.get("phrase", params.get("text", params.get("filter"))))
+                is_regex = params.get("isRegex", params.get("is_regex", params.get("type") == "regex"))
+                if isinstance(is_regex, str):
+                    is_regex = is_regex.lower() in ("regex", "true", "1")
+                is_regex = bool(is_regex) if is_regex is not None else False
+                if not isinstance(pat, str) or not pat.strip():
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "pattern must be non-empty"}}
+                pat = pat.strip()
+                if len(pat) > 200:
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "pattern too long (max 200)"}}
+                if is_regex:
+                    try:
+                        import re as _re_add
+                        _re_add.compile(pat)
+                    except Exception as e:
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid regex: {pat} {e}"}}
+                data = load_store()
+                raw = data.get("filters", [])
+                sanitized = _sanitize_ff(raw)
+                # dedup check
+                key = f"{pat}|{is_regex}"
+                for f in sanitized:
+                    if f"{f.get('pattern')}|{f.get('isRegex')}" == key:
+                        return {"id": rid, "result": {"filters": sanitized, "added": False, "reason": "duplicate"}}
+                sanitized.append({"pattern": pat, "isRegex": is_regex})
+                # cap 100 filters
+                if len(sanitized) > 100:
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "too many filters (max 100)"}}
+                save_store({"filters": sanitized})
+                return {"id": rid, "result": {"filters": sanitized, "added": True}}
+            if method == "removeFilter":
+                params = request.get("params") or {}
+                idx = None
+                pat_rm = None
+                is_regex_rm = None
+                if isinstance(params, dict):
+                    # allow index
+                    idx = params.get("index", params.get("idx", params.get("i")))
+                    pat_rm = params.get("pattern", params.get("phrase"))
+                    is_regex_rm = params.get("isRegex", params.get("is_regex"))
+                    if isinstance(is_regex_rm, str):
+                        is_regex_rm = is_regex_rm.lower() in ("regex", "true", "1")
+                elif isinstance(params, (int, float)):
+                    idx = params
+                try:
+                    data = load_store()
+                    raw = data.get("filters", [])
+                    sanitized = _sanitize_ff(raw)
+                    if idx is not None:
+                        try:
+                            idx_i = int(idx)  # type: ignore
+                        except Exception:
+                            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "index must be integer"}}
+                        if idx_i < 0 or idx_i >= len(sanitized):
+                            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "index out of range"}}
+                        sanitized.pop(idx_i)
+                        save_store({"filters": sanitized})
+                        return {"id": rid, "result": {"filters": sanitized, "removed": True}}
+                    if pat_rm and isinstance(pat_rm, str):
+                        pat_rm = pat_rm.strip()
+                        is_regex_rm = bool(is_regex_rm) if is_regex_rm is not None else None
+                        new_list: list[dict] = []
+                        removed = False
+                        for f in sanitized:
+                            if f.get("pattern") == pat_rm and (is_regex_rm is None or f.get("isRegex") == bool(is_regex_rm)):
+                                removed = True
+                                continue
+                            new_list.append(f)
+                        if not removed:
+                            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "filter not found"}}
+                        save_store({"filters": new_list})
+                        return {"id": rid, "result": {"filters": new_list, "removed": True}}
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "index or pattern required"}}
+                except Exception as e:
+                    return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+            if method in ("saveFilters", "setFilters", "updateFilter"):
+                params = request.get("params") or {}
+                filters_in: Any = None
+                if isinstance(params, dict):
+                    filters_in = params.get("filters", params.get("list", params.get("items")))
+                    if filters_in is None and "pattern" in params:
+                        # single filter update? treat as save single list
+                        filters_in = [params]
+                elif isinstance(params, list):
+                    filters_in = params
+                else:
+                    filters_in = []
+                if filters_in is None:
+                    filters_in = []
+                if not isinstance(filters_in, list):
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "filters must be list"}}
+                if len(filters_in) > 100:
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "too many filters (max 100)"}}
+                # validate each
+                sanitized: list[dict] = []
+                seen: set[str] = set()
+                for f in filters_in:
+                    if not isinstance(f, dict):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "each filter must be object"}}
+                    pat2 = f.get("pattern", f.get("phrase", f.get("text")))
+                    is_r2 = f.get("isRegex", f.get("is_regex", f.get("type") == "regex"))
+                    if isinstance(is_r2, str):
+                        is_r2 = is_r2.lower() in ("regex", "true", "1")
+                    is_r2 = bool(is_r2) if is_r2 is not None else False
+                    if not isinstance(pat2, str) or not pat2.strip():
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "pattern must be non-empty"}}
+                    pat2 = pat2.strip()
+                    if len(pat2) > 200:
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "pattern too long (max 200)"}}
+                    if is_r2:
+                        try:
+                            import re as _re_save
+                            _re_save.compile(pat2)
+                        except Exception as e:
+                            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid regex: {pat2} {e}"}}
+                    key2 = f"{pat2}|{is_r2}"
+                    if key2 in seen:
+                        continue
+                    seen.add(key2)
+                    sanitized.append({"pattern": pat2, "isRegex": is_r2})
+                save_store({"filters": sanitized})
+                return {"id": rid, "result": {"filters": sanitized, "saved": True}}
 
     # For future methods, indicate mock only
     return {
