@@ -19,6 +19,8 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -312,6 +314,190 @@ async def run_part_jobs(jobs: List[PartJob], voice: str, parallel: int, retries:
         raise
 
 
+def ffmpeg_available() -> bool:
+    return shutil.which("ffmpeg") is not None
+
+
+def ffprobe_available() -> bool:
+    return shutil.which("ffprobe") is not None
+
+
+def concat_mp3_files(input_paths: List[str], output_path: str) -> None:
+    if not ffmpeg_available():
+        raise RuntimeError("ffmpeg is not available")
+
+    concat_file = str(Path(output_path).with_suffix(".concat.txt"))
+    try:
+        with open(concat_file, "w", encoding="utf-8") as f:
+            for p in input_paths:
+                safe = os.path.abspath(p).replace("\\", "/").replace("'", "\\'")
+                f.write(f"file '{safe}'\n")
+
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file, "-c", "copy", output_path],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    finally:
+        if os.path.exists(concat_file):
+            os.remove(concat_file)
+
+
+def get_duration_ms(path: str) -> int:
+    if not ffprobe_available():
+        return 0
+
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            path,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    try:
+        return int(float(result.stdout.strip()) * 1000)
+    except ValueError:
+        return 0
+
+
+def escape_ffmeta(s: str) -> str:
+    return re.sub(r"([=;#\\])", r"\\\1", s).replace("\n", "\\n")
+
+
+def finalize_chapter_audio(plans: List[ChapterPlan], keep_parts: bool) -> List[AudioEntry]:
+    audio_entries: List[AudioEntry] = []
+    has_ffmpeg = ffmpeg_available()
+
+    print("\nFinalizing chapter files...")
+
+    for plan in plans:
+        if not plan.part_paths:
+            continue
+
+        # Single-chunk chapter.
+        if len(plan.part_paths) == 1 and plan.part_paths[0] == plan.chapter_mp3:
+            if os.path.exists(plan.chapter_mp3):
+                audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
+            else:
+                print(f"Warning: missing chapter MP3: {plan.chapter_mp3}")
+            continue
+
+        # Multi-part chapter.
+        if os.path.exists(plan.chapter_mp3):
+            audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
+            size_kb = os.path.getsize(plan.chapter_mp3) // 1024
+            print(f"Chapter {plan.chapter_number:03d}: existing merged file reused ({size_kb} KB)")
+            continue
+
+        missing_parts = [p for p in plan.part_paths if not os.path.exists(p)]
+        if missing_parts:
+            print(f"Warning: Chapter {plan.chapter_number:03d} has missing part files; keeping available parts only.")
+            for entry in plan.marker_entries_if_unmerged:
+                if os.path.exists(entry[2]):
+                    audio_entries.append(entry)
+            continue
+
+        if has_ffmpeg:
+            print(f"Chapter {plan.chapter_number:03d}: merging {len(plan.part_paths)} part(s)")
+            concat_mp3_files(plan.part_paths, plan.chapter_mp3)
+            audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
+
+            if not keep_parts:
+                for part_path in plan.part_paths:
+                    if os.path.exists(part_path):
+                        os.remove(part_path)
+        else:
+            print(f"Chapter {plan.chapter_number:03d}: ffmpeg unavailable, keeping {len(plan.part_paths)} part files")
+            audio_entries.extend(plan.marker_entries_if_unmerged)
+
+    # Try to remove empty _parts folder.
+    if not keep_parts:
+        part_dirs = sorted({str(Path(p).parent) for plan in plans for p in plan.part_paths if "_parts" in str(Path(p).parent)})
+        for part_dir in part_dirs:
+            try:
+                os.rmdir(part_dir)
+            except OSError:
+                pass
+
+    audio_entries.sort(key=lambda x: (x[0], x[2]))
+    return audio_entries
+
+
+def build_m4b(output_dir: str, audio_entries: List[AudioEntry], book_title: str, ext: str = "m4b") -> None:
+    if not ffmpeg_available():
+        print(f"\nWarning: ffmpeg not found on PATH - skipping {ext.upper()} creation.")
+        print("Install FFmpeg from https://ffmpeg.org/download.html and add it to PATH.")
+        return
+    if not ffprobe_available():
+        print(f"\nWarning: ffprobe not found on PATH - skipping {ext.upper()} creation.")
+        print("ffprobe is normally installed together with FFmpeg.")
+        return
+
+    print(f"\nBuilding {ext.upper()}...")
+    concat_file = os.path.join(output_dir, "_concat.txt")
+
+    with open(concat_file, "w", encoding="utf-8") as f:
+        for _, _, path in audio_entries:
+            safe = os.path.abspath(path).replace("\\", "/").replace("'", "\\'")
+            f.write(f"file '{safe}'\n")
+
+    metadata_file = os.path.join(output_dir, "_metadata.txt")
+    with open(metadata_file, "w", encoding="utf-8") as f:
+        f.write(";FFMETADATA1\n")
+        f.write(f"title={escape_ffmeta(book_title)}\n\n")
+        cursor = 0
+        for chapter_number, marker_title, path in audio_entries:
+            duration = get_duration_ms(path)
+            chapter_title = f"{chapter_number:03d} - {marker_title}"
+            f.write("[CHAPTER]\n")
+            f.write("TIMEBASE=1/1000\n")
+            f.write(f"START={cursor}\n")
+            f.write(f"END={cursor + duration}\n")
+            f.write(f"title={escape_ffmeta(chapter_title)}\n\n")
+            cursor += duration
+
+    out_path = os.path.join(output_dir, f"{book_title}.{ext}")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                concat_file,
+                "-i",
+                metadata_file,
+                "-map_metadata",
+                "1",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "64k",
+                out_path,
+            ],
+            check=True,
+        )
+    finally:
+        if os.path.exists(concat_file):
+            os.remove(concat_file)
+        if os.path.exists(metadata_file):
+            os.remove(metadata_file)
+
+    size_mb = os.path.getsize(out_path) / (1024 * 1024)
+    print(f"{ext.upper()} saved: {out_path} ({size_mb:.1f} MB)")
+
+
 __all__ = [
     "sanitize_filename",
     "PartJob",
@@ -320,4 +506,11 @@ __all__ = [
     "build_generation_plan",
     "tts_text_to_mp3",
     "run_part_jobs",
+    "ffmpeg_available",
+    "ffprobe_available",
+    "concat_mp3_files",
+    "get_duration_ms",
+    "escape_ffmeta",
+    "finalize_chapter_audio",
+    "build_m4b",
 ]

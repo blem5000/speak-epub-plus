@@ -17,6 +17,13 @@ from core.tts import (
     sanitize_filename,
     split_text_for_tts,
     tts_text_to_mp3,
+    ffmpeg_available,
+    ffprobe_available,
+    concat_mp3_files,
+    get_duration_ms,
+    escape_ffmeta,
+    finalize_chapter_audio,
+    build_m4b,
 )
 
 
@@ -815,3 +822,435 @@ def test_run_part_jobs_propagates_tts_failure(tmp_path, capsys):
     # progress should not reach 3/3
     out = capsys.readouterr().out
     assert "progress: 3/3" not in out
+
+
+# ---------------------------------------------------------------------------
+# Story 3.3 — FFmpeg merge per-chapter + single M4B z markerami
+# ---------------------------------------------------------------------------
+
+
+def test_ffmpeg_available_true():
+    with patch("core.tts.shutil.which", return_value="/usr/bin/ffmpeg"):
+        assert ffmpeg_available() is True
+
+
+def test_ffmpeg_available_false():
+    with patch("core.tts.shutil.which", return_value=None):
+        assert ffmpeg_available() is False
+
+
+def test_ffprobe_available_true():
+    with patch("core.tts.shutil.which", side_effect=lambda x: "/usr/bin/" + x if x == "ffprobe" else None):
+        assert ffprobe_available() is True
+
+
+def test_ffprobe_available_false():
+    with patch("core.tts.shutil.which", return_value=None):
+        assert ffprobe_available() is False
+
+
+def test_concat_mp3_files_success(tmp_path):
+    output = tmp_path / "040_C40.mp3"
+    # Create dummy input parts
+    p1 = tmp_path / "040_C40_part001.mp3"
+    p2 = tmp_path / "040_C40_part002.mp3"
+    p1.write_bytes(b"fake1")
+    p2.write_bytes(b"fake2")
+    input_paths = [str(p1), str(p2)]
+
+    concat_file = str(output.with_suffix(".concat.txt"))
+
+    captured = {}
+
+    def fake_run(args, check=True, stdout=None, stderr=None, **kwargs):
+        captured["args"] = args
+        # verify concat file content before it gets removed
+        assert os.path.exists(concat_file)
+        content = Path(concat_file).read_text(encoding="utf-8")
+        # spec: file '{safe}' where safe = abspath replace
+        for p in input_paths:
+            safe = os.path.abspath(p).replace("\\", "/").replace("'", "\\'")
+            assert f"file '{safe}'\n" in content
+        # simulate ffmpeg creating output
+        Path(output).write_bytes(b"merged")
+        return MagicMock(returncode=0)
+
+    with patch("core.tts.shutil.which", return_value="/usr/bin/ffmpeg"):
+        with patch("core.tts.subprocess.run", side_effect=fake_run) as mock_run:
+            concat_mp3_files(input_paths, str(output))
+
+    assert captured["args"] == ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file, "-c", "copy", str(output)]
+    mock_run.assert_called_once()
+    # concat_file cleaned up
+    assert not os.path.exists(concat_file)
+    assert output.exists()
+
+
+def test_concat_mp3_files_no_ffmpeg_raises(tmp_path):
+    output = tmp_path / "040_C40.mp3"
+    with patch("core.tts.shutil.which", return_value=None):
+        with pytest.raises(RuntimeError, match="ffmpeg is not available"):
+            concat_mp3_files([str(tmp_path / "a.mp3")], str(output))
+
+
+def test_get_duration_ms_via_ffprobe(tmp_path):
+    dummy = tmp_path / "dummy.mp3"
+    dummy.write_bytes(b"x")
+    # Happy 12.345 -> 12345
+    with patch("core.tts.shutil.which", return_value="/usr/bin/ffprobe"):
+        mock_result = MagicMock(stdout="12.345\n")
+        with patch("core.tts.subprocess.run", return_value=mock_result) as mock_run:
+            assert get_duration_ms(str(dummy)) == 12345
+            mock_run.assert_called_once()
+            args = mock_run.call_args[0][0]
+            assert args[0] == "ffprobe"
+            assert "-show_entries" in args
+            assert "format=duration" in args
+    # ValueError -> 0
+    with patch("core.tts.shutil.which", return_value="/usr/bin/ffprobe"):
+        mock_result2 = MagicMock(stdout="not_a_number\n")
+        with patch("core.tts.subprocess.run", return_value=mock_result2):
+            assert get_duration_ms(str(dummy)) == 0
+    # which false -> 0, no subprocess call
+    with patch("core.tts.shutil.which", return_value=None):
+        with patch("core.tts.subprocess.run") as mock_run2:
+            assert get_duration_ms(str(dummy)) == 0
+            mock_run2.assert_not_called()
+
+
+def test_escape_ffmeta():
+    # spec: re.sub r"([=;#\\])" r"\\\1" + replace "\n" "\\n"
+    # "a=b;c#d\e" + newline + "f"
+    assert escape_ffmeta("a=b;c#d\\e\nf") == "a\\=b\\;c\\#d\\\\e\\nf"
+    # Direct checks
+    assert escape_ffmeta("title=My;Book#1\\") == "title\\=My\\;Book\\#1\\\\"
+    assert escape_ffmeta("line1\nline2") == "line1\\nline2"
+    assert escape_ffmeta("a=b") == r"a\=b"
+    assert escape_ffmeta("a;b#c\\d") == r"a\;b\#c\\d"
+
+
+def test_finalize_chapter_audio_merges(tmp_path, capsys):
+    # Happy per-chapter merge: _parts/040_C40_part001.mp3 etc, 040_C40.mp3 missing, ffmpeg True, keep_parts False
+    out = tmp_path / "out_merges"
+    out.mkdir()
+    parts_dir = out / "_parts"
+    parts_dir.mkdir()
+    p1 = parts_dir / "040_C40_part001.mp3"
+    p2 = parts_dir / "040_C40_part002.mp3"
+    p1.write_bytes(b"p1")
+    p2.write_bytes(b"p2")
+    chapter_mp3 = out / "040_C40.mp3"
+    assert not chapter_mp3.exists()
+    plan = ChapterPlan(
+        chapter_number=40,
+        title="C40",
+        chapter_mp3=str(chapter_mp3),
+        part_paths=[str(p1), str(p2)],
+        marker_entries_if_unmerged=[(40, "C40 - part 1", str(p1)), (40, "C40 - part 2", str(p2))],
+    )
+
+    def fake_concat(input_paths, output_path):
+        # simulate ffmpeg merge creating file
+        Path(output_path).write_bytes(b"merged40")
+
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.concat_mp3_files", side_effect=fake_concat) as mock_concat:
+            entries = finalize_chapter_audio([plan], keep_parts=False)
+
+    mock_concat.assert_called_once_with([str(p1), str(p2)], str(chapter_mp3))
+    assert entries == [(40, "C40", str(chapter_mp3))]
+    assert chapter_mp3.exists()
+    # parts removed
+    assert not p1.exists()
+    assert not p2.exists()
+    # _parts dir removed if empty
+    assert not parts_dir.exists()
+    out_text = capsys.readouterr().out
+    assert "merging 2 part(s)" in out_text
+
+
+def test_finalize_no_ffmpeg_keeps_parts(tmp_path, capsys):
+    out = tmp_path / "out_no_ffmpeg"
+    out.mkdir()
+    parts_dir = out / "_parts"
+    parts_dir.mkdir()
+    p1 = parts_dir / "040_C40_part001.mp3"
+    p2 = parts_dir / "040_C40_part002.mp3"
+    p1.write_bytes(b"p1")
+    p2.write_bytes(b"p2")
+    chapter_mp3 = out / "040_C40.mp3"
+    plan = ChapterPlan(40, "C40", str(chapter_mp3), [str(p1), str(p2)], [(40, "C40 - part 1", str(p1)), (40, "C40 - part 2", str(p2))])
+
+    with patch("core.tts.ffmpeg_available", return_value=False):
+        with patch("core.tts.concat_mp3_files") as mock_concat:
+            entries = finalize_chapter_audio([plan], keep_parts=False)
+
+    mock_concat.assert_not_called()
+    # should extend marker_entries_if_unmerged (keep _parts files)
+    assert entries == [(40, "C40 - part 1", str(p1)), (40, "C40 - part 2", str(p2))]
+    assert p1.exists() and p2.exists()
+    assert "ffmpeg unavailable" in capsys.readouterr().out
+
+
+def test_finalize_missing_parts_warning(tmp_path, capsys):
+    out = tmp_path / "out_missing"
+    out.mkdir()
+    parts_dir = out / "_parts"
+    parts_dir.mkdir()
+    p1 = parts_dir / "040_C40_part001.mp3"
+    p2 = parts_dir / "040_C40_part002.mp3"
+    p1.write_bytes(b"p1")
+    # p2 missing
+    chapter_mp3 = out / "040_C40.mp3"
+    plan = ChapterPlan(40, "C40", str(chapter_mp3), [str(p1), str(p2)], [(40, "C40 - part 1", str(p1)), (40, "C40 - part 2", str(p2))])
+
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.concat_mp3_files") as mock_concat:
+            entries = finalize_chapter_audio([plan], keep_parts=False)
+
+    mock_concat.assert_not_called()
+    # only existing marker entries
+    assert entries == [(40, "C40 - part 1", str(p1))]
+    assert "missing part files" in capsys.readouterr().out.lower()
+
+
+def test_finalize_already_merged_skip(tmp_path, capsys):
+    out = tmp_path / "out_reuse"
+    out.mkdir()
+    parts_dir = out / "_parts"
+    parts_dir.mkdir()
+    p1 = parts_dir / "040_C40_part001.mp3"
+    p2 = parts_dir / "040_C40_part002.mp3"
+    p1.write_bytes(b"p1")
+    p2.write_bytes(b"p2")
+    chapter_mp3 = out / "040_C40.mp3"
+    chapter_mp3.write_bytes(b"already")
+    plan = ChapterPlan(40, "C40", str(chapter_mp3), [str(p1), str(p2)], [(40, "C40 - part 1", str(p1)), (40, "C40 - part 2", str(p2))])
+
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.concat_mp3_files") as mock_concat:
+            entries = finalize_chapter_audio([plan], keep_parts=False)
+
+    mock_concat.assert_not_called()
+    assert entries == [(40, "C40", str(chapter_mp3))]
+    assert "existing merged file reused" in capsys.readouterr().out
+
+
+def test_finalize_keep_parts_true(tmp_path):
+    out = tmp_path / "out_keep"
+    out.mkdir()
+    parts_dir = out / "_parts"
+    parts_dir.mkdir()
+    p1 = parts_dir / "040_C40_part001.mp3"
+    p2 = parts_dir / "040_C40_part002.mp3"
+    p1.write_bytes(b"p1")
+    p2.write_bytes(b"p2")
+    chapter_mp3 = out / "040_C40.mp3"
+    plan = ChapterPlan(40, "C40", str(chapter_mp3), [str(p1), str(p2)], [(40, "C40 - part 1", str(p1)), (40, "C40 - part 2", str(p2))])
+
+    def fake_concat(input_paths, output_path):
+        Path(output_path).write_bytes(b"merged")
+
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.concat_mp3_files", side_effect=fake_concat):
+            entries = finalize_chapter_audio([plan], keep_parts=True)
+
+    assert entries == [(40, "C40", str(chapter_mp3))]
+    # parts kept
+    assert p1.exists() and p2.exists()
+    assert parts_dir.exists()
+
+
+def test_finalize_single_chunk(tmp_path, capsys):
+    out = tmp_path / "out_single"
+    out.mkdir()
+    chapter_mp3 = out / "005_T.mp3"
+    chapter_mp3.write_bytes(b"single")
+    plan = ChapterPlan(5, "T", str(chapter_mp3), [str(chapter_mp3)], [(5, "T", str(chapter_mp3))])
+
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        entries = finalize_chapter_audio([plan], keep_parts=False)
+    assert entries == [(5, "T", str(chapter_mp3))]
+
+
+def test_finalize_empty_plans():
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        assert finalize_chapter_audio([], keep_parts=False) == []
+
+
+def test_build_m4b_creates_with_markers(tmp_path, capsys):
+    out = tmp_path / "out_m4b"
+    out.mkdir()
+    a = out / "001_Ch1.mp3"
+    b = out / "002_Ch2.mp3"
+    a.write_bytes(b"a")
+    b.write_bytes(b"b")
+    audio_entries = [(1, "Ch1", str(a)), (2, "Ch2", str(b))]
+    book_title = "book_chapters_001_to_002"
+
+    captured = {}
+
+    def fake_run(args, check=True, **kwargs):
+        captured["args"] = args
+        # Verify concat file before removal: it should exist and contain safe paths
+        concat_path = out / "_concat.txt"
+        metadata_path = out / "_metadata.txt"
+        assert concat_path.exists()
+        assert metadata_path.exists()
+        concat_content = concat_path.read_text(encoding="utf-8")
+        for _, _, p in audio_entries:
+            safe = os.path.abspath(p).replace("\\", "/").replace("'", "\\'")
+            assert f"file '{safe}'\n" in concat_content
+        meta = metadata_path.read_text(encoding="utf-8")
+        assert ";FFMETADATA1" in meta
+        assert f"title={escape_ffmeta(book_title)}" in meta
+        assert "TIMEBASE=1/1000" in meta
+        # duration 1000 each -> START 0 END 1000, START 1000 END 2000
+        assert "START=0" in meta
+        assert "END=1000" in meta
+        assert "START=1000" in meta
+        assert "END=2000" in meta
+        # chapter titles escaped
+        assert "title=001 - Ch1" in meta
+        assert "title=002 - Ch2" in meta
+        # simulate ffmpeg creating output
+        out_path = out / f"{book_title}.m4b"
+        out_path.write_bytes(b"m4bcontent" * 1024)
+        return MagicMock(returncode=0)
+
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.ffprobe_available", return_value=True):
+            with patch("core.tts.get_duration_ms", side_effect=[1000, 1000]):
+                with patch("core.tts.subprocess.run", side_effect=fake_run) as mock_run:
+                    build_m4b(str(out), audio_entries, book_title, ext="m4b")
+
+    mock_run.assert_called_once()
+    args = captured["args"]
+    assert args[0] == "ffmpeg"
+    assert "-y" in args and "-f" in args and "concat" in args
+    assert "-map_metadata" in args and "1" in args
+    assert "-c:a" in args and "aac" in args and "-b:a" in args and "64k" in args
+    expected_out = str(out / f"{book_title}.m4b")
+    assert args[-1] == expected_out
+    # temps removed
+    assert not (out / "_concat.txt").exists()
+    assert not (out / "_metadata.txt").exists()
+    assert (out / f"{book_title}.m4b").exists()
+    assert "M4B saved" in capsys.readouterr().out
+
+
+def test_build_m4b_no_ffmpeg_skip(tmp_path, capsys):
+    out = tmp_path / "out_nom4b"
+    out.mkdir()
+    with patch("core.tts.ffmpeg_available", return_value=False):
+        build_m4b(str(out), [(1, "Ch1", str(out / "a.mp3"))], "book", ext="m4b")
+    out_txt = capsys.readouterr().out
+    assert "ffmpeg not found" in out_txt.lower()
+    assert not (out / "book.m4b").exists()
+
+
+def test_build_m4b_no_ffprobe_skip(tmp_path, capsys):
+    out = tmp_path / "out_noprobe"
+    out.mkdir()
+    a = out / "001.mp3"
+    a.write_bytes(b"x")
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.ffprobe_available", return_value=False):
+            build_m4b(str(out), [(1, "Ch1", str(a))], "book", ext="m4b")
+    assert "ffprobe not found" in capsys.readouterr().out.lower()
+    assert not (out / "book.m4b").exists()
+
+
+def test_build_m4b_ffprobe_duration_zero(tmp_path, capsys):
+    # ffprobe returns 0 for each, metadata still written with START 0 END 0
+    out = tmp_path / "out_zero"
+    out.mkdir()
+    a = out / "001.mp3"
+    a.write_bytes(b"x")
+    audio_entries = [(1, "Ch1", str(a))]
+    captured_meta = {}
+
+    def fake_run(args, check=True, **kwargs):
+        meta_path = out / "_metadata.txt"
+        captured_meta["content"] = meta_path.read_text(encoding="utf-8")
+        Path(out / "book.m4b").write_bytes(b"x" * 1024)
+        return MagicMock(returncode=0)
+
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.ffprobe_available", return_value=True):
+            with patch("core.tts.get_duration_ms", return_value=0):
+                with patch("core.tts.subprocess.run", side_effect=fake_run):
+                    build_m4b(str(out), audio_entries, "book", ext="m4b")
+    assert "START=0" in captured_meta["content"]
+    assert "END=0" in captured_meta["content"]
+
+
+def test_speak_delegation_parity_merge(monkeypatch, tmp_path):
+    """speak.py wrappers must delegate to core.tts for 3.3 merge functions."""
+    import speak as speak_mod
+    import core.tts as core_mod
+
+    assert speak_mod.ffmpeg_available is not None
+    assert speak_mod.ffprobe_available is not None
+    assert speak_mod.concat_mp3_files is not None
+    assert speak_mod.get_duration_ms is not None
+    assert speak_mod.escape_ffmeta is not None
+    assert speak_mod.finalize_chapter_audio is not None
+    assert speak_mod.build_m4b is not None
+
+    # Verify delegation: patch core and check speak wrapper calls it
+    called = {}
+
+    def fake_ffmpeg():
+        called["ffmpeg"] = True
+        return True
+
+    def fake_ffprobe():
+        called["ffprobe"] = True
+        return True
+
+    def fake_concat(paths, out):
+        called["concat"] = (paths, out)
+
+    def fake_dur(p):
+        called["dur"] = p
+        return 123
+
+    def fake_escape(s):
+        called["escape"] = s
+        return "esc_" + s
+
+    def fake_finalize(plans, keep):
+        called["finalize"] = (plans, keep)
+        return [(1, "T", "/tmp/a.mp3")]
+
+    def fake_m4b(out_dir, entries, title, ext="m4b"):
+        called["m4b"] = (out_dir, entries, title, ext)
+
+    monkeypatch.setattr(core_mod, "ffmpeg_available", fake_ffmpeg)
+    monkeypatch.setattr(core_mod, "ffprobe_available", fake_ffprobe)
+    monkeypatch.setattr(core_mod, "concat_mp3_files", fake_concat)
+    monkeypatch.setattr(core_mod, "get_duration_ms", fake_dur)
+    monkeypatch.setattr(core_mod, "escape_ffmeta", fake_escape)
+    monkeypatch.setattr(core_mod, "finalize_chapter_audio", fake_finalize)
+    monkeypatch.setattr(core_mod, "build_m4b", fake_m4b)
+    # Also patch the alias that speak imported at import time
+    monkeypatch.setattr(speak_mod, "_core_ffmpeg", fake_ffmpeg, raising=False)
+    monkeypatch.setattr(speak_mod, "_core_ffprobe", fake_ffprobe, raising=False)
+    monkeypatch.setattr(speak_mod, "_core_concat", fake_concat, raising=False)
+    monkeypatch.setattr(speak_mod, "_core_dur", fake_dur, raising=False)
+    monkeypatch.setattr(speak_mod, "_core_escape", fake_escape, raising=False)
+    monkeypatch.setattr(speak_mod, "_core_finalize", fake_finalize, raising=False)
+    monkeypatch.setattr(speak_mod, "_core_m4b", fake_m4b, raising=False)
+
+    assert speak_mod.ffmpeg_available() is True
+    assert called["ffmpeg"] is True
+    assert speak_mod.ffprobe_available() is True
+    assert speak_mod.get_duration_ms("/tmp/x.mp3") == 123
+    assert speak_mod.escape_ffmeta("hi") == "esc_hi"
+    assert speak_mod.finalize_chapter_audio([], False) == [(1, "T", "/tmp/a.mp3")]
+    speak_mod.concat_mp3_files(["a"], "b")
+    assert called["concat"] == (["a"], "b")
+    speak_mod.build_m4b("out", [], "title")
+    assert called["m4b"][0] == "out"
+

@@ -50,10 +50,10 @@ development_status:
   2-4-epub-assembly-result-card-epubcheck: done
   epic-2-retrospective: optional
 
-  epic-3: in-progress
+  epic-3: done
   3-1-tts-chunking-partjob-queue-ratyfikacja-brownfield: done
   3-2-edge-tts-parallel-2-3-retries-_parts-skip: done
-  3-3-ffmpeg-merge-per-chapter-single-m4b-z-markerami: backlog
+  3-3-ffmpeg-merge-per-chapter-single-m4b-z-markerami: done
   epic-3-retrospective: optional
 
   epic-4: backlog

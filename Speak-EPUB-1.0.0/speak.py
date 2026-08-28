@@ -60,7 +60,13 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 Chapter = tuple[int, str, str]
 AudioEntry = tuple[int, str, str]
 
-# Core delegation — single source of truth AD-1 (3.1 ratyfikacja brownfield)
+# Root vs inner path handling: when executed from project root, core lives in Speak-EPUB-1.0.0/core
+if not (Path(__file__).resolve().parent / "core").is_dir():
+    _candidate = Path(__file__).resolve().parent / "Speak-EPUB-1.0.0"
+    if _candidate.is_dir() and str(_candidate) not in sys.path:
+        sys.path.insert(0, str(_candidate))
+
+# Core delegation — single source of truth AD-1 (3.1/3.3 ratyfikacja brownfield)
 # core/tts.py is pure Core-owned; speak.py delegates, does not duplicate.
 from core.tts import PartJob, ChapterPlan
 from core.tts import sanitize_filename as _core_sanitize
@@ -68,6 +74,13 @@ from core.tts import split_text_for_tts as _core_split_tts
 from core.tts import build_generation_plan as _core_build_plan
 from core.tts import tts_text_to_mp3 as _core_tts
 from core.tts import run_part_jobs as _core_run
+from core.tts import ffmpeg_available as _core_ffmpeg
+from core.tts import ffprobe_available as _core_ffprobe
+from core.tts import concat_mp3_files as _core_concat
+from core.tts import get_duration_ms as _core_dur
+from core.tts import escape_ffmeta as _core_escape
+from core.tts import finalize_chapter_audio as _core_finalize
+from core.tts import build_m4b as _core_m4b
 
 
 def sanitize_filename(value: str, fallback: str = "chapter", max_len: int = 60) -> str:
@@ -138,55 +151,23 @@ async def list_voices(all_languages: bool = False) -> None:
 
 
 def ffmpeg_available() -> bool:
-    return shutil.which("ffmpeg") is not None
+    return _core_ffmpeg()
 
 
 def ffprobe_available() -> bool:
-    return shutil.which("ffprobe") is not None
+    return _core_ffprobe()
 
 
 def concat_mp3_files(input_paths: list[str], output_path: str) -> None:
-    if not ffmpeg_available():
-        raise RuntimeError("ffmpeg is not available")
-
-    concat_file = str(Path(output_path).with_suffix(".concat.txt"))
-    try:
-        with open(concat_file, "w", encoding="utf-8") as f:
-            for p in input_paths:
-                safe = os.path.abspath(p).replace("\\", "/").replace("'", "\\'")
-                f.write(f"file '{safe}'\n")
-
-        subprocess.run(
-            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file, "-c", "copy", output_path],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    finally:
-        if os.path.exists(concat_file):
-            os.remove(concat_file)
+    return _core_concat(input_paths, output_path)
 
 
 def get_duration_ms(path: str) -> int:
-    if not ffprobe_available():
-        return 0
-
-    result = subprocess.run(
-        [
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", path,
-        ],
-        capture_output=True,
-        text=True,
-    )
-    try:
-        return int(float(result.stdout.strip()) * 1000)
-    except ValueError:
-        return 0
+    return _core_dur(path)
 
 
 def escape_ffmeta(s: str) -> str:
-    return re.sub(r"([=;#\\])", r"\\\1", s).replace("\n", "\\n")
+    return _core_escape(s)
 
 
 def build_generation_plan(chapters: list[Chapter], output_dir: str, chunk_size: int) -> tuple[list[ChapterPlan], list[PartJob]]:
@@ -199,114 +180,11 @@ async def run_part_jobs(jobs: list[PartJob], voice: str, parallel: int, retries:
 
 
 def finalize_chapter_audio(plans: list[ChapterPlan], keep_parts: bool) -> list[AudioEntry]:
-    audio_entries: list[AudioEntry] = []
-    has_ffmpeg = ffmpeg_available()
-
-    print("\nFinalizing chapter files...")
-
-    for plan in plans:
-        if not plan.part_paths:
-            continue
-
-        # Single-chunk chapter.
-        if len(plan.part_paths) == 1 and plan.part_paths[0] == plan.chapter_mp3:
-            if os.path.exists(plan.chapter_mp3):
-                audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
-            else:
-                print(f"Warning: missing chapter MP3: {plan.chapter_mp3}")
-            continue
-
-        # Multi-part chapter.
-        if os.path.exists(plan.chapter_mp3):
-            audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
-            size_kb = os.path.getsize(plan.chapter_mp3) // 1024
-            print(f"Chapter {plan.chapter_number:03d}: existing merged file reused ({size_kb} KB)")
-            continue
-
-        missing_parts = [p for p in plan.part_paths if not os.path.exists(p)]
-        if missing_parts:
-            print(f"Warning: Chapter {plan.chapter_number:03d} has missing part files; keeping available parts only.")
-            for entry in plan.marker_entries_if_unmerged:
-                if os.path.exists(entry[2]):
-                    audio_entries.append(entry)
-            continue
-
-        if has_ffmpeg:
-            print(f"Chapter {plan.chapter_number:03d}: merging {len(plan.part_paths)} part(s)")
-            concat_mp3_files(plan.part_paths, plan.chapter_mp3)
-            audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
-
-            if not keep_parts:
-                for part_path in plan.part_paths:
-                    if os.path.exists(part_path):
-                        os.remove(part_path)
-        else:
-            print(f"Chapter {plan.chapter_number:03d}: ffmpeg unavailable, keeping {len(plan.part_paths)} part files")
-            audio_entries.extend(plan.marker_entries_if_unmerged)
-
-    # Try to remove empty _parts folder.
-    if not keep_parts:
-        part_dirs = sorted({str(Path(p).parent) for plan in plans for p in plan.part_paths if "_parts" in str(Path(p).parent)})
-        for part_dir in part_dirs:
-            try:
-                os.rmdir(part_dir)
-            except OSError:
-                pass
-
-    audio_entries.sort(key=lambda x: (x[0], x[2]))
-    return audio_entries
+    return _core_finalize(plans, keep_parts)
 
 
 def build_m4b(output_dir: str, audio_entries: list[AudioEntry], book_title: str, ext: str = "m4b") -> None:
-    if not ffmpeg_available():
-        print(f"\nWarning: ffmpeg not found on PATH - skipping {ext.upper()} creation.")
-        print("Install FFmpeg from https://ffmpeg.org/download.html and add it to PATH.")
-        return
-    if not ffprobe_available():
-        print(f"\nWarning: ffprobe not found on PATH - skipping {ext.upper()} creation.")
-        print("ffprobe is normally installed together with FFmpeg.")
-        return
-
-    print(f"\nBuilding {ext.upper()}...")
-    concat_file = os.path.join(output_dir, "_concat.txt")
-
-    with open(concat_file, "w", encoding="utf-8") as f:
-        for _, _, path in audio_entries:
-            safe = os.path.abspath(path).replace("\\", "/").replace("'", "\\'")
-            f.write(f"file '{safe}'\n")
-
-    metadata_file = os.path.join(output_dir, "_metadata.txt")
-    with open(metadata_file, "w", encoding="utf-8") as f:
-        f.write(";FFMETADATA1\n")
-        f.write(f"title={escape_ffmeta(book_title)}\n\n")
-        cursor = 0
-        for chapter_number, marker_title, path in audio_entries:
-            duration = get_duration_ms(path)
-            chapter_title = f"{chapter_number:03d} - {marker_title}"
-            f.write("[CHAPTER]\n")
-            f.write("TIMEBASE=1/1000\n")
-            f.write(f"START={cursor}\n")
-            f.write(f"END={cursor + duration}\n")
-            f.write(f"title={escape_ffmeta(chapter_title)}\n\n")
-            cursor += duration
-
-    out_path = os.path.join(output_dir, f"{book_title}.{ext}")
-    try:
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file,
-                "-i", metadata_file, "-map_metadata", "1", "-c:a", "aac", "-b:a", "64k", out_path,
-            ],
-            check=True,
-        )
-    finally:
-        if os.path.exists(concat_file):
-            os.remove(concat_file)
-        if os.path.exists(metadata_file):
-            os.remove(metadata_file)
-
-    size_mb = os.path.getsize(out_path) / (1024 * 1024)
-    print(f"{ext.upper()} saved: {out_path} ({size_mb:.1f} MB)")
+    return _core_m4b(output_dir, audio_entries, book_title, ext)
 
 
 async def convert(
