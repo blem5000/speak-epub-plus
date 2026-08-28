@@ -61,21 +61,26 @@ def get_cache_path(url: str, cache_dir: Path | str | None = None) -> Path:
 
 
 def read_cache(url: str, cache_dir: Path | str | None = None) -> str | None:
-    """Read cached raw.html utf-8 if exists, else None."""
+    """Read cached raw.html utf-8 if exists, else None. Empty/corrupt → None."""
     p = get_cache_path(url, cache_dir)
     if p.is_file():
         try:
-            return p.read_text(encoding="utf-8")
+            txt = p.read_text(encoding="utf-8")
+            if not txt or not txt.strip():
+                return None
+            return txt
         except Exception:
             return None
     return None
 
 
 def write_cache(url: str, html: str, cache_dir: Path | str | None = None) -> Path:
-    """Write raw.html utf-8, return Path. Creates parent dirs."""
+    """Write raw.html utf-8 atomically via tmp+replace, return Path."""
     p = get_cache_path(url, cache_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(html, encoding="utf-8")
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(html, encoding="utf-8")
+    tmp.replace(p)
     return p
 
 # ---------------------------------------------------------------------------
@@ -114,6 +119,7 @@ def fetch_one(
     on_log: Optional[Callable[[str], None]] = None,
     on_throttle: Optional[Callable[[str, int], None]] = None,
     max_retries: int = 5,
+    status_idx: int | None = None,
 ) -> Any:
     """Fetch single chapter via adapter, with sha1 cache and adaptive 429.
 
@@ -127,6 +133,8 @@ def fetch_one(
 
     adapter must implement fetchChapter(url) -> ChapterContent per ports.ScraperPort.
     """
+    if max_retries is not None and max_retries < 1:
+        raise ValueError("max_retries must be >=1")
     if not isinstance(url, str) or not url.strip():
         raise ValueError("url must be non-empty")
     url = url.strip()
@@ -142,7 +150,7 @@ def fetch_one(
     except Exception as e:
         raise ValueError(str(e)) from e
 
-    # cache hit paths — resume
+    # cache hit paths — resume (use status_idx if provided, else 0 for single)
     cached = read_cache(url, cache_dir)
     if cached is not None:
         if on_log:
@@ -152,7 +160,7 @@ def fetch_one(
                 pass
         if on_status:
             try:
-                on_status(0, "done")
+                on_status(status_idx if status_idx is not None else 0, "done")
             except Exception:
                 pass
         # Build ChapterContent from cached html (raw not filtered, but parse title/text)
@@ -189,7 +197,7 @@ def fetch_one(
         try:
             if on_status:
                 try:
-                    on_status(0, "fetching")
+                    on_status(status_idx if status_idx is not None else 0, "fetching")
                 except Exception:
                     pass
             if on_log and attempt > 1:
@@ -213,7 +221,7 @@ def fetch_one(
                 pass
             if on_status:
                 try:
-                    on_status(0, "done")
+                    on_status(status_idx if status_idx is not None else 0, "done")
                 except Exception:
                     pass
             if on_log:
@@ -226,17 +234,15 @@ def fetch_one(
             last_exc = e
             msg = str(e)
             code = getattr(e, "code", "")
-            # detect 429 / 5xx / timeout
+            # detect 429 / 5xx / timeout — only these are retryable; 404/403 LIST_FAILED is NOT retryable
             is_429 = "429" in msg or "429" in code or "Too Many" in msg
             is_5xx = bool(re.search(r"\b5\d\d\b", msg)) or "5xx" in msg.lower()
             is_timeout = "timeout" in msg.lower() or "timed out" in msg.lower()
-            # AdapterError FETCH_FAILED wrapping 429 will be caught as 429
-            # Treat any FETCH_FAILED/LIST_FAILED as retryable for robustness
-            retryable = is_429 or is_5xx or is_timeout or code in ("FETCH_FAILED", "LIST_FAILED", "UNKNOWN")
+            retryable = is_429 or is_5xx or is_timeout
             if not retryable:
                 if on_status:
                     try:
-                        on_status(0, "error")
+                        on_status(status_idx if status_idx is not None else 0, "error")
                     except Exception:
                         pass
                 try:
@@ -249,14 +255,19 @@ def fetch_one(
             if attempt >= max_retries:
                 if on_status:
                     try:
-                        on_status(0, "error")
+                        on_status(status_idx if status_idx is not None else 0, "error")
                     except Exception:
                         pass
                 if on_log:
                     try:
-                        # spec expects log retry 1/5 429 chapter 42 etc
                         if is_429:
-                            on_log(f"retry {attempt}/{max_retries} 429 chapter {url}")
+                            # log chapter number if extractable, else url
+                            try:
+                                m = re.search(r"/chapter/(\d+)", url)
+                                ch_label = m.group(1) if m else url
+                            except Exception:
+                                ch_label = url
+                            on_log(f"retry {attempt}/{max_retries} 429 chapter {ch_label}")
                         else:
                             on_log(f"retry {attempt}/{max_retries} failed {url} {msg}")
                     except Exception:
@@ -288,7 +299,12 @@ def fetch_one(
                             pass
                     if on_log:
                         try:
-                            on_log(f"retry {attempt}/{max_retries} 429 chapter {url}")
+                            try:
+                                m2 = re.search(r"/chapter/(\d+)", url)
+                                ch2 = m2.group(1) if m2 else url
+                            except Exception:
+                                ch2 = url
+                            on_log(f"retry {attempt}/{max_retries} 429 chapter {ch2}")
                         except Exception:
                             pass
                 else:
@@ -377,17 +393,24 @@ def fetch_many(
         except Exception:
             pass
 
-    # Ensure urls is list
+    # Ensure urls is list + guard payload size (DoS) + dedup + trim
     if urls is None:
         urls = []
     if not isinstance(urls, (list, tuple)):
         urls = [urls]  # type: ignore
-    # filter non-string
-    urls = [u for u in urls if isinstance(u, str) and u.strip()]
-    urls = [u.strip() for u in urls]
+    # guard: reject non-string entries explicitly (VALUE_ERROR) — catch bugs early
+    # keep filter for legacy but also detect invalid to surface error via caller validation
+    if isinstance(urls, (list, tuple)) and any(not isinstance(u, str) for u in urls):
+        # filter but log; strict callers (handle_rpc) already validated via _validate_url
+        urls = [u for u in urls if isinstance(u, str)]
+    urls = [u.strip() for u in urls if isinstance(u, str) and u.strip()]
+    # dedup preserve order
+    urls = list(dict.fromkeys(urls))
+    if len(urls) > 1000:
+        raise ValueError("too many urls (max 1000)")
 
-    # Determine mode: open-ended if to_idx is None and novel_url provided (or urls empty and novel_url)
-    is_open_ended = (to_idx is None) and (novel_url is not None)
+    # Determine mode: open-ended if to_idx is None or <1 and novel_url provided
+    is_open_ended = (to_idx is None or (isinstance(to_idx, int) and to_idx < 1)) and (novel_url is not None)
 
     # Use lock to prevent parallel scrape
     global _FETCHING
@@ -438,6 +461,8 @@ def fetch_many(
                 u = getattr(ci, "url", None)
                 if isinstance(u, str) and u.strip():
                     desired.append(u.strip())
+            # Dedup preserve order for open-ended fresh list
+            desired = list(dict.fromkeys(desired))
             # Diff vs cache: which of desired not cached?
             # For badge "pominięto 100, wykryto 42 nowe"
             skipped = sum(1 for u in desired if read_cache(u, cache_dir) is not None)
@@ -499,6 +524,7 @@ def fetch_many(
                     desired = [getattr(ci, "url", "").strip() for ci in fresh_list[f - 1 : t] if getattr(ci, "url", "")]
             else:
                 desired = list(urls)
+                desired = list(dict.fromkeys(desired))
 
             # Diff vs cache
             skipped = sum(1 for u in desired if read_cache(u, cache_dir) is not None)
@@ -546,13 +572,35 @@ def fetch_many(
         results: List[Any] = []
         failed: List[str] = []
         tier = "polite"
+        # Build chapter index map for correct status mapping (D1 fix)
+        # For bounded, map url -> actual ch.index via desired order + from_idx offset; fallback idx+1
+        url_to_ch: dict[str, int] = {}
+        try:
+            if not is_open_ended and from_idx is not None:
+                for i, u in enumerate(desired):
+                    # estimate ch index: from_idx + position among desired
+                    url_to_ch[u] = int(from_idx) + i
+            else:
+                for i, u in enumerate(desired):
+                    url_to_ch[u] = i + 1
+            # for open-ended, use skipped offset for missing
+            if is_open_ended:
+                for i, u in enumerate(missing):
+                    if u not in url_to_ch:
+                        url_to_ch[u] = skipped + i + 1
+        except Exception:
+            pass
+
         for idx, url in enumerate(missing):
-            # status queued/fetching
+            # resolve chapter number for status
+            try:
+                ch_num = url_to_ch.get(url, (from_idx + idx if from_idx else idx + 1) + skipped if not is_open_ended else idx + skipped + 1)
+                ch_num = int(ch_num) if isinstance(ch_num, int) else idx + 1
+            except Exception:
+                ch_num = idx + 1
             if on_status:
                 try:
-                    # chapter number may be idx+ skipped + from_idx offset?
-                    ch_num = (from_idx + idx if from_idx else idx + 1) + skipped if not is_open_ended else idx + skipped + 1
-                    on_status(int(ch_num) if isinstance(ch_num, int) else idx + 1, "fetching")
+                    on_status(ch_num, "fetching")
                 except Exception:
                     try:
                         on_status(idx + 1, "fetching")
@@ -563,12 +611,11 @@ def fetch_many(
                 d = polite_delay(tier)
                 time.sleep(d)
             try:
-                cc = fetch_one(url, adapter, cache_dir=cache_dir, on_status=on_status, on_log=on_log, on_throttle=on_throttle)
+                cc = fetch_one(url, adapter, cache_dir=cache_dir, on_status=on_status, on_log=on_log, on_throttle=on_throttle, status_idx=ch_num)
                 results.append(cc)
                 if on_status:
                     try:
-                        ch_num = (from_idx + idx if from_idx else idx + 1) + skipped if not is_open_ended else idx + skipped + 1
-                        on_status(int(ch_num) if isinstance(ch_num, int) else idx + 1, "done")
+                        on_status(ch_num, "done")
                     except Exception:
                         try:
                             on_status(idx + 1, "done")
@@ -578,8 +625,7 @@ def fetch_many(
                 # per-chapter LIST_FAILED, skip to next, logLine error chapterStatus error
                 if on_status:
                     try:
-                        ch_num = (from_idx + idx if from_idx else idx + 1) + skipped if not is_open_ended else idx + skipped + 1
-                        on_status(int(ch_num) if isinstance(ch_num, int) else idx + 1, "error")
+                        on_status(ch_num, "error")
                     except Exception:
                         try:
                             on_status(idx + 1, "error")

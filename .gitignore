@@ -62,3 +62,5 @@ _bmad/render/
 # _cache directory is kept with .gitkeep; *.mp3 already ignored above
 !Speak-EPUB-1.0.0/_cache/
 !Speak-EPUB-1.0.0/_cache/.gitkeep
+!Speak-EPUB-1.0.0/_cache/**
+!Speak-EPUB-1.0.0/_cache/**/*.html

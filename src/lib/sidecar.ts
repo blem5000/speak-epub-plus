@@ -198,11 +198,12 @@ export async function fetchChapters(
   params: FetchChaptersParams,
   opts?: { signal?: AbortSignal }
 ): Promise<RpcResponse> {
-  // normalize camel/snake for Python side
+  // normalize camel/snake + trim + guard
+  if (params.urls && params.urls.length > 1000) throw new Error("too many urls");
   const payload: Record<string, unknown> = {};
-  if (params.urls) payload.urls = params.urls;
-  if (params.novelUrl) payload.novelUrl = params.novelUrl;
-  if (params.novel_url) payload.novelUrl = params.novel_url;
+  if (params.urls) payload.urls = params.urls.map((u) => u.trim()).filter(Boolean);
+  if (params.novelUrl) payload.novelUrl = params.novelUrl.trim();
+  if (params.novel_url) payload.novelUrl = params.novel_url.trim();
   if (params.from !== undefined) payload.from = params.from;
   if (params.to !== undefined) payload.to = params.to;
   return callSidecar("fetchChapters", payload, opts);
@@ -213,18 +214,22 @@ export async function getCacheStatus(
   opts?: { signal?: AbortSignal }
 ): Promise<RpcResponse> {
   const payload: Record<string, unknown> = {};
-  if (params.urls) payload.urls = params.urls;
-  if (params.novelUrl) payload.novelUrl = params.novelUrl;
-  if (params.novel_url) payload.novel_url = params.novel_url;
+  if (params.urls) payload.urls = params.urls.map((u) => u.trim()).filter(Boolean);
+  if (params.novelUrl) payload.novelUrl = params.novelUrl.trim();
+  if (params.novel_url) payload.novel_url = params.novel_url.trim();
   if (params.from !== undefined) payload.from = params.from;
   if (params.to !== undefined) payload.to = params.to;
   return callSidecar("getCacheStatus", payload, opts);
 }
 
-// Type guards for fetchChapter(s) responses
+// Type guards for fetchChapter(s) responses — strict shape
 export function isFetchChapterResult(res: RpcResponse): boolean {
-  return !!res.result && typeof res.result === "object" && "html" in (res.result as Record<string, unknown>);
+  if (!res.result || typeof res.result !== "object") return false;
+  const r = res.result as Record<string, unknown>;
+  return typeof r.html === "string" && typeof r.url === "string" && "text" in r;
 }
 export function isFetchChaptersResult(res: RpcResponse): boolean {
-  return !!res.result && typeof res.result === "object" && "chapters" in (res.result as Record<string, unknown>);
+  if (!res.result || typeof res.result !== "object") return false;
+  const r = res.result as Record<string, unknown>;
+  return Array.isArray(r.chapters) && typeof r.total === "number" && typeof r.skipped === "number";
 }

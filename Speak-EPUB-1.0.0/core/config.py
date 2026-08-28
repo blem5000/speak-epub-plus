@@ -519,8 +519,15 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
 
         if urls is None:
             urls = []
-        # Validate urls if present
-        if isinstance(urls, list) and len(urls) > 0:
+        # Validate urls if present + guard payload size + dedup
+        if isinstance(urls, (list, tuple)) and len(urls) > 0:  # type: ignore
+            if len(urls) > 1000:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "too many urls (max 1000)"}}
+            # dedup preserve order before validation
+            try:
+                urls = list(dict.fromkeys(urls))  # type: ignore
+            except Exception:
+                pass
             for u in urls:  # type: ignore
                 _, err_code2, err_msg2 = _validate_url(u, False)  # type: ignore
                 if err_code2:
@@ -536,6 +543,9 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
             if isinstance(novelUrl, str) and not novelUrl.strip():
                 novelUrl = None
 
+        # ensure tuple → list for downstream fetch_many
+        if isinstance(urls, tuple):
+            urls = list(urls)  # type: ignore
         if not urls and not novelUrl:
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "urls or novelUrl required"}}
 

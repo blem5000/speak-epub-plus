@@ -513,8 +513,9 @@ export default function App(): JSX.Element {
                       : "bg-muted text-muted-foreground")
                   }
                   aria-live="polite"
+                  aria-label={`throttle ${throttle?.tier ?? "polite"} ${throttle?.delay ?? ""}`}
                 >
-                  {throttle?.tier === "safe" ? `safe ${throttle.delay}` : throttle?.tier ?? "polite"}
+                  {throttle?.tier === "safe" ? `safe ${throttle.delay}` : throttle?.tier ?? "polite (oczekiwanie)"}
                 </span>
                 {badge ? (
                   <span data-testid="resume-badge" className="rounded-full bg-accent/10 px-3 py-1 text-body-sm text-accent-foreground">
@@ -542,8 +543,8 @@ export default function App(): JSX.Element {
             </div>
 
             {N > 0 ? (
-              <div className="mt-4 grid gap-1" data-testid="queue-list">
-                {chapterList.slice(0, 20).map((ch) => {
+              <div className="mt-4 space-y-1" data-testid="queue-list">
+                {chapterList.slice(0, 50).map((ch) => {
                   const st = statuses[ch.index] ?? "queued";
                   return (
                     <div
@@ -561,9 +562,18 @@ export default function App(): JSX.Element {
                               ? "bg-destructive/10 text-destructive border-destructive/20"
                               : st === "fetching"
                                 ? "bg-accent/10 text-accent border-accent/20"
-                                : "bg-muted text-muted-foreground")
+                                : st === "cleaning"
+                                  ? "bg-info/10 text-info border-info/20"
+                                  : st === "queued"
+                                    ? "bg-muted text-muted-foreground border-transparent"
+                                    : "bg-muted text-muted-foreground")
                         }
+                        aria-label={`chapter ${ch.index} ${st}`}
                       >
+                        {st === "cleaning" ? "🧹 " : ""}
+                        {st === "fetching" ? "⏳ " : ""}
+                        {st === "done" ? "✓ " : ""}
+                        {st === "error" ? "✗ " : ""}
                         {st}
                       </span>
                       <span className="truncate">
@@ -572,6 +582,11 @@ export default function App(): JSX.Element {
                     </div>
                   );
                 })}
+                {N > 50 ? (
+                  <div className="text-body-sm text-muted-foreground text-center py-1" data-testid="queue-more">
+                    +{N - 50} więcej — przewiń log aby zobaczyć resztę
+                  </div>
+                ) : null}
               </div>
             ) : null}
 
@@ -579,8 +594,10 @@ export default function App(): JSX.Element {
               role="log"
               aria-live="polite"
               aria-busy={fetching}
+              aria-label="Log pobierania"
+              tabIndex={0}
               data-testid="log-pane"
-              className="mt-4 max-h-40 overflow-auto rounded-md border bg-muted p-3 mono text-mono text-body-sm"
+              className="mt-4 max-h-40 overflow-auto rounded-md border bg-muted p-3 mono text-mono text-body-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
             >
               {logs.length === 0 ? (
                 <span className="text-muted-foreground">—</span>
