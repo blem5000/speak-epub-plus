@@ -29,13 +29,16 @@ export default function ChapterList({
 }: ChapterListProps): JSX.Element {
   const N = chapters.length;
   const [focusedIndex, setFocusedIndex] = useState<number>(0);
+  const [showAll, setShowAll] = useState(false);
   const rowRefs = useRef<Array<HTMLTableRowElement | null>>([]);
+  const displayChapters = N > 500 && !showAll ? chapters.slice(0, 100) : chapters;
 
   useEffect(() => {
-    if (focusedIndex >= N) {
-      setFocusedIndex(N > 0 ? N - 1 : 0);
+    const len = displayChapters.length;
+    if (focusedIndex >= len) {
+      setFocusedIndex(len > 0 ? len - 1 : 0);
     }
-  }, [N, focusedIndex]);
+  }, [displayChapters.length, focusedIndex]);
 
   const isSelected = (idx: number): boolean => selected.has(idx);
 
@@ -77,9 +80,10 @@ export default function ChapterList({
   };
 
   const handleKeyDownRow = (e: React.KeyboardEvent<HTMLTableRowElement>, rowPos: number, chapterIdx: number): void => {
+    const visibleLen = displayChapters.length;
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      const next = Math.min(rowPos + 1, N - 1);
+      const next = Math.min(rowPos + 1, visibleLen - 1);
       setFocusedIndex(next);
       rowRefs.current[next]?.focus();
     } else if (e.key === "ArrowUp") {
@@ -93,7 +97,7 @@ export default function ChapterList({
       rowRefs.current[0]?.focus();
     } else if (e.key === "End") {
       e.preventDefault();
-      const last = N - 1;
+      const last = visibleLen - 1;
       setFocusedIndex(last);
       rowRefs.current[last]?.focus();
     } else if (e.key === " " || e.code === "Space") {
@@ -129,8 +133,9 @@ export default function ChapterList({
   const total = N;
   const selectedCount = selected.size;
 
-  // virtualized fallback warning
+  // virtualized fallback warning — capped to 100 rows until react-window, with Show all to reveal rest
   const isVirtualized = N > 500;
+  const showingAll = isVirtualized ? showAll : true;
 
   return (
     <div
@@ -154,8 +159,25 @@ export default function ChapterList({
       </div>
 
       {isVirtualized ? (
-        <div className="bg-warning/10 px-4 py-2 text-body-sm text-warning" data-testid="virtualized-warning">
-          Virtualized fallback: showing all {N} rows (windowing deferred)
+        <div
+          className="bg-warning/10 px-4 py-2 text-body-sm text-warning flex items-center justify-between gap-2"
+          data-testid="virtualized-warning"
+          role="alert"
+          aria-live="polite"
+        >
+          <span>
+            {showingAll ? `Showing all ${N} rows (windowing deferred)` : `Showing 100 of ${N} rows — windowing deferred`}
+          </span>
+          {!showingAll ? (
+            <button
+              type="button"
+              onClick={() => setShowAll(true)}
+              className="rounded-md border bg-card px-3 py-1 text-body-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              data-testid="virtualized-show-all"
+            >
+              Show all
+            </button>
+          ) : null}
         </div>
       ) : null}
 
@@ -171,7 +193,7 @@ export default function ChapterList({
             </tr>
           </thead>
           <tbody className="text-body" role="rowgroup">
-            {chapters.map((ch, arrIdx) => {
+            {displayChapters.map((ch, arrIdx) => {
               const idx = ch.index;
               const selectedRow = isSelected(idx);
               const rowPos = arrIdx; // use array order for roving, not idx-1
@@ -189,12 +211,15 @@ export default function ChapterList({
                   data-selected={selectedRow}
                   data-testid={`chapter-row-${idx}`}
                   onClick={(e) => {
+                    // P18: ignore double/triple click to avoid toggle before preview
+                    if ((e as React.MouseEvent).detail >= 2) return;
                     const withShift = (e as React.MouseEvent).shiftKey;
                     handleToggle(idx, withShift);
                   }}
-                  onDoubleClick={() => {
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
                     if (onPreview) onPreview(idx);
-                    else if (import.meta.env.DEV) console.debug(`Preview placeholder for chapter ${idx}`);
+                    // P15: no-op if onPreview null (remove console.debug leak)
                   }}
                   onKeyDown={(e) => handleKeyDownRow(e, rowPos, idx)}
                   onFocus={() => setFocusedIndex(rowPos)}
@@ -234,7 +259,7 @@ export default function ChapterList({
                     <span className="truncate">{ch.title || "—"}</span>
                     <span
                       aria-hidden="true"
-                      className="ml-2 hidden text-muted-foreground group-hover:inline"
+                      className="ml-2 hidden text-muted-foreground group-hover:inline group-focus:inline group-focus-within:inline focus-visible:inline"
                       title="Preview"
                     >
                       👁

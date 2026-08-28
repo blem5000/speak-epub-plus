@@ -124,9 +124,10 @@ class TestListChaptersRpc:
         # trailing dot
         res2 = handle_rpc({"id": "2", "method": "listChapters", "params": {"url": "https://www.novelphoenix.com./novel/123"}})
         assert "result" in res2
-        # 500 maps to LIST_FAILED via msg regex
+        # 500 maps to LIST_FAILED via msg regex — use fresh cache key (distinct novel) to avoid masking by prior success cache
+        _CHAPTER_CACHE.clear()
         MockAdapter.return_value.listChapters.side_effect = Exception("500 Internal Server Error")
-        res3 = handle_rpc({"id": "3", "method": "listChapters", "params": {"url": "https://www.novelphoenix.com/novel/123"}})
+        res3 = handle_rpc({"id": "3", "method": "listChapters", "params": {"url": "https://www.novelphoenix.com/novel/999"}})
         assert res3["error"]["code"] == "LIST_FAILED"
         _CHAPTER_CACHE.clear()
         # cache poisoning — mutating result should not affect cache

@@ -36,20 +36,25 @@ export default function RangeBar({
   }, [to]);
 
   const handleFromChange = (val: string): void => {
+    // P11: do not propagate out-of-bounds before blur — keep typing local
     setFromStr(val);
-    if (val === "") return;
-    const num = Number(val);
-    if (!Number.isFinite(num)) return;
-    // propagate immediate without clamp, but trunc decimals before parent
-    onChangeRange(Math.trunc(num), to);
   };
 
   const handleToChange = (val: string): void => {
+    // P11: do not propagate out-of-bounds before blur — keep typing local
     setToStr(val);
-    if (val === "") return;
-    const num = Number(val);
-    if (!Number.isFinite(num)) return;
-    onChangeRange(from, Math.trunc(num));
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    // P12: Enter confirms range like clicking Zaznacz — handle both inputs
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (typeof window === "undefined") return;
+      // clamp both fields (from or to) before select
+      handleFromBlur();
+      handleToBlur();
+      window.setTimeout(() => onSelectRange(), 0);
+    }
   };
 
   const handleFromBlur = (): void => {
@@ -107,6 +112,7 @@ export default function RangeBar({
           value={fromStr}
           onChange={(e) => handleFromChange(e.target.value)}
           onBlur={handleFromBlur}
+          onKeyDown={handleKeyDown}
           disabled={disabled}
           aria-disabled={disabled}
           aria-invalid={fromInvalid || undefined}
@@ -128,6 +134,7 @@ export default function RangeBar({
           value={toStr}
           onChange={(e) => handleToChange(e.target.value)}
           onBlur={handleToBlur}
+          onKeyDown={handleKeyDown}
           disabled={disabled}
           aria-disabled={disabled}
           aria-invalid={toInvalid || undefined}

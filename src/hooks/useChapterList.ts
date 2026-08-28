@@ -46,6 +46,25 @@ export function useChapterList(url: string | null): UseChapterListReturn {
       setCover(null);
       return;
     }
+    // P9: host guard early — only novelphoenix allowed for real listChapters
+    try {
+      const parsed = new URL(trimmed);
+      const host = (parsed.hostname || "").toLowerCase().replace(/\.$/, "");
+      const allowed = host === "novelphoenix.com" || host === "www.novelphoenix.com" || host.endsWith(".novelphoenix.com");
+      if (!allowed) {
+        setLoading(false);
+        setList([]);
+        setError("LIST_FAILED");
+        setCover(null);
+        return;
+      }
+    } catch {
+      setLoading(false);
+      setList([]);
+      setError("VALUE_ERROR");
+      setCover(null);
+      return;
+    }
 
     const id = ++callIdRef.current;
     if (abortRef.current) {
@@ -59,16 +78,15 @@ export function useChapterList(url: string | null): UseChapterListReturn {
     setError(null);
 
     let timeoutId: number | null = null;
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      if (typeof window === "undefined") {
-        reject(new Error("timeout"));
-        return;
-      }
-      timeoutId = window.setTimeout(() => {
-        controller.abort();
-        reject(new Error("timeout"));
-      }, 5000);
-    });
+    const timeoutPromise: Promise<never> =
+      typeof window === "undefined"
+        ? new Promise<never>(() => {}) // SSR: no timeout, never settles, fetch decides
+        : new Promise<never>((_, reject) => {
+            timeoutId = window.setTimeout(() => {
+              controller.abort();
+              reject(new Error("timeout"));
+            }, 5000);
+          });
     // attach catch before race to avoid unhandled rejection if fetch wins early
     timeoutPromise.catch(() => {});
 
@@ -106,8 +124,6 @@ export function useChapterList(url: string | null): UseChapterListReturn {
       normalized.sort((a, b) => a.index - b.index);
       return { list: normalized, cover: coverUrl };
     })();
-
-    fetchPromise.catch(() => {});
 
     Promise.race([fetchPromise, timeoutPromise])
       .then((result) => {
@@ -152,6 +168,8 @@ export function useChapterList(url: string | null): UseChapterListReturn {
         setLoading(false);
         abortRef.current = null;
       });
+    // P20: prevent unhandled late rejection if fetch loses race
+    fetchPromise.catch(() => {});
 
     return () => {
       controller.abort();

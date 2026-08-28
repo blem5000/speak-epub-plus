@@ -24,8 +24,9 @@ export default function App(): JSX.Element {
   const [anchor, setAnchor] = useState<number | null>(null);
   const retryRef = useRef<HTMLButtonElement>(null);
   const retryTimeoutRef = useRef<number | null>(null);
+  const skipNextClearRef = useRef(false);
 
-  // Load persisted selection from Core on mount (D3) — with unmount guard
+  // Load persisted selection from Core on mount (D3 + P6 fix) — with unmount guard + url restore
   useEffect(() => {
     let alive = true;
     callSidecar("getSelection", {})
@@ -38,6 +39,12 @@ export default function App(): JSX.Element {
           if (Number.isFinite(r.result.from as number)) setFrom(Number(r.result.from));
           if (Number.isFinite(r.result.to as number)) setTo(Number(r.result.to));
         }
+        // P6: restore persisted url to selectedUrl so Wybrano visible after reload (case-insensitive)
+        // mark to skip next wipe so restored selection/from/to not cleared
+        if (r?.result?.url && typeof r.result.url === "string" && r.result.url.trim().toLowerCase().startsWith("http")) {
+          skipNextClearRef.current = true;
+          setSelectedUrl(r.result.url.trim());
+        }
       })
       .catch(() => {});
     return () => {
@@ -45,12 +52,19 @@ export default function App(): JSX.Element {
     };
   }, []);
 
-  // Persist selection to Core on change (D2/D3)
+  // Persist selection to Core on change (D2/D3 + P8 retry)
   useEffect(() => {
     const selArray = Array.from(selected);
-    // fire-and-forget, debounce 300ms
+    // fire-and-forget, debounce 300ms with one retry on failure
     const id = window.setTimeout(() => {
-      callSidecar("setSelection", { selection: selArray, from, to, url: selectedUrl }).catch(() => {});
+      callSidecar("setSelection", { selection: selArray, from, to, url: selectedUrl }).catch(() => {
+        // retry once after 1s for offline/transient failure
+        window.setTimeout(() => {
+          callSidecar("setSelection", { selection: selArray, from, to, url: selectedUrl }).catch(() => {
+            if (import.meta.env.DEV) console.warn("setSelection failed after retry");
+          });
+        }, 1000);
+      });
     }, 300);
     return () => window.clearTimeout(id);
   }, [selected, from, to, selectedUrl]);
@@ -88,6 +102,10 @@ export default function App(): JSX.Element {
 
   // reset selection when selectedUrl changes (FR1→FR2 discovery standalone demo)
   useEffect(() => {
+    if (skipNextClearRef.current) {
+      skipNextClearRef.current = false;
+      return;
+    }
     setSelected(new Set());
     setAnchor(null);
     setFrom(1);
@@ -116,7 +134,6 @@ export default function App(): JSX.Element {
         if (b > N) b = N;
         return b;
       });
-      // swap if needed after clamp (handle via next tick)
       // prune selected indices that are now out-of-range
       setSelected((prev) => {
         const filtered = Array.from(prev).filter((n) => Number.isInteger(n) && n >= 1 && n <= N);
@@ -133,6 +150,15 @@ export default function App(): JSX.Element {
       setAnchor((prev) => (prev != null ? null : prev));
     }
   }, [chapterList.length, chapterLoading]);
+
+  // P7: swap from/to if inverted after clamp (a>b) — separate tick to read updated values
+  useEffect(() => {
+    const N = chapterList.length;
+    if (N > 0 && from > to) {
+      setFrom(to);
+      setTo(from);
+    }
+  }, [from, to, chapterList.length]);
 
   useEffect(() => {
     return () => {

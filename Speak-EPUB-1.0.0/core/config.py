@@ -62,6 +62,26 @@ DEFAULT_STORE: Dict[str, Any] = {
 _CHAPTER_CACHE: Dict[str, Any] = {}
 
 
+def _normalize_cache_key(url: str) -> str:
+    """Normalize url for _CHAPTER_CACHE to avoid duplicate entries for same novel."""
+    try:
+        from urllib.parse import urlparse, urlunparse
+
+        p = urlparse(url.strip())
+        host = (p.hostname or "").lower().rstrip(".")
+        if not host:
+            return url.strip().lower().rstrip("/.")
+        # include port if explicit (distinct resource)
+        netloc = host + (f":{p.port}" if p.port else "")
+        # normalize path: strip trailing slash/dot, keep case for path but host lower
+        # strip query/fragment for novel identity (same novel with ?page=2 should hit cache)
+        path = p.path.rstrip("/").rstrip(".")
+        normalized = urlunparse((p.scheme.lower(), netloc, path, "", "", ""))
+        return normalized.rstrip("/.")
+    except Exception:
+        return url.strip().lower().rstrip("/.")
+
+
 def get_store_path() -> Path:
     """
     Resolve store.json path.
@@ -275,9 +295,10 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
             NovelPhoenixAdapter = getattr(_mod, "NovelPhoenixAdapter")
         except Exception as e:
             return {"id": rid, "error": {"code": "IMPORT_FAILED", "message": str(e)}}
-        # cache hit before network — return deep copy to prevent poisoning
-        if url in _CHAPTER_CACHE:
-            cached = _CHAPTER_CACHE[url]
+        # cache hit before network — return deep copy to prevent poisoning (normalized key)
+        cache_key = _normalize_cache_key(url)
+        if cache_key in _CHAPTER_CACHE:
+            cached = _CHAPTER_CACHE[cache_key]
             if isinstance(cached, list):
                 return {"id": rid, "result": [dict(item) if isinstance(item, dict) else item for item in cached]}
         try:
@@ -293,21 +314,31 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
                 cover_from_adapter = getattr(adapter, "_last_cover_url", None) or getattr(adapter, "last_cover_url", None)
             except Exception:
                 pass
+            seen_idx: set[int] = set()
             for enum_idx, ci in enumerate(lst, start=1):
                 title = getattr(ci, "title", "") or "—"
                 if not isinstance(title, str) or not title.strip():
                     title = "—"
                 url_val = getattr(ci, "url", "") or ""
                 cover_val = getattr(ci, "cover_url", None)
-                if cover_val is None:
+                # fallback for None or empty string "" (P4)
+                if not cover_val:
                     cover_val = cover_from_adapter
                 raw_idx = getattr(ci, "index", None)
                 try:
                     idx_val = int(raw_idx) if raw_idx is not None else enum_idx
+                    # guard NaN/float/0/negative -> fallback
                     if not isinstance(idx_val, int) or idx_val < 1:
                         idx_val = enum_idx
                 except Exception:
                     idx_val = enum_idx
+                # dedup duplicate indices (P5) — use enum_idx for second occurrence
+                if idx_val in seen_idx:
+                    idx_val = enum_idx
+                    # ensure enum_idx not already taken (sparse case)
+                    while idx_val in seen_idx:
+                        idx_val += 1
+                seen_idx.add(idx_val)
                 serialized.append(
                     {
                         "index": idx_val,
@@ -316,14 +347,15 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
                         "cover_url": cover_val,
                     }
                 )
-            # cache serialized result (cap 20 entries)
+            # cache serialized result (cap 20 entries) — normalized key
             if len(_CHAPTER_CACHE) >= 20:
                 # evict oldest (simple pop first)
                 try:
                     _CHAPTER_CACHE.pop(next(iter(_CHAPTER_CACHE)))
                 except Exception:
                     pass
-            _CHAPTER_CACHE[url] = serialized
+            _CHAPTER_CACHE[cache_key] = [dict(item) for item in serialized]
+            # also keep raw url key for direct hit? no — normalized only to deduplicate variants
             # return deep copy to prevent caller mutation poisoning cache
             return {"id": rid, "result": [dict(item) for item in serialized]}
         except ValueError as e:
@@ -355,12 +387,28 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
                         sanitized.append(iv)
                 except Exception:
                     continue
+            # sanitize from/to — clamp 1..100000, fallback defaults on corruption
+            def _safe_from_to(val, default):
+                try:
+                    iv = int(val)
+                    # treat NaN/bool already via int, but reject <1
+                    if iv < 1:
+                        return 1
+                    return max(1, min(iv, 100000))
+                except Exception:
+                    return default
+
+            safe_from = _safe_from_to(data.get("selection_from", 1), 1)
+            safe_to = _safe_from_to(data.get("selection_to", 30), 30)
+            # swap if inverted even on read (handles stale stored invert)
+            if safe_from > safe_to:
+                safe_from, safe_to = safe_to, safe_from
             return {
                 "id": rid,
                 "result": {
                     "selection": sanitized,
-                    "from": data.get("selection_from", 1),
-                    "to": data.get("selection_to", 30),
+                    "from": safe_from,
+                    "to": safe_to,
                     "url": data.get("selection_url"),
                 },
             }
@@ -405,13 +453,44 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
                     patch["selection_to"] = tv
                 except Exception:
                     pass
-            if "selection_from" in patch and "selection_to" in patch:
-                a, b = patch["selection_from"], patch["selection_to"]
-                if a > b:
-                    patch["selection_from"], patch["selection_to"] = b, a
+            # swap even when only one field provided — compare effective values (P3)
+            # load current effective from/to for comparison
+            try:
+                _cur = load_store()
+                cur_from = _cur.get("selection_from", 1)
+                cur_to = _cur.get("selection_to", 30)
+                eff_from = patch.get("selection_from", cur_from)
+                eff_to = patch.get("selection_to", cur_to)
+                # sanitize effective for comparison (int + clamp already)
+                try:
+                    eff_from = max(1, min(int(eff_from), 100000))
+                except Exception:
+                    eff_from = cur_from
+                try:
+                    eff_to = max(1, min(int(eff_to), 100000))
+                except Exception:
+                    eff_to = cur_to
+                if eff_from > eff_to:
+                    # fix collapse: when only one field in patch, set both to maintain swapped range
+                    if "selection_from" in patch and "selection_to" in patch:
+                        patch["selection_from"], patch["selection_to"] = eff_to, eff_from
+                    elif "selection_from" in patch:
+                        patch["selection_from"] = eff_to
+                        patch["selection_to"] = eff_from
+                    elif "selection_to" in patch:
+                        patch["selection_to"] = eff_from
+                        patch["selection_from"] = eff_to
+            except Exception:
+                pass
             if isinstance(url_sel, str) and url_sel.strip():
                 if url_sel.strip().lower().startswith(("http://", "https://")):
                     patch["selection_url"] = url_sel.strip()[:500]
+            elif url_sel is None:
+                # explicit clear (P19) — allow null to wipe stale url
+                patch["selection_url"] = None
+            elif isinstance(url_sel, str) and not url_sel.strip():
+                # empty string also clears? treat as clear
+                patch["selection_url"] = None
             save_store(patch)
             return {"id": rid, "result": {"saved": True, "selection": sanitized}}
         except Exception as e:

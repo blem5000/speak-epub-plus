@@ -19,6 +19,7 @@ export function rangeToSet(from: unknown, to: unknown, total: number): Set<numbe
   const N = Math.trunc(total);
   if (!Number.isFinite(N) || N < 1) return new Set();
   if (from === "" || to === "" || from == null || to == null) return new Set();
+  if (typeof from === "boolean" || typeof to === "boolean") return new Set();
   const f = Number(from);
   const t = Number(to);
   if (!Number.isFinite(f) || !Number.isFinite(t)) return new Set();
@@ -57,18 +58,33 @@ export function bulkShift(
   clicked: number,
   selected: Set<number>
 ): Set<number> {
+  if (typeof clicked === "boolean" || typeof anchor === "boolean") {
+    return toggleSet(selected, Number(clicked));
+  }
   if (anchor == null || !Number.isFinite(anchor) || !Number.isInteger(clicked) || !Number.isFinite(clicked) || clicked < 1) {
     return toggleSet(selected, clicked);
   }
-  // clamp to >=1 and ensure ints
-  const a = Math.trunc(anchor);
-  const c = Math.trunc(clicked);
+  // clamp to >=1 and ensure ints, OOB clamp (P14)
+  const a = clamp(Math.trunc(anchor), 1, 100000);
+  const c = clamp(Math.trunc(clicked), 1, 100000);
   if (!Number.isFinite(a) || !Number.isFinite(c) || a < 1 || c < 1) return toggleSet(selected, clicked);
   const lo = Math.min(a, c);
   const hi = Math.max(a, c);
-  if (hi - lo > 5000) return new Set(selected); // cap
+  if (hi - lo > 5000) return new Set(selected); // cap still silent for N=142, defer feedback to UI
   const next = new Set(selected);
-  for (let i = lo; i <= hi; i++) next.add(i);
+  // P14: if range already fully selected, bulk deselect, else union
+  let allSelected = true;
+  for (let i = lo; i <= hi; i++) {
+    if (!next.has(i)) {
+      allSelected = false;
+      break;
+    }
+  }
+  if (allSelected) {
+    for (let i = lo; i <= hi; i++) next.delete(i);
+  } else {
+    for (let i = lo; i <= hi; i++) next.add(i);
+  }
   return next;
 }
 

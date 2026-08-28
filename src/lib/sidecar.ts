@@ -49,6 +49,8 @@ export async function callSidecar(
     void ctl;
   };
 
+  // P10: ensure abort listeners are always removed (no leak)
+  let primaryAbortHandler: (() => void) | null = null;
   try {
     if (opts?.signal?.aborted) throw new Error("aborted");
     // Primary: stdin/stdout via Rust shell plugin — with race against abort
@@ -57,14 +59,27 @@ export async function callSidecar(
     });
     if (opts?.signal) {
       const abortPromise = new Promise<never>((_, reject) => {
-        opts.signal!.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        primaryAbortHandler = (): void => reject(new Error("aborted"));
+        opts.signal!.addEventListener("abort", primaryAbortHandler, { once: true });
       });
-      const result = (await Promise.race([invokePromise, abortPromise])) as RpcResponse;
-      return result;
+      try {
+        const result = (await Promise.race([invokePromise, abortPromise])) as RpcResponse;
+        return result;
+      } finally {
+        if (primaryAbortHandler && opts.signal) {
+          opts.signal.removeEventListener("abort", primaryAbortHandler);
+          primaryAbortHandler = null;
+        }
+      }
     }
     const result = await invokePromise;
     return result;
   } catch (err) {
+    // cleanup primary abort handler on throw
+    if (primaryAbortHandler && opts?.signal) {
+      opts.signal.removeEventListener("abort", primaryAbortHandler);
+      primaryAbortHandler = null;
+    }
     // Fallback documented in docs/sidecar-fallback.md — keep app open, show toast
     const msg = err instanceof Error ? err.message : String(err);
     if (msg === "aborted" || opts?.signal?.aborted) {
@@ -72,10 +87,11 @@ export async function callSidecar(
     }
     console.warn(`sidecar failed: ${msg} — falling back to http://localhost:17381`, err);
     // Attempt HTTP fallback (best-effort) with timeout and id check
+    const ctl = new AbortController();
+    let t: number | null = null;
     try {
-      const ctl = new AbortController();
       linkAbort(ctl);
-      const t = setTimeout(() => ctl.abort(), 2000);
+      t = (typeof window !== "undefined" ? window.setTimeout : setTimeout)(() => ctl.abort(), 2000) as unknown as number;
       // if external signal already aborted, abort immediately
       if (opts?.signal?.aborted) ctl.abort();
       const res = await fetch("http://localhost:17381/rpc", {
@@ -84,8 +100,6 @@ export async function callSidecar(
         body: JSON.stringify(payload),
         signal: ctl.signal,
       });
-      clearTimeout(t);
-      unlinkAbort(ctl);
       if (!res.ok) throw new Error(`http ${res.status}`);
       const json = (await res.json()) as RpcResponse;
       if (json.id !== id) throw new Error(`id mismatch ${json.id} != ${id}`);
@@ -99,6 +113,9 @@ export async function callSidecar(
           message: `sidecar failed: ${msg} fallback http also failed: ${httpMsg}`,
         },
       };
+    } finally {
+      if (t !== null) clearTimeout(t);
+      unlinkAbort(ctl);
     }
   }
 }
