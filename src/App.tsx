@@ -6,6 +6,7 @@ import ResultsTable from "./components/ResultsTable";
 import ChapterList from "./components/ChapterList";
 import { useChapterList } from "./hooks/useChapterList";
 import { useDebouncedSearch } from "./hooks/useDebouncedSearch";
+import { useFetcher } from "./hooks/useFetcher";
 
 export default function App(): JSX.Element {
   const [locale, setLocaleState] = useState(getLocale());
@@ -193,6 +194,33 @@ export default function App(): JSX.Element {
   const showChapterList = hasSelectedUrl && !chapterLoading && chapterList.length > 0 && !chapterError;
   const showChapterError = hasSelectedUrl && !chapterLoading && !!chapterError;
   const showChapterEmpty = hasSelectedUrl && !chapterLoading && !chapterError && chapterList.length === 0;
+
+  // Fetcher — polite sequential, cache resume, throttle badge
+  const { fetching, logs, throttle, statuses, badge, error: fetcherError, start: startFetcher } = useFetcher();
+  const N = chapterList.length;
+  const selectedUrlsForFetch = (() => {
+    if (selected.size > 0) {
+      return chapterList.filter((ch) => selected.has(ch.index)).map((ch) => ch.url);
+    }
+    if (N > 0) {
+      // fallback to from–to range
+      const a = Math.max(1, Math.min(from, N));
+      const b = Math.max(1, Math.min(to, N));
+      const lo = Math.min(a, b);
+      const hi = Math.max(a, b);
+      return chapterList.filter((ch) => ch.index >= lo && ch.index <= hi).map((ch) => ch.url);
+    }
+    return [];
+  })();
+  const handleStartFetch = (): void => {
+    if (!hasSelectedUrl || chapterLoading || N === 0 || fetching) return;
+    const urls = selectedUrlsForFetch;
+    if (urls.length === 0) return;
+    // Determine from/to for badge: use current from/to, if open-ended to is N means not bounded?
+    // For open-ended detection, if to === N and selected includes tail, still bounded; open-ended is when to is null/undefined
+    // Here we pass from/to for backend to handle bounded vs open-ended re-validate
+    void startFetcher({ urls, novelUrl: selectedUrl ?? undefined, from, to });
+  };
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -463,6 +491,107 @@ export default function App(): JSX.Element {
                 <p className="text-body font-semibold">{t("chapterList.empty")}</p>
               </div>
             ) : null}
+          </section>
+        ) : null}
+
+        {/* Fetcher Queue minimal — AD-6 event bus, NFR1 polite, NFR3 resume */}
+        {hasSelectedUrl && !chapterLoading ? (
+          <section
+            className="mt-6 rounded-lg border bg-card p-6 shadow-sm"
+            aria-label={t("queue.title") ?? "Queue"}
+            data-testid="queue-section"
+          >
+            <div className="flex items-center justify-between gap-4">
+              <h2 className="text-heading font-semibold">{t("queue.title")}</h2>
+              <div className="flex items-center gap-2">
+                <span
+                  data-testid="throttle-badge"
+                  className={
+                    "rounded-full px-3 py-1 text-body-sm font-medium " +
+                    (throttle?.tier === "safe"
+                      ? "bg-warning text-warning-foreground"
+                      : "bg-muted text-muted-foreground")
+                  }
+                  aria-live="polite"
+                >
+                  {throttle?.tier === "safe" ? `safe ${throttle.delay}` : throttle?.tier ?? "polite"}
+                </span>
+                {badge ? (
+                  <span data-testid="resume-badge" className="rounded-full bg-accent/10 px-3 py-1 text-body-sm text-accent-foreground">
+                    {badge}
+                  </span>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <button
+                type="button"
+                data-testid="fetch-start"
+                onClick={handleStartFetch}
+                disabled={chapterLoading || N === 0 || fetching}
+                className="rounded-md bg-accent px-4 py-2 text-body font-medium text-accent-foreground hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {fetching ? "Pobieranie…" : `Start (${selectedUrlsForFetch.length})`}
+              </button>
+              {fetcherError ? (
+                <span className="ml-3 text-body-sm text-destructive" role="alert">
+                  {fetcherError}
+                </span>
+              ) : null}
+            </div>
+
+            {N > 0 ? (
+              <div className="mt-4 grid gap-1" data-testid="queue-list">
+                {chapterList.slice(0, 20).map((ch) => {
+                  const st = statuses[ch.index] ?? "queued";
+                  return (
+                    <div
+                      key={ch.index}
+                      data-testid={`queue-row-${ch.index}`}
+                      className="flex items-center gap-2 text-body-sm"
+                    >
+                      <span
+                        data-testid={`queue-pill-${ch.index}`}
+                        className={
+                          "rounded-full border px-2 py-0.5 text-mono text-xs " +
+                          (st === "done"
+                            ? "bg-success/10 text-success border-success/20"
+                            : st === "error"
+                              ? "bg-destructive/10 text-destructive border-destructive/20"
+                              : st === "fetching"
+                                ? "bg-accent/10 text-accent border-accent/20"
+                                : "bg-muted text-muted-foreground")
+                        }
+                      >
+                        {st}
+                      </span>
+                      <span className="truncate">
+                        {ch.index}. {ch.title}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+
+            <div
+              role="log"
+              aria-live="polite"
+              aria-busy={fetching}
+              data-testid="log-pane"
+              className="mt-4 max-h-40 overflow-auto rounded-md border bg-muted p-3 mono text-mono text-body-sm"
+            >
+              {logs.length === 0 ? (
+                <span className="text-muted-foreground">—</span>
+              ) : (
+                logs.map((line, i) => (
+                  <div key={i} data-testid="log-line">
+                    {line}
+                  </div>
+                ))
+              )}
+            </div>
           </section>
         ) : null}
       </div>

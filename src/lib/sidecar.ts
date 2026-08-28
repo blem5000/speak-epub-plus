@@ -140,6 +140,31 @@ export type PartStatusEvent = {
 export type LogLineEvent = { line: string };
 export type ThrottleChangedEvent = { tier: string; delay: number };
 
+// Fetch Chapter(s) types — Core→Port→Adapter AD-1, politeness AD-3, cache AD-9
+export type FetchChapterParams = { url: string };
+export type FetchChaptersParams = {
+  urls?: string[];
+  novelUrl?: string;
+  novel_url?: string;
+  from?: number | null;
+  to?: number | null;
+};
+export type FetchResult = {
+  url: string;
+  title: string;
+  html: string;
+  text: string;
+  cover_url?: string | null;
+};
+export type FetchChaptersResult = {
+  chapters: FetchResult[];
+  skipped: number;
+  total: number;
+  badge?: string | null;
+  logs?: string[];
+  throttles?: ThrottleChangedEvent[];
+};
+
 export async function onChapterStatus(
   cb: (payload: ChapterStatusEvent) => void
 ): Promise<UnlistenFn> {
@@ -159,4 +184,47 @@ export async function onThrottleChanged(
   cb: (payload: ThrottleChangedEvent) => void
 ): Promise<UnlistenFn> {
   return listen<ThrottleChangedEvent>("throttleChanged", (e) => cb(e.payload));
+}
+
+// Fetch helpers — no new transport, reuse callSidecar AD-4/6 (sidecar.ts:25)
+export async function fetchChapter(
+  url: string,
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  return callSidecar("fetchChapter", { url }, opts);
+}
+
+export async function fetchChapters(
+  params: FetchChaptersParams,
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  // normalize camel/snake for Python side
+  const payload: Record<string, unknown> = {};
+  if (params.urls) payload.urls = params.urls;
+  if (params.novelUrl) payload.novelUrl = params.novelUrl;
+  if (params.novel_url) payload.novelUrl = params.novel_url;
+  if (params.from !== undefined) payload.from = params.from;
+  if (params.to !== undefined) payload.to = params.to;
+  return callSidecar("fetchChapters", payload, opts);
+}
+
+export async function getCacheStatus(
+  params: FetchChaptersParams,
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  const payload: Record<string, unknown> = {};
+  if (params.urls) payload.urls = params.urls;
+  if (params.novelUrl) payload.novelUrl = params.novelUrl;
+  if (params.novel_url) payload.novel_url = params.novel_url;
+  if (params.from !== undefined) payload.from = params.from;
+  if (params.to !== undefined) payload.to = params.to;
+  return callSidecar("getCacheStatus", payload, opts);
+}
+
+// Type guards for fetchChapter(s) responses
+export function isFetchChapterResult(res: RpcResponse): boolean {
+  return !!res.result && typeof res.result === "object" && "html" in (res.result as Record<string, unknown>);
+}
+export function isFetchChaptersResult(res: RpcResponse): boolean {
+  return !!res.result && typeof res.result === "object" && "chapters" in (res.result as Record<string, unknown>);
 }

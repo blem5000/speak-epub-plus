@@ -371,6 +371,352 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
                 return {"id": rid, "error": {"code": "LIST_FAILED", "message": msg}}
             return {"id": rid, "error": {"code": "EXCEPTION", "message": msg}}
 
+    if method in ("fetchChapter", "fetchChapters", "getCacheStatus"):
+        # AD-1: dynamic import preserves GUI→Core→Port→Adapter, reuse _normalize_cache_key & cache_key from core.fetch
+        import re as _re2
+        from urllib.parse import urlparse as _urlparse2
+
+        def _validate_url(u: str, allow_missing_host=False):
+            if not isinstance(u, str) or not u.strip():
+                return None, "VALUE_ERROR", "url must be non-empty"
+            u = u.strip()
+            if not _re2.match(r"^https?://", u, _re2.I):
+                return None, "VALUE_ERROR", "url must be http(s)"
+            try:
+                parsed = _urlparse2(u)
+                host = (parsed.hostname or "").lower().rstrip(".")
+                if not host:
+                    return None, "VALUE_ERROR", "url must contain host"
+                allowed = host == "novelphoenix.com" or host == "www.novelphoenix.com" or host.endswith(".novelphoenix.com")
+                if not allowed:
+                    return None, "LIST_FAILED", f"unsupported host {host}"
+                return u, None, None
+            except Exception as e:
+                return None, "VALUE_ERROR", str(e)
+
+        # Dynamic import adapter
+        try:
+            import importlib as _il
+            _mod = _il.import_module("adapters.novelphoenix")
+            NovelPhoenixAdapter = getattr(_mod, "NovelPhoenixAdapter")
+        except Exception as e:
+            return {"id": rid, "error": {"code": "IMPORT_FAILED", "message": str(e)}}
+
+        # Handle single fetchChapter
+        if method == "fetchChapter":
+            params = request.get("params")
+            url: Any = None
+            if isinstance(params, dict):
+                url = params.get("url", params.get("link", params.get("href")))
+            elif isinstance(params, str):
+                url = params
+            else:
+                url = params
+            if isinstance(url, str):
+                url = url.strip()
+            validated, err_code, err_msg = _validate_url(url if isinstance(url, str) else "", False)  # type: ignore
+            if err_code:
+                return {"id": rid, "error": {"code": err_code, "message": err_msg}}
+            url = validated  # type: ignore
+            # dynamic import core.fetch fetch_one
+            try:
+                import importlib as _il2
+                _fmod = _il2.import_module("core.fetch")
+                fetch_one_fn = getattr(_fmod, "fetch_one")
+            except Exception as e:
+                return {"id": rid, "error": {"code": "IMPORT_FAILED", "message": str(e)}}
+            try:
+                adapter = NovelPhoenixAdapter()
+                cc = fetch_one_fn(url, adapter)
+                if cc is None or not hasattr(cc, "html"):
+                    return {"id": rid, "error": {"code": "LIST_FAILED", "message": "adapter returned non-list"}}
+                cover = None
+                for _attr in ("_last_cover_url", "last_cover_url"):
+                    try:
+                        v = getattr(adapter, _attr, None)
+                        if isinstance(v, str) and v.strip():
+                            cover = v
+                            break
+                    except Exception:
+                        continue
+                # cover fallback: also try cc.cover_url if exists
+                try:
+                    cc_cover = getattr(cc, "cover_url", None)
+                    if isinstance(cc_cover, str) and cc_cover.strip():
+                        cover = cc_cover
+                except Exception:
+                    pass
+                serialized = {
+                    "url": getattr(cc, "url", url),
+                    "title": getattr(cc, "title", ""),
+                    "html": getattr(cc, "html", ""),
+                    "text": getattr(cc, "text", ""),
+                    "cover_url": cover,
+                }
+                return {"id": rid, "result": serialized}
+            except ValueError as e:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+            except Exception as e:
+                code = getattr(e, "code", None)
+                if code == "LIST_FAILED" or "LIST_FAILED" in str(e) or "FETCH_FAILED" in str(e):
+                    return {"id": rid, "error": {"code": "LIST_FAILED", "message": str(e)}}
+                msg = str(e)
+                if _re2.search(r"\b(4\d\d|5\d\d)\b", msg) or "timeout" in msg.lower() or "5xx" in msg.lower():
+                    return {"id": rid, "error": {"code": "LIST_FAILED", "message": msg}}
+                return {"id": rid, "error": {"code": "EXCEPTION", "message": msg}}
+
+        # Handle fetchChapters batch and getCacheStatus
+        # Extract params
+        params = request.get("params")
+        urls: Any = None
+        novelUrl: Any = None
+        from_val: Any = None
+        to_val: Any = None
+        if isinstance(params, list):
+            urls = params
+        elif isinstance(params, dict):
+            # urls variants
+            urls = params.get("urls", params.get("url", params.get("links", params.get("chapters"))))
+            # if urls is single string and novelUrl also maybe string, ensure distinction
+            novelUrl = params.get("novelUrl", params.get("novel_url", params.get("novelURL", params.get("novel"))))
+            # also try "novelUrl" case-insensitive fallback? already
+            from_val = params.get("from", params.get("selection_from", params.get("from_idx", params.get("fromIdx"))))
+            to_val = params.get("to", params.get("selection_to", params.get("to_idx", params.get("toIdx", params.get("end")))))
+            # handle case where urls is None and params has single url key that is novelUrl and not chapters
+            if isinstance(urls, str):
+                urls = [urls]
+            # if urls came from params.get("url") and that url is actually novelUrl (same), and novelUrl not set, need to decide
+            if novelUrl is None and isinstance(params.get("url"), str) and urls is None:
+                # ambiguous, treat as novelUrl if not list
+                pass
+            if isinstance(urls, dict):
+                urls = [urls]
+            # also handle params like {"urls": [], "novelUrl": "...", "from": 20, "to": 100}
+            if urls is None:
+                urls = []
+            if not isinstance(urls, (list, tuple)):
+                urls = [urls] if urls else []
+            # normalize urls list
+            cleaned: list[str] = []
+            for u in urls:  # type: ignore
+                if isinstance(u, str) and u.strip():
+                    cleaned.append(u.strip())
+                elif isinstance(u, dict):
+                    # dict with url key
+                    uu = u.get("url") or u.get("link") or u.get("href")
+                    if isinstance(uu, str) and uu.strip():
+                        cleaned.append(uu.strip())
+            urls = cleaned
+            # if novelUrl is list incorrectly, fix
+            if isinstance(novelUrl, list):
+                novelUrl = None
+            if isinstance(novelUrl, str):
+                novelUrl = novelUrl.strip() or None
+        elif isinstance(params, str):
+            urls = [params]
+        else:
+            urls = []
+
+        if urls is None:
+            urls = []
+        # Validate urls if present
+        if isinstance(urls, list) and len(urls) > 0:
+            for u in urls:  # type: ignore
+                _, err_code2, err_msg2 = _validate_url(u, False)  # type: ignore
+                if err_code2:
+                    return {"id": rid, "error": {"code": err_code2, "message": err_msg2}}
+        # Validate novelUrl if present
+        if isinstance(novelUrl, str) and novelUrl.strip():
+            _, err_code3, err_msg3 = _validate_url(novelUrl, False)
+            if err_code3:
+                return {"id": rid, "error": {"code": err_code3, "message": err_msg3}}
+            novelUrl = novelUrl.strip()  # type: ignore
+        else:
+            novelUrl = novelUrl if isinstance(novelUrl, str) else None
+            if isinstance(novelUrl, str) and not novelUrl.strip():
+                novelUrl = None
+
+        if not urls and not novelUrl:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "urls or novelUrl required"}}
+
+        # getCacheStatus variant — return diff without fetching
+        if method == "getCacheStatus":
+            try:
+                import importlib as _il3
+                _fmod3 = _il3.import_module("core.fetch")
+                get_cache_path_fn = getattr(_fmod3, "get_cache_path")
+                # Build desired list
+                desired: list[str] = []
+                if urls:
+                    desired = list(urls)  # type: ignore
+                elif novelUrl:
+                    adapter_tmp = NovelPhoenixAdapter()
+                    fresh = adapter_tmp.listChapters(novelUrl)  # type: ignore
+                    if fresh is None or not isinstance(fresh, (list, tuple)):
+                        return {"id": rid, "error": {"code": "LIST_FAILED", "message": "adapter returned non-list"}}
+                    for ci in fresh:  # type: ignore
+                        uu = getattr(ci, "url", None)
+                        if isinstance(uu, str) and uu.strip():
+                            desired.append(uu.strip())
+                    # slice by from/to if provided
+                    if from_val is not None or to_val is not None:
+                        # need to map from/to indices to urls
+                        from_i = None
+                        to_i = None
+                        try:
+                            from_i = int(from_val) if from_val is not None else None  # type: ignore
+                        except Exception:
+                            from_i = None
+                        try:
+                            to_i = int(to_val) if to_val is not None else None  # type: ignore
+                        except Exception:
+                            to_i = None
+                        if from_i is not None or to_i is not None:
+                            # assume fresh sorted by index
+                            try:
+                                fresh_sorted = sorted(fresh, key=lambda ci: getattr(ci, "index", 0))  # type: ignore
+                            except Exception:
+                                fresh_sorted = list(fresh)  # type: ignore
+                            N = len(fresh_sorted)
+                            f = max(1, min(from_i, N)) if from_i is not None else 1
+                            t = max(1, min(to_i, N)) if to_i is not None else N
+                            if f > t:
+                                f, t = t, f
+                            desired = []
+                            for ci in fresh_sorted:  # type: ignore
+                                idx = getattr(ci, "index", None)
+                                if idx is not None:
+                                    try:
+                                        ii = int(idx)
+                                        if f <= ii <= t:
+                                            uu2 = getattr(ci, "url", "")
+                                            if isinstance(uu2, str) and uu2.strip():
+                                                desired.append(uu2.strip())
+                                    except Exception:
+                                        continue
+                            if not desired:
+                                # fallback slice
+                                desired = [getattr(ci, "url", "").strip() for ci in fresh_sorted[f - 1 : t] if getattr(ci, "url", "")]  # type: ignore
+                skipped = sum(1 for u in desired if get_cache_path_fn(u).is_file())
+                total = len(desired)
+                missing = total - skipped
+                badge = f"pominięto {skipped}" if skipped else None
+                if missing and skipped:
+                    badge = f"pominięto {skipped}, pobieram {skipped+1}–{skipped+missing}"
+                return {"id": rid, "result": {"total": total, "skipped": skipped, "missing": missing, "badge": badge, "desired": desired}}
+            except ValueError as e:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+            except Exception as e:
+                code = getattr(e, "code", None)
+                if code == "LIST_FAILED" or "LIST_FAILED" in str(e):
+                    return {"id": rid, "error": {"code": "LIST_FAILED", "message": str(e)}}
+                return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+        # Normal fetchChapters via core.fetch.fetch_many
+        try:
+            import importlib as _il4
+            _fmod4 = _il4.import_module("core.fetch")
+            fetch_many_fn = getattr(_fmod4, "fetch_many")
+        except Exception as e:
+            return {"id": rid, "error": {"code": "IMPORT_FAILED", "message": str(e)}}
+
+        def _to_int(v):
+            if v is None or v == "":
+                return None
+            try:
+                iv = int(v)  # type: ignore
+                if iv < 1:
+                    return 1
+                return max(1, min(iv, 100000))
+            except Exception:
+                return None
+
+        from_idx_i = _to_int(from_val)
+        to_idx_i = _to_int(to_val)
+
+        try:
+            adapter = NovelPhoenixAdapter()
+            logs: list[str] = []
+            statuses: dict[int, str] = {}
+            throttles: list[dict[str, Any]] = []
+
+            def on_log(line: str):
+                logs.append(line)
+
+            def on_status(idx: int, status: str):
+                statuses[idx] = status
+
+            def on_throttle(tier: str, delay: int):
+                throttles.append({"tier": tier, "delay": delay})
+
+            # Ensure urls is list
+            urls_list = list(urls) if isinstance(urls, (list, tuple)) else []
+            result = fetch_many_fn(
+                urls_list,
+                adapter,
+                novel_url=novelUrl,
+                from_idx=from_idx_i,
+                to_idx=to_idx_i,
+                on_status=on_status,
+                on_log=on_log,
+                on_throttle=on_throttle,
+            )
+            if result.get("error") == "LOCKED":
+                return {"id": rid, "error": {"code": "LOCKED", "message": "fetch already in progress, queue locked"}}
+            # Check for non-list fresh error inside fetch_many (it raises AdapterError)
+            fetched = result.get("fetched", []) or result.get("results", []) or []
+            serialized_chapters: list[dict[str, Any]] = []
+            for cc in fetched:  # type: ignore
+                try:
+                    cover = None
+                    for _attr2 in ("_last_cover_url", "last_cover_url"):
+                        try:
+                            v2 = getattr(adapter, _attr2, None)
+                            if isinstance(v2, str) and v2.strip():
+                                cover = v2
+                                break
+                        except Exception:
+                            continue
+                    try:
+                        cc_cover = getattr(cc, "cover_url", None)
+                        if isinstance(cc_cover, str) and cc_cover.strip():
+                            cover = cc_cover
+                    except Exception:
+                        pass
+                    serialized_chapters.append(
+                        {
+                            "url": getattr(cc, "url", ""),
+                            "title": getattr(cc, "title", ""),
+                            "html": getattr(cc, "html", ""),
+                            "text": getattr(cc, "text", ""),
+                            "cover_url": cover,
+                        }
+                    )
+                except Exception:
+                    continue
+            response_result = {
+                "chapters": serialized_chapters,
+                "skipped": result.get("skipped", 0),
+                "total": result.get("total", len(urls_list)),
+                "badge": result.get("badge"),
+                "logs": logs,
+                "throttles": throttles,
+                "missing": result.get("missing", []),
+                "failed": result.get("failed", []),
+                "desired": result.get("desired", urls_list),
+            }
+            return {"id": rid, "result": response_result}
+        except ValueError as e:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+        except Exception as e:
+            code = getattr(e, "code", None)
+            if code == "LIST_FAILED" or "LIST_FAILED" in str(e) or "FETCH_FAILED" in str(e):
+                return {"id": rid, "error": {"code": "LIST_FAILED", "message": str(e)}}
+            msg = str(e)
+            if _re2.search(r"\b(4\d\d|5\d\d)\b", msg) or "timeout" in msg.lower() or "5xx" in msg.lower():
+                return {"id": rid, "error": {"code": "LIST_FAILED", "message": msg}}
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": msg}}
+
     # Selection persistence — Core owns selection (D2/D3 patch)
     if method == "getSelection":
         try:
