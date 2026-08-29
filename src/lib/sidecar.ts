@@ -419,6 +419,22 @@ export async function getEpubStatus(
   return callSidecar("getEpubStatus", params, opts);
 }
 
+/**
+ * Settings store helpers — mirrors `core/config.py:DEFAULT_STORE` via JSON-RPC.
+ * AD-10 single source `store.json` via `core/config.py:load_store`/`save_store`.
+ * Use `getStore` on mount to prefill Settings form, `setStore` on blur to persist.
+ *
+ * Valid patch keys (canonical, kebab/snake normalized by Core):
+ * - `voice` string ≤100 trimmed (e.g. "pl-PL-ZofiaNeural")
+ * - `rate` string pattern `^[+-]?\d+%$` clamped -100..+100 with `%` (e.g. "+0%")
+ * - `parallel` int 1-6 (UI shows 2-3, clamped 1-6)
+ * - `chunk-size` / `chunk_size` int 500-5000
+ * - `retries` int 1-10
+ * - `scrapeDelay` / `scrape_delay` int 0-20000 (preset 3000/4000/5000/custom)
+ * - `safeMode` / `safe_mode` bool
+ * - `keepEPUB` / `keepMP3` / `keepM4B` bool
+ * Persist via atomic `.tmp` replace — no polling, no direct frontend file write.
+ */
 export async function getStore(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
   return callSidecar("getStore", {}, opts);
 }

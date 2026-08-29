@@ -1972,14 +1972,137 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         params = request.get("params") or {}
         if not isinstance(params, dict):
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "patch must be dict"}}
-        # allow keepEPUB etc.
         try:
-            # sanitize keepEPUB bool if present?
-            if "keepEPUB" in params:
-                params["keepEPUB"] = bool(params["keepEPUB"])
-            saved = save_store(params)
+            import re as _re_store
+
+            def _to_bool_store(v: Any) -> bool:
+                if isinstance(v, bool):
+                    return v
+                if isinstance(v, str):
+                    return v.strip().lower() in ("1", "true", "yes", "on")
+                return bool(v)
+
+            def _normalize_store_key(k: str) -> str:
+                # canonical per DEFAULT_STORE: voice, rate, parallel, chunk-size, retries, scrapeDelay, safeMode, keepEPUB/MP3/M4B
+                low = k.replace("-", "_").lower()
+                # chunk variants
+                if low in ("chunk_size", "chunksize"):
+                    return "chunk-size"
+                if low in ("scrape_delay", "scrapedelay"):
+                    return "scrapeDelay"
+                if low in ("safe_mode", "safemode"):
+                    return "safeMode"
+                if low in ("keepepub", "keep_epub"):
+                    return "keepEPUB"
+                if low in ("keepmp3", "keep_mp3"):
+                    return "keepMP3"
+                if low in ("keepm4b", "keep_m4b"):
+                    return "keepM4B"
+                # direct canonicals keep case
+                if k in ("chunk-size", "chunk_size", "chunkSize"):
+                    return "chunk-size"
+                if k in ("scrapeDelay", "scrape_delay", "scrape-delay"):
+                    return "scrapeDelay"
+                if k in ("safeMode", "safe_mode", "safe-mode"):
+                    return "safeMode"
+                if k in ("keepEPUB", "keepMP3", "keepM4B", "voice", "rate", "parallel", "retries", "filters", "scrapeDelay", "safeMode"):
+                    return k
+                # fallback: if lower matches known without case, map to canonical case
+                # voice/rate etc lower is same
+                if low in ("voice", "rate", "parallel", "retries", "filters"):
+                    return low
+                return k
+
+            sanitized: Dict[str, Any] = {}
+            for raw_k, v in params.items():
+                if not isinstance(raw_k, str):
+                    # non-string keys coerce to string? reject
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid key type {type(raw_k)}"}}
+                ck = _normalize_store_key(raw_k)
+                if ck == "voice":
+                    if not isinstance(v, str):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "voice must be string"}}
+                    vv = v.strip()
+                    if not vv:
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "voice must be non-empty"}}
+                    if len(vv) > 100:
+                        # clamp to 100 per AD-10 voice ≤100
+                        vv = vv[:100]
+                    sanitized[ck] = vv
+                elif ck == "rate":
+                    if not isinstance(v, str):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "rate must be string"}}
+                    vv = v.strip()
+                    if not _re_store.match(r"^[+-]?\d+%$", vv):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid rate pattern {vv}"}}
+                    try:
+                        num = int(vv[:-1])
+                    except Exception:
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid rate number {vv}"}}
+                    num = max(-100, min(100, num))
+                    sanitized[ck] = f"+{num}%" if num >= 0 else f"{num}%"
+                elif ck == "parallel":
+                    if isinstance(v, bool):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "parallel must be integer"}}
+                    if isinstance(v, float):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "parallel must be integer"}}
+                    try:
+                        iv = int(v)  # type: ignore
+                    except Exception:
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "parallel must be integer"}}
+                    iv = max(1, min(6, iv))
+                    sanitized[ck] = iv
+                elif ck == "chunk-size":
+                    if isinstance(v, bool):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "chunk-size must be integer"}}
+                    if isinstance(v, float):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "chunk-size must be integer"}}
+                    try:
+                        iv = int(v)  # type: ignore
+                    except Exception:
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "chunk-size must be integer"}}
+                    iv = max(500, min(5000, iv))
+                    sanitized[ck] = iv
+                elif ck == "retries":
+                    if isinstance(v, bool):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "retries must be integer"}}
+                    if isinstance(v, float):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "retries must be integer"}}
+                    try:
+                        iv = int(v)  # type: ignore
+                    except Exception:
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "retries must be integer"}}
+                    iv = max(1, min(10, iv))
+                    sanitized[ck] = iv
+                elif ck == "scrapeDelay":
+                    if isinstance(v, bool):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "scrapeDelay must be integer"}}
+                    if isinstance(v, float):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "scrapeDelay must be integer"}}
+                    try:
+                        iv = int(v)  # type: ignore
+                    except Exception:
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "scrapeDelay must be integer"}}
+                    iv = max(0, min(20000, iv))
+                    sanitized[ck] = iv
+                elif ck == "safeMode":
+                    sanitized[ck] = _to_bool_store(v)
+                elif ck in ("keepEPUB", "keepMP3", "keepM4B"):
+                    sanitized[ck] = _to_bool_store(v)
+                elif ck == "filters":
+                    # keep filters as-is but validate basic shape to avoid corrupt store
+                    if not isinstance(v, list):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "filters must be list"}}
+                    sanitized[ck] = v
+                else:
+                    # unknown key — pass through verbatim under normalized key (preserve canonical if mapped, else raw)
+                    sanitized[ck] = v
+            saved = save_store(sanitized)
             return {"id": rid, "result": saved}
         except Exception as e:
+            # preserve VALUE_ERROR code if already shaped
+            if isinstance(e, TypeError) and "patch must be dict" in str(e):
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
             return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
 
     # For future methods, indicate mock only

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { t, getLocale, setLocale } from "./i18n";
-import { buildEpub, callSidecar, isEpubResult, type EpubResult } from "./lib/sidecar";
+import { buildEpub, callSidecar, getStore, isEpubResult, type EpubResult } from "./lib/sidecar";
 import FindInput from "./components/FindInput";
 import ResultsTable from "./components/ResultsTable";
 import ChapterList from "./components/ChapterList";
@@ -10,6 +10,7 @@ import Result from "./components/Result";
 import Queue from "./components/Queue";
 import ThrottleBadge from "./components/ThrottleBadge";
 import ProgressTrack from "./components/ProgressTrack";
+import Settings from "./components/Settings";
 import { useChapterList } from "./hooks/useChapterList";
 import { useDebouncedSearch } from "./hooks/useDebouncedSearch";
 import { useFetcher } from "./hooks/useFetcher";
@@ -18,6 +19,7 @@ export default function App(): JSX.Element {
   const [locale, setLocaleState] = useState(getLocale());
   const [rpcStatus, setRpcStatus] = useState<string>("idle");
   const [storePreview, setStorePreview] = useState<string>("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selectedUrl, setSelectedUrl] = useState<string | null>(null);
   const ctaRef = useRef<HTMLButtonElement>(null);
@@ -84,9 +86,20 @@ export default function App(): JSX.Element {
       })
       .catch((e) => setRpcStatus(`sidecar failed: ${(e as Error).message}`));
 
-    // Load store.json preview via tauri-plugin-store (mirrors CLI flags)
-    // Keep placeholder; actual store handled in Rust + core/config.py
-    setStorePreview('{"voice":"pl-PL-ZofiaNeural","parallel":3}');
+    // Load store.json preview via core/config.py mirror (AD-10) — real getStore
+    getStore()
+      .then((res) => {
+        if (res.result && typeof res.result === "object") {
+          try {
+            setStorePreview(JSON.stringify(res.result));
+          } catch {
+            setStorePreview(String(res.result));
+          }
+        } else {
+          setStorePreview('{"voice":"pl-PL-ZofiaNeural","parallel":3}');
+        }
+      })
+      .catch(() => setStorePreview('{"voice":"pl-PL-ZofiaNeural","parallel":3}'));
   }, []);
 
   // focus CTA when no-results appears for a11y — guard error to avoid focus jump on toast
@@ -378,15 +391,28 @@ export default function App(): JSX.Element {
               {t("app.subtitle")} — {t("find.hint")}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={toggleLocale}
-            className="rounded-md border bg-card px-3 py-1.5 text-body-sm hover:bg-muted"
-            aria-label="Toggle locale"
-          >
-            {locale.toUpperCase()}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              data-testid="settings-gear"
+              aria-label={(t("settings.gear") as string) || "Settings"}
+              title={(t("settings.gear") as string) || "Settings"}
+              onClick={() => setSettingsOpen(true)}
+              className="rounded-md border bg-card px-3 py-1.5 text-body-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              ⚙
+            </button>
+            <button
+              type="button"
+              onClick={toggleLocale}
+              className="rounded-md border bg-card px-3 py-1.5 text-body-sm hover:bg-muted"
+              aria-label="Toggle locale"
+            >
+              {locale.toUpperCase()}
+            </button>
+          </div>
         </header>
+        <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
         {/* Token demo card — keep per spec */}
         <section className="rounded-lg border bg-card p-6 shadow-sm">
