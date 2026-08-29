@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 08-27-2026 07:30
-last_updated: 08-28-2026 11:30
+last_updated: 08-29-2026 02:30
 project: speak epub
 project_key: NOKEY
 tracking_system: file-system
@@ -56,8 +56,8 @@ development_status:
   3-3-ffmpeg-merge-per-chapter-single-m4b-z-markerami: done
   epic-3-retrospective: optional
 
-  epic-4: backlog
-  4-1-live-queue-expansion-event-bus-throttle-badge-log: backlog
+  epic-4: in-progress
+  4-1-live-queue-expansion-event-bus-throttle-badge-log: done
   4-2-settings-form-persist-store-json-i18n-auto-detect: backlog
   4-3-filters-window-peÅ‚ny-integracja-z-preview-epub-gate: backlog
   4-4-state-treatments-a11y-aa-responsive-platform: backlog
