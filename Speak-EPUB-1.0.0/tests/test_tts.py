@@ -1597,3 +1597,210 @@ def test_convert_wiring(tmp_path, monkeypatch):
     asyncio.run(speak_mod.convert(str(fake_epub), str(out_dir), voice="en-US-AriaNeural", m4b=False, m4a=False, start_chapter=36, end_chapter=None, chunk_size=3500, keep_parts=False, parallel=3, retries=5))
     assert fake_build_m4b_called is False
 
+
+# ---------------------------------------------------------------------------
+# Story 4.1 — run_part_jobs callbacks: on_part_status sequence, skipped, error, progress/log
+# ---------------------------------------------------------------------------
+
+def test_run_part_jobs_callbacks_queued_fetching_done(tmp_path, capsys):
+    out_dir = tmp_path / "out_cb"
+    out_dir.mkdir()
+    jobs = [
+        PartJob(chapter_number=40, chapter_title="C40", part_number=1, part_count=2, text="hello world", output_path=str(out_dir / "_parts" / "040_C40_part001.mp3"), is_final_chapter_file=False),
+        PartJob(chapter_number=40, chapter_title="C40", part_number=2, part_count=2, text="hello again", output_path=str(out_dir / "_parts" / "040_C40_part002.mp3"), is_final_chapter_file=False),
+    ]
+    (out_dir / "_parts").mkdir(parents=True, exist_ok=True)
+
+    statuses = []
+    logs = []
+    progresses = []
+
+    def on_part(payload):
+        statuses.append(payload)
+
+    def on_log(line):
+        logs.append(line)
+
+    def on_progress(done, total):
+        progresses.append((done, total))
+
+    async def fake_tts(text, output_path, voice, retries=5):
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_text("x", encoding="utf-8")
+
+    async def _run():
+        with patch("core.tts.tts_text_to_mp3", new=fake_tts):
+            await run_part_jobs(jobs, voice="en-US-AndrewNeural", parallel=1, retries=5, on_part_status=on_part, on_log=on_log, on_progress=on_progress)
+
+    asyncio.run(_run())
+
+    # queued emitted for each job on enqueue (2)
+    queued = [p for p in statuses if p["status"] == "queued"]
+    assert len(queued) == 2
+    assert queued[0]["chapter_number"] == 40 and queued[0]["part_number"] == 1 and queued[0]["part_count"] == 2 and queued[0]["is_final_chapter_file"] is False
+    # fetching/done for each
+    fetching = [p for p in statuses if p["status"] == "fetching"]
+    done = [p for p in statuses if p["status"] == "done"]
+    assert len(fetching) == 2
+    assert len(done) == 2
+    # order: queued,queued, fetching,done, fetching,done (reading order)
+    assert statuses[0]["status"] == "queued" and statuses[1]["status"] == "queued"
+    assert statuses[2]["status"] == "fetching" and statuses[2]["part_number"] == 1
+    assert statuses[3]["status"] == "done" and statuses[3]["part_number"] == 1
+    assert statuses[4]["status"] == "fetching" and statuses[4]["part_number"] == 2
+    assert statuses[5]["status"] == "done" and statuses[5]["part_number"] == 2
+    # logs contain start/done/progress
+    assert any("start Chapter 040 part 001" in l for l in logs)
+    assert any("done  Chapter 040 part 001" in l for l in logs)
+    assert any("progress: 1/2" in l for l in logs)
+    assert any("progress: 2/2" in l for l in logs)
+    # progress callback
+    assert progresses == [(1, 2), (2, 2)]
+    # prints still happen for CLI compat
+    out = capsys.readouterr().out
+    assert "worker 1: start" in out
+    assert "progress: 2/2" in out
+
+
+def test_run_part_jobs_callbacks_skipped(tmp_path, capsys):
+    out_dir = tmp_path / "out_skip_cb"
+    out_dir.mkdir()
+    parts_dir = out_dir / "_parts"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    p1 = parts_dir / "040_C40_part001.mp3"
+    p1.write_text("already", encoding="utf-8")
+    p2 = parts_dir / "040_C40_part002.mp3"
+    jobs = [
+        PartJob(chapter_number=40, chapter_title="C40", part_number=1, part_count=2, text="c1", output_path=str(p1), is_final_chapter_file=False),
+        PartJob(chapter_number=40, chapter_title="C40", part_number=2, part_count=2, text="c2", output_path=str(p2), is_final_chapter_file=False),
+    ]
+    statuses = []
+    logs = []
+    progresses = []
+
+    def on_part(payload):
+        statuses.append(payload)
+
+    def on_log(line):
+        logs.append(line)
+
+    def on_progress(done, total):
+        progresses.append((done, total))
+
+    async def fake_tts(text, output_path, voice, retries=5):
+        Path(output_path).write_text("generated", encoding="utf-8")
+
+    async def _run():
+        with patch("core.tts.tts_text_to_mp3", new=fake_tts):
+            await run_part_jobs(jobs, voice="v", parallel=1, retries=5, on_part_status=on_part, on_log=on_log, on_progress=on_progress)
+
+    asyncio.run(_run())
+
+    assert len([s for s in statuses if s["status"] == "queued"]) == 2
+    assert any(s["status"] == "skipped" and s["part_number"] == 1 for s in statuses)
+    assert any(s["status"] == "fetching" and s["part_number"] == 2 for s in statuses)
+    assert any(s["status"] == "done" and s["part_number"] == 2 for s in statuses)
+    assert any("skip Chapter 040 part 001/002" in l for l in logs)
+    assert any("progress: 1/2" in l for l in logs)
+    assert any("progress: 2/2" in l for l in logs)
+    assert progresses == [(1, 2), (2, 2)]
+    assert not any("error" in s["status"] for s in statuses)
+    # tts not called for skipped
+    # verify file still exists
+    assert p1.exists()
+
+
+def test_run_part_jobs_callbacks_error(tmp_path, capsys):
+    out_dir = tmp_path / "out_err_cb"
+    out_dir.mkdir()
+    parts_dir = out_dir / "_parts"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    jobs = [
+        PartJob(chapter_number=40, chapter_title="C40", part_number=1, part_count=2, text="c1", output_path=str(parts_dir / "040_C40_part001.mp3"), is_final_chapter_file=False),
+        PartJob(chapter_number=40, chapter_title="C40", part_number=2, part_count=2, text="c2", output_path=str(parts_dir / "040_C40_part002.mp3"), is_final_chapter_file=False),
+    ]
+    statuses = []
+    logs = []
+
+    def on_part(payload):
+        statuses.append(payload)
+
+    def on_log(line):
+        logs.append(line)
+
+    async def fake_tts(text, output_path, voice, retries=5):
+        if "part001" in output_path:
+            Path(output_path).write_text("ok", encoding="utf-8")
+        else:
+            raise RuntimeError("TTS failed after 5 attempts for test")
+
+    async def _run():
+        with patch("core.tts.tts_text_to_mp3", new=fake_tts):
+            with pytest.raises(RuntimeError, match="TTS failed"):
+                await run_part_jobs(jobs, voice="v", parallel=1, retries=5, on_part_status=on_part, on_log=on_log)
+
+    asyncio.run(_run())
+
+    # queued 2, fetching 1, done 1, fetching 2, error 1
+    assert len([s for s in statuses if s["status"] == "queued"]) == 2
+    assert any(s["status"] == "done" and s["part_number"] == 1 for s in statuses)
+    assert any(s["status"] == "error" and s["part_number"] == 2 for s in statuses)
+    assert any("error Chapter 040 part 002" in l for l in logs)
+
+
+def test_run_part_jobs_callbacks_parallel_order_and_skipped6(tmp_path):
+    out_dir = tmp_path / "out_para_cb"
+    out_dir.mkdir()
+    # 6 jobs across 2 chapters: ch40 3 parts, ch41 3 parts
+    jobs = []
+    for pn in range(1, 4):
+        jobs.append(PartJob(chapter_number=40, chapter_title="C40", part_number=pn, part_count=3, text=f"c40-{pn}", output_path=str(out_dir / "_parts" / f"040_C40_part{pn:03d}.mp3"), is_final_chapter_file=False))
+    for pn in range(1, 4):
+        jobs.append(PartJob(chapter_number=41, chapter_title="C41", part_number=pn, part_count=3, text=f"c41-{pn}", output_path=str(out_dir / "_parts" / f"041_C41_part{pn:03d}.mp3"), is_final_chapter_file=False))
+    (out_dir / "_parts").mkdir(parents=True, exist_ok=True)
+    # pre-create one part to test skipped 1/6
+    (out_dir / "_parts" / "040_C40_part001.mp3").write_text("pre", encoding="utf-8")
+
+    statuses = []
+    logs = []
+
+    def on_part(payload):
+        statuses.append(payload)
+
+    def on_log(line):
+        logs.append(line)
+
+    progresses = []
+
+    def on_progress(done, total):
+        progresses.append((done, total))
+
+    concurrent = {"cur": 0, "max": 0}
+    lock = asyncio.Lock()
+
+    async def fake_tts(text, output_path, voice, retries=5):
+        async with lock:
+            concurrent["cur"] += 1
+            concurrent["max"] = max(concurrent["max"], concurrent["cur"])
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_text("x", encoding="utf-8")
+        await asyncio.sleep(0.01)
+        async with lock:
+            concurrent["cur"] -= 1
+
+    async def _run():
+        with patch("core.tts.tts_text_to_mp3", new=fake_tts):
+            await run_part_jobs(jobs, voice="v", parallel=3, retries=5, on_part_status=on_part, on_log=on_log, on_progress=on_progress)
+
+    asyncio.run(_run())
+
+    # queued 6, skipped 1, fetching 5, done 5
+    assert len([s for s in statuses if s["status"] == "queued"]) == 6
+    assert len([s for s in statuses if s["status"] == "skipped"]) == 1
+    assert len([s for s in statuses if s["status"] == "done"]) == 5
+    assert "skip Chapter 040 part 001/003" in "".join(logs) or any("skip Chapter 040 part 001" in l for l in logs)
+    assert progresses[-1] == (6, 6)
+    assert concurrent["max"] <= 3
+    # reading order queued before fetching: first 6 statuses are queued
+    assert all(s["status"] == "queued" for s in statuses[:6])
+

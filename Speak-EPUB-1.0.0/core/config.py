@@ -141,7 +141,7 @@ def save_store(patch: Any) -> Dict[str, Any]:
 # JSON-RPC handler — stdin/stdout primary (AD-4 spike)
 # ---------------------------------------------------------------------------
 
-def handle_rpc(request: Any) -> Dict[str, Any]:
+def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
     """
     Handle a single JSON-RPC request dict {id, method, params}.
     Returns response dict {id, result} or {id, error}.
@@ -153,6 +153,10 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
     static importlinter still sees core->core only. Documented exception for importlinter
     `core-no-adapters` — see .importlinter and pyproject.toml. Dynamic import is
     intentional to keep the contract while allowing the aggregator.
+
+    emit_fn(event: str, payload: dict) — optional streaming hook for AD-6 bus
+    (chapterStatus/partStatus/logLine/throttleChanged/done). Called synchronously
+    inside fetch/TTS callbacks, also collected in logs/throttles/statuses for fallback.
     """
     if not isinstance(request, dict):
         return {"id": "0", "error": {"code": "BAD_REQUEST", "message": "request must be object"}}
@@ -652,12 +656,27 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
 
             def on_log(line: str):
                 logs.append(line)
+                if emit_fn:
+                    try:
+                        emit_fn("logLine", {"line": line})
+                    except Exception:
+                        pass
 
             def on_status(idx: int, status: str):
                 statuses[idx] = status
+                if emit_fn:
+                    try:
+                        emit_fn("chapterStatus", {"chapter": int(idx), "status": status})
+                    except Exception:
+                        pass
 
             def on_throttle(tier: str, delay: int):
                 throttles.append({"tier": tier, "delay": delay})
+                if emit_fn:
+                    try:
+                        emit_fn("throttleChanged", {"tier": tier, "delay": delay})
+                    except Exception:
+                        pass
 
             # Ensure urls is list
             urls_list = list(urls) if isinstance(urls, (list, tuple)) else []
@@ -725,6 +744,199 @@ def handle_rpc(request: Any) -> Dict[str, Any]:
             msg = str(e)
             if _re2.search(r"\b(4\d\d|5\d\d)\b", msg) or "timeout" in msg.lower() or "5xx" in msg.lower():
                 return {"id": rid, "error": {"code": "LIST_FAILED", "message": msg}}
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": msg}}
+
+    # TTS live — run_part_jobs with event bus (Story 4.1)
+    if method in ("runTtsJobs", "run_part_jobs", "runPartJobs"):
+        import asyncio as _async
+        import importlib as _il_tts
+        params = request.get("params") or {}
+        if not isinstance(params, dict):
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "params must be object"}}
+        # Support jobs as list of PartJob dicts or synthetic chapter spec
+        jobs_param = params.get("jobs", params.get("partJobs", params.get("part_jobs")))
+        voice = params.get("voice", params.get("voiceName", "en-US-AndrewNeural"))
+        parallel = params.get("parallel", 3)
+        retries = params.get("retries", 5)
+        # Parse voice/parallel/retries
+        try:
+            parallel = int(parallel)
+            if parallel < 1:
+                parallel = 1
+            if parallel > 6:
+                parallel = 6
+        except Exception:
+            parallel = 3
+        try:
+            retries = int(retries)
+            if retries < 1:
+                retries = 5
+        except Exception:
+            retries = 5
+        if isinstance(voice, str):
+            voice = voice.strip() or "en-US-AndrewNeural"
+        else:
+            voice = "en-US-AndrewNeural"
+        # Build jobs list
+        jobs: list = []
+        if isinstance(jobs_param, list) and jobs_param:
+            # Check if first element is dict with PartJob fields
+            try:
+                _tmod = _il_tts.import_module("core.tts")
+                PartJobCls = getattr(_tmod, "PartJob")
+                for j in jobs_param:  # type: ignore
+                    if isinstance(j, dict):
+                        # Support both snake and camel
+                        cn = j.get("chapter_number", j.get("chapterNumber", j.get("chapter")))
+                        pn = j.get("part_number", j.get("partNumber", j.get("part")))
+                        pc = j.get("part_count", j.get("partCount", j.get("count")))
+                        txt = j.get("text", "")
+                        outp = j.get("output_path", j.get("outputPath", j.get("path")))
+                        is_final = j.get("is_final_chapter_file", j.get("isFinal", j.get("is_final", False)))
+                        if cn is None or pn is None or outp is None:
+                            continue
+                        try:
+                            # guard part_count: must be >=1
+                            try:
+                                pc_val = int(pc) if pc is not None else 1
+                                if pc_val <= 0:
+                                    pc_val = 1
+                            except Exception:
+                                pc_val = 1
+                            # robust is_final handling: string "false"/"0" -> False
+                            if isinstance(is_final, str):
+                                is_final_bool = is_final.strip().lower() in ("1", "true", "yes")
+                            else:
+                                is_final_bool = bool(is_final)
+                            jobs.append(
+                                PartJobCls(
+                                    chapter_number=int(cn),
+                                    chapter_title=str(j.get("chapter_title", j.get("chapterTitle", f"Chapter {cn}"))),
+                                    part_number=int(pn),
+                                    part_count=pc_val,
+                                    text=str(txt),
+                                    output_path=str(outp),
+                                    is_final_chapter_file=is_final_bool,
+                                )
+                            )
+                        except Exception:
+                            continue
+                    else:
+                        # Already PartJob instance?
+                        jobs.append(j)
+            except Exception as e:
+                return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+        elif isinstance(params.get("chapters"), list):
+            # Alternative: build plan from chapters + outputDir
+            try:
+                chaps = params.get("chapters")  # list of [index, title, text]
+                output_dir = params.get("outputDir", params.get("output_dir", "output"))
+                chunk_size = params.get("chunkSize", params.get("chunk_size", 3500))
+                try:
+                    chunk_size = int(chunk_size)
+                    chunk_size = max(500, min(5000, chunk_size))
+                except Exception:
+                    chunk_size = 3500
+                _tmod2 = _il_tts.import_module("core.tts")
+                build_plan_fn = getattr(_tmod2, "build_generation_plan")
+                # Normalize chapters to tuple
+                norm_chaps = []
+                for c in chaps:  # type: ignore
+                    if isinstance(c, (list, tuple)) and len(c) >= 3:
+                        norm_chaps.append((int(c[0]), str(c[1]), str(c[2])))
+                    elif isinstance(c, dict):
+                        norm_chaps.append((int(c.get("index", 0)), str(c.get("title", "")), str(c.get("text", ""))))
+                _, jobs = build_plan_fn(norm_chaps, str(output_dir), chunk_size)
+            except Exception as e:
+                return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+        # If still empty jobs, return empty result (resume case)
+        try:
+            _tmod3 = _il_tts.import_module("core.tts")
+            run_jobs_fn = getattr(_tmod3, "run_part_jobs")
+            tts_logs: list[str] = []
+            part_throttles: list = []
+
+            def tts_on_log(line: str):
+                tts_logs.append(line)
+                if len(tts_logs) > 1000:
+                    tts_logs.pop(0)
+                if emit_fn:
+                    try:
+                        emit_fn("logLine", {"line": line})
+                    except Exception:
+                        pass
+
+            def tts_on_part(payload: dict):
+                if emit_fn:
+                    try:
+                        emit_fn("partStatus", payload)
+                    except Exception:
+                        pass
+                # also log skip for badge? handle skip -> logLine already via on_log
+
+            def tts_on_progress(done: int, total: int):
+                if emit_fn:
+                    try:
+                        emit_fn("logLine", {"line": f"progress: {done}/{total} TTS part job(s) complete"})
+                    except Exception:
+                        pass
+
+            # Run async jobs
+            try:
+                loop = _async.get_event_loop()
+                if loop.is_closed():
+                    raise RuntimeError("closed loop")
+            except Exception:
+                loop = _async.new_event_loop()
+                _async.set_event_loop(loop)
+            try:
+                if loop.is_running():
+                    # Already in async context? Create task via asyncio.run replacement
+                    # Use new loop in thread to avoid deadlock
+                    import concurrent.futures as _cf
+                    import threading as _th
+
+                    result_box: dict = {}
+                    exc_box: dict = {}
+
+                    def _run_in_new_loop():
+                        new_loop = _async.new_event_loop()
+                        _async.set_event_loop(new_loop)
+                        try:
+                            new_loop.run_until_complete(run_jobs_fn(jobs, voice, parallel, retries, on_part_status=tts_on_part, on_log=tts_on_log, on_progress=tts_on_progress))
+                            result_box["ok"] = True
+                        except Exception as e:
+                            exc_box["e"] = e
+                        finally:
+                            new_loop.close()
+
+                    th = _th.Thread(target=_run_in_new_loop, daemon=True)
+                    th.start()
+                    th.join(timeout=300)
+                    if "e" in exc_box:
+                        raise exc_box["e"]
+                else:
+                    loop.run_until_complete(run_jobs_fn(jobs, voice, parallel, retries, on_part_status=tts_on_part, on_log=tts_on_log, on_progress=tts_on_progress))
+            except RuntimeError as re:
+                # fallback to asyncio.run if loop handling failed
+                if "already running" in str(re).lower() or "closed" in str(re).lower():
+                    _async.run(run_jobs_fn(jobs, voice, parallel, retries, on_part_status=tts_on_part, on_log=tts_on_log, on_progress=tts_on_progress))
+                else:
+                    raise
+            if emit_fn:
+                try:
+                    emit_fn("done", {"result": "ok"})
+                except Exception:
+                    pass
+            return {"id": rid, "result": {"done": True, "logs": tts_logs, "jobs": len(jobs)}}
+        except Exception as e:
+            msg = str(e)
+            if emit_fn:
+                try:
+                    emit_fn("logLine", {"line": f"error {msg}"})
+                    emit_fn("done", {"error": msg})
+                except Exception:
+                    pass
             return {"id": rid, "error": {"code": "EXCEPTION", "message": msg}}
 
     # Selection persistence — Core owns selection (D2/D3 patch)
@@ -1862,7 +2074,18 @@ def run_sidecar_loop() -> None:
             req = json.loads(line)
             # preserve id for error correlation even if req is not dict
             rid = req.get("id", "0") if isinstance(req, dict) else "0"
-            resp = handle_rpc(req)
+
+            # streaming emit shim: handle_rpc can emit events before final response
+            def _emit(event: str, payload: Any):
+                try:
+                    sys.stdout.write(json.dumps({"event": event, "payload": payload}, ensure_ascii=False) + "\n")
+                    sys.stdout.flush()
+                except BrokenPipeError:
+                    pass
+                except Exception:
+                    pass
+
+            resp = handle_rpc(req, emit_fn=_emit)
             # ensure response id matches request when handle_rpc returns BAD_REQUEST with 0
             if isinstance(req, dict) and "id" in req and resp.get("id") == "0" and rid != "0":
                 resp["id"] = rid

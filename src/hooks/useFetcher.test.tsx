@@ -6,6 +6,7 @@ const mockCallSidecar = vi.fn();
 const mockOnThrottleChanged = vi.fn();
 const mockOnLogLine = vi.fn();
 const mockOnChapterStatus = vi.fn();
+const mockOnPartStatus = vi.fn();
 
 vi.mock("@/lib/sidecar", () => ({
   callSidecar: (...args: unknown[]) => mockCallSidecar(...args),
@@ -19,6 +20,10 @@ vi.mock("@/lib/sidecar", () => ({
   },
   onChapterStatus: (cb: (p: unknown) => void) => {
     mockOnChapterStatus(cb);
+    return Promise.resolve(() => {});
+  },
+  onPartStatus: (cb: (p: unknown) => void) => {
+    mockOnPartStatus(cb);
     return Promise.resolve(() => {});
   },
 }));
@@ -178,5 +183,102 @@ describe("useFetcher hook", () => {
       statusCb({ chapter: 1, status: "done" });
     });
     await waitFor(() => expect(result.current.statuses[1]).toBe("done"));
+  });
+
+  it("onPartStatus updates partStatuses and progress", async () => {
+    let partCb: (p: { chapter_number: number; part_number: number; part_count: number; is_final_chapter_file: boolean; status: string }) => void = () => {};
+    mockOnPartStatus.mockImplementation((cb) => {
+      partCb = cb as unknown as typeof partCb;
+      return Promise.resolve(() => {}) as unknown as Promise<() => void>;
+    });
+    mockCallSidecar.mockResolvedValue({ id: "1", result: { chapters: [], skipped: 0 } });
+    const { result } = renderHook(() => useFetcher());
+    await waitFor(() => expect(mockOnPartStatus).toHaveBeenCalled());
+    act(() => {
+      partCb({ chapter_number: 40, part_number: 1, part_count: 3, is_final_chapter_file: false, status: "queued" });
+      partCb({ chapter_number: 40, part_number: 2, part_count: 3, is_final_chapter_file: false, status: "queued" });
+      partCb({ chapter_number: 40, part_number: 3, part_count: 3, is_final_chapter_file: false, status: "queued" });
+    });
+    await waitFor(() => expect(Object.keys(result.current.partStatuses).length).toBe(3));
+    expect(result.current.progress.total).toBe(3);
+    expect(result.current.progress.done).toBe(0);
+    act(() => {
+      partCb({ chapter_number: 40, part_number: 1, part_count: 3, is_final_chapter_file: false, status: "done" });
+    });
+    await waitFor(() => expect(result.current.partStatuses["40-1"].status).toBe("done"));
+    expect(result.current.progress.done).toBe(1);
+    expect(result.current.progress.percent).toBe(33);
+    // skipped also counts as done
+    act(() => {
+      partCb({ chapter_number: 40, part_number: 2, part_count: 3, is_final_chapter_file: false, status: "skipped" });
+    });
+    await waitFor(() => expect(result.current.progress.done).toBe(2));
+    expect(result.current.logs.some((l) => l.includes("skip Chapter 040 part 002"))).toBe(true);
+  });
+
+  it("progress derives from chapter statuses when no parts", async () => {
+    mockCallSidecar.mockResolvedValue({ id: "1", result: { chapters: [], skipped: 0 } });
+    const { result } = renderHook(() => useFetcher());
+    await waitFor(() => expect(mockOnChapterStatus).toHaveBeenCalled());
+    // manually set statuses done 2/3
+    act(() => {
+      result.current.setStatuses({ 1: "done", 2: "done", 3: "queued" });
+    });
+    await waitFor(() => expect(result.current.progress.done).toBe(2));
+    expect(result.current.progress.total).toBe(3);
+    expect(result.current.progress.percent).toBe(67);
+  });
+
+  it("LOCKED queue handling shows Kolejka zablokowana", async () => {
+    mockCallSidecar.mockResolvedValue({ id: "1", error: { code: "LOCKED", message: "queue locked" } });
+    const { result } = renderHook(() => useFetcher());
+    await act(async () => {
+      await result.current.start({ urls: ["https://www.novelphoenix.com/novel/123/chapter/1"] });
+    });
+    await waitFor(() => expect(result.current.error).toBe("LOCKED"));
+    expect(result.current.badge).toBe("Kolejka zablokowana");
+    expect(result.current.logs.some((l) => l.includes("queue locked"))).toBe(true);
+    expect(result.current.fetching).toBe(false);
+  });
+
+  it("slice(-200) cap keeps last 200 logs", async () => {
+    let logCb: (p: { line: string }) => void = () => {};
+    mockOnLogLine.mockImplementation((cb) => {
+      logCb = cb as unknown as (p: { line: string }) => void;
+      return Promise.resolve(() => {}) as unknown as Promise<() => void>;
+    });
+    mockCallSidecar.mockResolvedValue({ id: "1", result: { chapters: [], skipped: 0 } });
+    const { result } = renderHook(() => useFetcher());
+    await waitFor(() => expect(mockOnLogLine).toHaveBeenCalled());
+    act(() => {
+      for (let i = 0; i < 250; i++) logCb({ line: `line ${i}` });
+    });
+    await waitFor(() => expect(result.current.logs.length).toBe(200));
+    expect(result.current.logs[0]).toBe("line 50");
+    expect(result.current.logs[199]).toBe("line 249");
+  });
+
+  it("abort cancels fetching and exposes elapsed", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true } as unknown as { shouldAdvanceTime: boolean });
+    mockOnChapterStatus.mockImplementation((cb) => {
+      void cb;
+      return Promise.resolve(() => {}) as unknown as Promise<() => void>;
+    });
+    mockCallSidecar.mockImplementation(() => new Promise(() => {}));
+    const { result } = renderHook(() => useFetcher());
+    await waitFor(() => expect(mockOnChapterStatus).toHaveBeenCalled());
+    act(() => {
+      void result.current.start({ urls: ["https://www.novelphoenix.com/novel/123/chapter/1"] });
+    });
+    await waitFor(() => expect(result.current.fetching).toBe(true));
+    // advance timer 2 seconds for elapsed
+    act(() => {
+      vi.advanceTimersByTime(2100);
+    });
+    await waitFor(() => expect(result.current.elapsedSec).toBeGreaterThanOrEqual(2));
+    act(() => {
+      result.current.abort();
+    });
+    await waitFor(() => expect(result.current.fetching).toBe(false));
   });
 });

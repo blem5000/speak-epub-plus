@@ -230,7 +230,15 @@ async def tts_text_to_mp3(text: str, output_path: str, voice: str, retries: int 
     raise RuntimeError(f"TTS failed after {retries} attempts for {output_path}: {last_error}") from last_error
 
 
-async def run_part_jobs(jobs: List[PartJob], voice: str, parallel: int, retries: int) -> None:
+async def run_part_jobs(
+    jobs: List[PartJob],
+    voice: str,
+    parallel: int,
+    retries: int,
+    on_part_status=None,
+    on_log=None,
+    on_progress=None,
+) -> None:
     """
     Global parallel PartJob queue — deterministyczny reading-order.
 
@@ -241,10 +249,50 @@ async def run_part_jobs(jobs: List[PartJob], voice: str, parallel: int, retries:
     - else start/done logs + await tts_text_to_mp3
     - progress completed/total with completed_lock, queue.task_done, queue.join, gather, cancel on exception
     - empty jobs -> print No TTS jobs ... and return
+
+    Callbacks mirroring fetch.py pattern:
+    - on_part_status(payload: dict) with {chapter_number, part_number, part_count, is_final_chapter_file, status}
+      status in queued/fetching/done/error/skipped
+    - on_log(line: str)
+    - on_progress(completed: int, total: int)
     """
+    # clamp parallel 1-6 to avoid deadlock/ flood (edge)
+    try:
+        parallel = int(parallel)
+        parallel = max(1, min(6, parallel))
+    except Exception:
+        parallel = 3
+    try:
+        retries = int(retries)
+        if retries < 1:
+            retries = 5
+    except Exception:
+        retries = 5
+
     if not jobs:
         print("No TTS jobs to generate. Existing files will be reused.")
+        if on_log:
+            try:
+                on_log("No TTS jobs to generate. Existing files will be reused.")
+            except Exception:
+                pass
         return
+
+    # emit queued for each job on enqueue (reading order)
+    for job in jobs:
+        if on_part_status:
+            try:
+                on_part_status(
+                    {
+                        "chapter_number": job.chapter_number,
+                        "part_number": job.part_number,
+                        "part_count": job.part_count,
+                        "is_final_chapter_file": job.is_final_chapter_file,
+                        "status": "queued",
+                    }
+                )
+            except Exception:
+                pass
 
     queue: asyncio.Queue[Optional[PartJob]] = asyncio.Queue()
     for job in jobs:
@@ -257,6 +305,28 @@ async def run_part_jobs(jobs: List[PartJob], voice: str, parallel: int, retries:
     completed = 0
     completed_lock = asyncio.Lock()
 
+    def _emit_part(job: PartJob, status: str):
+        if on_part_status:
+            try:
+                on_part_status(
+                    {
+                        "chapter_number": job.chapter_number,
+                        "part_number": job.part_number,
+                        "part_count": job.part_count,
+                        "is_final_chapter_file": job.is_final_chapter_file,
+                        "status": status,
+                    }
+                )
+            except Exception:
+                pass
+
+    def _emit_log(msg: str):
+        if on_log:
+            try:
+                on_log(msg)
+            except Exception:
+                pass
+
     async def worker(worker_id: int) -> None:
         nonlocal completed
         while True:
@@ -267,26 +337,69 @@ async def run_part_jobs(jobs: List[PartJob], voice: str, parallel: int, retries:
 
             try:
                 if os.path.exists(job.output_path):
-                    size_kb = os.path.getsize(job.output_path) // 1024
-                    print(
+                    try:
+                        size_kb = os.path.getsize(job.output_path) // 1024
+                    except OSError:
+                        size_kb = 0
+                    msg_skip = (
                         f"worker {worker_id}: skip Chapter {job.chapter_number:03d} "
                         f"part {job.part_number:03d}/{job.part_count:03d} ({size_kb} KB)"
                     )
+                    print(msg_skip)
+                    _emit_log(f"skip Chapter {job.chapter_number:03d} part {job.part_number:03d}/{job.part_count:03d}")
+                    _emit_log(msg_skip)
+                    _emit_part(job, "skipped")
                 else:
-                    print(
+                    msg_start = (
                         f"worker {worker_id}: start Chapter {job.chapter_number:03d} "
                         f"part {job.part_number:03d}/{job.part_count:03d}"
                     )
-                    await tts_text_to_mp3(job.text, job.output_path, voice, retries=retries)
-                    size_kb = os.path.getsize(job.output_path) // 1024
-                    print(
+                    print(msg_start)
+                    _emit_log(msg_start)
+                    _emit_log(f"start Chapter {job.chapter_number:03d} part {job.part_number:03d}/{job.part_count:03d}")
+                    _emit_part(job, "fetching")
+                    try:
+                        await tts_text_to_mp3(job.text, job.output_path, voice, retries=retries)
+                    except Exception as e:
+                        # error path: emit error and re-raise to propagate via gather
+                        err_msg = f"error Chapter {job.chapter_number:03d} part {job.part_number:03d}/{job.part_count:03d}: {e}"
+                        print(err_msg)
+                        _emit_log(err_msg)
+                        _emit_part(job, "error")
+                        async with completed_lock:
+                            completed += 1
+                            prog = f"progress: {completed}/{total_jobs} TTS part job(s) complete"
+                            print(prog)
+                            _emit_log(prog)
+                            if on_progress:
+                                try:
+                                    on_progress(completed, total_jobs)
+                                except Exception:
+                                    pass
+                        raise
+                    try:
+                        size_kb = os.path.getsize(job.output_path) // 1024
+                    except OSError:
+                        size_kb = 0
+                    msg_done = (
                         f"worker {worker_id}: done  Chapter {job.chapter_number:03d} "
                         f"part {job.part_number:03d}/{job.part_count:03d} ({size_kb} KB)"
                     )
+                    print(msg_done)
+                    _emit_log(msg_done)
+                    _emit_log(f"done Chapter {job.chapter_number:03d} part {job.part_number:03d}/{job.part_count:03d}")
+                    _emit_part(job, "done")
 
                 async with completed_lock:
                     completed += 1
-                    print(f"progress: {completed}/{total_jobs} TTS part job(s) complete")
+                    prog = f"progress: {completed}/{total_jobs} TTS part job(s) complete"
+                    print(prog)
+                    _emit_log(prog)
+                    if on_progress:
+                        try:
+                            on_progress(completed, total_jobs)
+                        except Exception:
+                            pass
             finally:
                 queue.task_done()
 

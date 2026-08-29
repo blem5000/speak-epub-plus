@@ -7,6 +7,9 @@ import ChapterList from "./components/ChapterList";
 import Preview from "./components/Preview";
 import Filters from "./components/Filters";
 import Result from "./components/Result";
+import Queue from "./components/Queue";
+import ThrottleBadge from "./components/ThrottleBadge";
+import ProgressTrack from "./components/ProgressTrack";
 import { useChapterList } from "./hooks/useChapterList";
 import { useDebouncedSearch } from "./hooks/useDebouncedSearch";
 import { useFetcher } from "./hooks/useFetcher";
@@ -196,8 +199,22 @@ export default function App(): JSX.Element {
   const showChapterError = hasSelectedUrl && !chapterLoading && !!chapterError;
   const showChapterEmpty = hasSelectedUrl && !chapterLoading && !chapterError && chapterList.length === 0;
 
-  // Fetcher — polite sequential, cache resume, throttle badge
-  const { fetching, logs, throttle, statuses, badge, error: fetcherError, start: startFetcher, appendLogs, setStatuses } = useFetcher();
+  // Fetcher — polite sequential, cache resume, throttle badge (Story 4.1 live)
+  const {
+    fetching,
+    logs,
+    throttle,
+    statuses,
+    partStatuses,
+    progress,
+    elapsedSec,
+    badge,
+    error: fetcherError,
+    start: startFetcher,
+    abort: abortFetcher,
+    appendLogs,
+    setStatuses,
+  } = useFetcher();
   const N = chapterList.length;
 
   // EPUB Result — Story 2.4
@@ -207,7 +224,7 @@ export default function App(): JSX.Element {
   const [epubMissing, setEpubMissing] = useState<string[] | null>(null);
   const logPaneRef = useRef<HTMLDivElement>(null);
 
-  // auto-scroll log pane when logs change (reuse queue logic)
+  // auto-scroll log pane when logs change (reuse queue logic) — preserve for Result pane, Queue handles its own
   useEffect(() => {
     if (logPaneRef.current) {
       logPaneRef.current.scrollTop = logPaneRef.current.scrollHeight;
@@ -620,38 +637,10 @@ export default function App(): JSX.Element {
           </section>
         ) : null}
 
-        {/* Fetcher Queue minimal — AD-6 event bus, NFR1 polite, NFR3 resume */}
+        {/* Fetcher Queue — AD-6 live bus, expanded per-chapter + per-part (Story 4.1) */}
         {hasSelectedUrl && !chapterLoading ? (
-          <section
-            className="mt-6 rounded-lg border bg-card p-6 shadow-sm"
-            aria-label={t("queue.title") ?? "Queue"}
-            data-testid="queue-section"
-          >
-            <div className="flex items-center justify-between gap-4">
-              <h2 className="text-heading font-semibold">{t("queue.title")}</h2>
-              <div className="flex items-center gap-2">
-                <span
-                  data-testid="throttle-badge"
-                  className={
-                    "rounded-full px-3 py-1 text-body-sm font-medium " +
-                    (throttle?.tier === "safe"
-                      ? "bg-warning text-warning-foreground"
-                      : "bg-muted text-muted-foreground")
-                  }
-                  aria-live="polite"
-                  aria-label={`throttle ${throttle?.tier ?? "polite"} ${throttle?.delay ?? ""}`}
-                >
-                  {throttle?.tier === "safe" ? `safe ${throttle.delay}` : throttle?.tier ?? "polite (oczekiwanie)"}
-                </span>
-                {badge ? (
-                  <span data-testid="resume-badge" className="rounded-full bg-accent/10 px-3 py-1 text-body-sm text-accent-foreground">
-                    {badge}
-                  </span>
-                ) : null}
-              </div>
-            </div>
-
-            <div className="mt-4">
+          <>
+            <div className="mt-4 flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 data-testid="fetch-start"
@@ -662,82 +651,36 @@ export default function App(): JSX.Element {
                 {fetching ? "Pobieranie…" : `Start (${selectedUrlsForFetch.length})`}
               </button>
               {fetcherError ? (
-                <span className="ml-3 text-body-sm text-destructive" role="alert">
+                <span className="ml-3 text-body-sm text-destructive" role="alert" data-testid="fetcher-error">
                   {fetcherError}
                 </span>
               ) : null}
+              {elapsedSec > 0 ? (
+                <span data-testid="elapsed-global" className="text-body-sm text-muted-foreground">
+                  {elapsedSec}s
+                </span>
+              ) : null}
+              <ThrottleBadge throttle={throttle} />
+              <ProgressTrack done={progress.done} total={progress.total} />
             </div>
-
-            {N > 0 ? (
-              <div className="mt-4 space-y-1" data-testid="queue-list">
-                {chapterList.slice(0, 50).map((ch) => {
-                  const st = statuses[ch.index] ?? "queued";
-                  return (
-                    <div
-                      key={ch.index}
-                      data-testid={`queue-row-${ch.index}`}
-                      className="flex items-center gap-2 text-body-sm"
-                    >
-                      <span
-                        data-testid={`queue-pill-${ch.index}`}
-                        className={
-                          "rounded-full border px-2 py-0.5 text-mono text-xs " +
-                          (st === "done"
-                            ? "bg-success/10 text-success border-success/20"
-                            : st === "error"
-                              ? "bg-destructive/10 text-destructive border-destructive/20"
-                              : st === "fetching"
-                                ? "bg-accent/10 text-accent border-accent/20"
-                                : st === "cleaning"
-                                  ? "bg-info/10 text-info border-info/20"
-                                  : st === "queued"
-                                    ? "bg-muted text-muted-foreground border-transparent"
-                                    : "bg-muted text-muted-foreground")
-                        }
-                        aria-label={`chapter ${ch.index} ${st}`}
-                      >
-                        {st === "cleaning" ? "🧹 " : ""}
-                        {st === "fetching" ? "⏳ " : ""}
-                        {st === "done" ? "✓ " : ""}
-                        {st === "error" ? "✗ " : ""}
-                        {st}
-                      </span>
-                      <span className="truncate">
-                        {ch.index}. {ch.title}
-                      </span>
-                    </div>
-                  );
-                })}
-                {N > 50 ? (
-                  <div className="text-body-sm text-muted-foreground text-center py-1" data-testid="queue-more">
-                    +{N - 50} więcej — przewiń log aby zobaczyć resztę
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-
-            <div
-              ref={logPaneRef}
-              role="log"
-              aria-live="polite"
-              aria-busy={fetching || epubBuilding}
-              aria-label="Log pobierania"
-              tabIndex={0}
-              data-testid="log-pane"
-              className="mt-4 max-h-40 overflow-auto rounded-md border bg-muted p-3 mono text-mono text-body-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-            >
-              {logs.length === 0 ? (
-                <span className="text-muted-foreground">—</span>
-              ) : (
-                logs.map((line, i) => (
-                  <div key={i} data-testid="log-line">
-                    {line}
-                  </div>
-                ))
-              )}
+            <div className="mt-4">
+              <Queue
+                chapterList={chapterList}
+                statuses={statuses}
+                partStatuses={partStatuses}
+                progress={progress}
+                throttle={throttle}
+                badge={badge}
+                logs={logs}
+                fetching={fetching}
+                elapsedSec={elapsedSec}
+                onAbort={abortFetcher}
+              />
             </div>
-           </section>
-          ) : null}
+            {/* preserve logPaneRef for legacy auto-scroll test, hidden */}
+            <div ref={logPaneRef} data-testid="legacy-log-pane-ref" className="hidden" aria-hidden="true" />
+          </>
+        ) : null}
 
         {/* Result — Story 2.4 EPUB assembly + epubcheck */}
         <div className="mt-6">
