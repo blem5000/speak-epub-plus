@@ -6,6 +6,7 @@ import ResultsTable from "./components/ResultsTable";
 import ChapterList from "./components/ChapterList";
 import Preview from "./components/Preview";
 import Filters from "./components/Filters";
+import FiltersWindow from "./components/FiltersWindow";
 import Result from "./components/Result";
 import Queue from "./components/Queue";
 import ThrottleBadge from "./components/ThrottleBadge";
@@ -20,6 +21,7 @@ export default function App(): JSX.Element {
   const [rpcStatus, setRpcStatus] = useState<string>("idle");
   const [storePreview, setStorePreview] = useState<string>("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [filtersWindowOpen, setFiltersWindowOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selectedUrl, setSelectedUrl] = useState<string | null>(null);
   const ctaRef = useRef<HTMLButtonElement>(null);
@@ -394,6 +396,16 @@ export default function App(): JSX.Element {
           <div className="flex items-center gap-2">
             <button
               type="button"
+              data-testid="filters-window-button"
+              aria-label={(t("filters.title") as string) || "Filters"}
+              title={(t("filters.title") as string) || "Filters"}
+              onClick={() => setFiltersWindowOpen(true)}
+              className="rounded-md border bg-card px-3 py-1.5 text-body-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              ♢
+            </button>
+            <button
+              type="button"
               data-testid="settings-gear"
               aria-label={(t("settings.gear") as string) || "Settings"}
               title={(t("settings.gear") as string) || "Settings"}
@@ -413,6 +425,7 @@ export default function App(): JSX.Element {
           </div>
         </header>
         <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+        <FiltersWindow open={filtersWindowOpen} onClose={() => setFiltersWindowOpen(false)} />
 
         {/* Token demo card — keep per spec */}
         <section className="rounded-lg border bg-card p-6 shadow-sm">
