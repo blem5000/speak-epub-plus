@@ -384,8 +384,12 @@ export default function App(): JSX.Element {
     <div className="min-h-screen bg-background text-foreground">
       <div className="mx-auto max-w-[960px] px-6 py-8">
         {/* Header */}
-        <header className="mb-8 flex items-center justify-between">
-          <div>
+        <header
+          data-tauri-drag-region
+          className="mb-8 flex items-center justify-between"
+          style={{ WebkitAppRegion: "drag" } as unknown as React.CSSProperties}
+        >
+          <div data-tauri-drag-region>
             <h1 className="text-display font-semibold tracking-tight">
               {t("app.title")}
             </h1>
@@ -393,7 +397,7 @@ export default function App(): JSX.Element {
               {t("app.subtitle")} — {t("find.hint")}
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2" style={{ WebkitAppRegion: "no-drag" } as unknown as React.CSSProperties}>
             <button
               type="button"
               data-testid="filters-window-button"
@@ -424,6 +428,59 @@ export default function App(): JSX.Element {
             </button>
           </div>
         </header>
+        {/* Surface announcer for screen reader — Wyszukiwanie / Lista N / Wybrano X / Kolejka D/T */}
+        <div
+          aria-live="polite"
+          aria-atomic="true"
+          className="sr-only"
+          data-testid="surface-announcer"
+        >
+          {(() => {
+            const parts: string[] = [];
+            if (!hasSelectedUrl) parts.push(t("find.title") || "Wyszukiwanie");
+            else parts.push(`${t("chapterList.title") || "Lista"} ${N}`);
+            if (selected.size > 0) parts.push(`${t("chapterList.selected", { count: selected.size, total: N }) || `Wybrano ${selected.size} z ${N}`}`);
+            else if (N > 0) parts.push(`${t("chapterList.title") || "Lista"} ${N}`);
+            if (fetching || progress.total > 0) parts.push(`${t("queue.title") || "Kolejka"} ${progress.done}/${progress.total}`);
+            return parts.join(" • ");
+          })()}
+        </div>
+        {/* Throttle 429 toast */}
+        {throttle && throttle.tier === "safe" ? (
+          <div
+            role="alert"
+            aria-live="assertive"
+            data-testid="throttle-toast"
+            className="mb-3 rounded-md border border-warning/20 bg-warning/10 px-3 py-2 text-body-sm text-warning-foreground"
+          >
+            {t("toast.throttled") || "Zwolnienie — 429, zwiększam opóźnienie do 10s (safe)"}
+          </div>
+        ) : null}
+        {/* Ban hint */}
+        {(chapterError && /LIST_FAILED|ban|Przerwa|限制/i.test(chapterError)) ||
+        (fetcherError && /LIST_FAILED|ban|Przerwa/i.test(fetcherError)) ? (
+          <div
+            role="alert"
+            data-testid="ban-hint"
+            className="mb-3 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-body-sm text-destructive"
+          >
+            Przerwa — wykryto ograniczenie. Wznów później. Dane w cache zachowane.
+          </div>
+        ) : null}
+        {/* FFmpeg missing warning */}
+        {(() => {
+          const logStr = (logs || []).join(" ") + " " + (epubError || "") + " " + (chapterError || "");
+          const ffmpegMissing = /ffmpeg/i.test(logStr);
+          return ffmpegMissing ? (
+            <div
+              role="alert"
+              data-testid="ffmpeg-warning"
+              className="mb-3 rounded-md border border-warning/20 bg-warning/10 px-3 py-2 text-body-sm text-warning-foreground"
+            >
+              FFmpeg nie znaleziono — części pozostaną niescalone. Sprawdź `ffmpeg -version`.
+            </div>
+          ) : null;
+        })()}
         <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
         <FiltersWindow open={filtersWindowOpen} onClose={() => setFiltersWindowOpen(false)} />
 

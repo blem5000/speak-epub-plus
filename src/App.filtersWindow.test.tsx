@@ -104,8 +104,6 @@ describe("App FiltersWindow 4.3 integration", () => {
     const dialog = await screen.findByTestId("filters-window-dialog");
     expect(dialog).toBeInTheDocument();
     // scoped within dialog to avoid duplicate with embedded panel
-    const { getByTestId } = await import("@testing-library/react");
-    // use dialog container query
     expect(dialog.querySelector('[data-testid="filter-input"]')).not.toBeNull();
     expect(dialog.querySelector('[data-testid="filters-table"]')).not.toBeNull();
   });

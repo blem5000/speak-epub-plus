@@ -348,10 +348,10 @@ export default function Preview({ open, onClose, chapterUrl, chapterTitle, chapt
           </div>
         ) : null}
 
-        {/* Content 40/60 split */}
-        <div className="flex flex-col gap-0 overflow-hidden md:flex-row" style={{ minHeight: 0 }}>
+        {/* Content 40/60 split — single-col <1024 per responsive spec */}
+        <div className="flex flex-col gap-0 overflow-hidden lg:flex-row" style={{ minHeight: 0 }}>
           {/* Tabs header */}
-          <div className="flex w-full flex-col border-t md:w-[40%] md:border-r md:border-t-0">
+          <div className="flex w-full flex-col border-t lg:w-[40%] lg:border-r lg:border-t-0">
             <div className="flex gap-1 border-b bg-muted/20 p-1" role="tablist" aria-label="Podgląd tabs">
               <button
                 role="tab"
@@ -417,7 +417,7 @@ export default function Preview({ open, onClose, chapterUrl, chapterTitle, chapt
               )}
             </div>
           </div>
-          <div className="hidden w-[60%] flex-col overflow-auto border-l md:flex" style={{ maxHeight: "50vh" }}>
+          <div className="hidden w-[60%] flex-col overflow-auto border-l lg:flex" style={{ maxHeight: "50vh" }}>
             <div className="border-b bg-muted/20 px-4 py-2 text-body-sm font-medium text-muted-foreground">Podgląd renderowany</div>
             <div className="prose prose-sm max-w-none p-4 text-body" data-testid="preview-rendered">
               {tab === "original" ? (
