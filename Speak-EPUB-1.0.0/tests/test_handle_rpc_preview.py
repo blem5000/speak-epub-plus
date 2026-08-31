@@ -91,11 +91,32 @@ def test_previewChapter_end_selector():
 
 
 def test_previewChapter_no_cache_fallback_missing():
-    # when both cache and _get fail, should return LIST_FAILED
+    # when both cache and core.http._get fail, should return LIST_FAILED
     with patch("core.fetch.read_cache", return_value=None):
-        with patch("adapters._http._get", side_effect=Exception("network fail")):
+        with patch("core.http._get", side_effect=Exception("network fail")):
             r = handle_rpc({"id": "1", "method": "previewChapter", "params": {"url": _valid_url(), "start": "div#chapter-content"}})
             assert r["error"]["code"] == "LIST_FAILED"
+
+
+def test_previewChapter_no_cache_uses_core_http_fallback(tmp_path, monkeypatch):
+    # Matrix: config fallback fetch — no cache, core/http._get used, response
+    # handling identical to before (resp.text), still selector-isolated.
+    import core.clean as clean
+    monkeypatch.setattr(clean, "_OVERRIDES_DIR", tmp_path / "overrides")
+    raw = '<html><body><div id="chapter-content"><p>Fresh body</p><nav>nav</nav></div></body></html>'
+    mock_resp = Mock()
+    mock_resp.text = raw
+    with patch("core.fetch.read_cache", return_value=None):
+        with patch("core.http._get", return_value=mock_resp) as mock_get:
+            r = handle_rpc({"id": "1", "method": "previewChapter", "params": {"url": _valid_url(), "start": "div#chapter-content"}})
+            assert "result" in r
+            assert "Fresh body" in r["result"]["text"]
+            assert "nav" not in r["result"]["text"]
+            mock_get.assert_called_once()
+            args, kwargs = mock_get.call_args
+            assert args[0] == _valid_url()
+            assert kwargs.get("timeout") == 12
+            assert kwargs.get("retries") == 2
 
 
 def test_fetchChapter_uses_override(tmp_path, monkeypatch):

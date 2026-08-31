@@ -107,6 +107,63 @@ def _backoff_delay(attempt: int) -> float:
     """Exponential backoff cap 20s + jitter 0.2–0.6, attempt 1-based."""
     return min(20, 2 * attempt) + random.uniform(0.2, 0.6)
 
+
+def _http_status(exc: BaseException | None) -> int | str | None:
+    """Derive the HTTP status behind *exc* from the exception chain.
+
+    The adapter wraps the transport error: AdapterError(FETCH_FAILED) → cause
+    HTTPError(response=resp) → resp.status_code, so the status lives on the
+    ``__cause__`` chain, not on the raised exception itself. This helper climbs
+    that chain looking for ``.response.status_code`` and maps
+    Timeout/ConnectionError to the literal ``"timeout"``.
+
+    As a last resort it substring-matches the ``code`` attribute only — never
+    ``str(exc)``, whose message embeds the target URL and its chapter numbers
+    (``/chapter/500``, ``/chapter/429``) that must not be misread as status
+    codes.
+
+    Returns an int status, ``"timeout"``, ``"5xx"`` or None when unknown.
+    """
+    if exc is None:
+        return None
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        resp = getattr(cur, "response", None)
+        status = getattr(resp, "status_code", None)
+        if isinstance(status, int) and not isinstance(status, bool):
+            return status
+        cname = type(cur).__name__
+        if "Timeout" in cname or "ConnectionError" in cname:
+            return "timeout"
+        code = getattr(cur, "code", None)
+        if isinstance(code, str) and code:
+            low = code.lower()
+            if "timeout" in low:
+                return "timeout"
+            if "429" in code:
+                return 429
+            m = re.search(r"\b5\d\d\b", code)
+            if m:
+                return int(m.group(0))
+            if "5xx" in low:
+                return "5xx"
+        cur = getattr(cur, "__cause__", None)
+    return None
+
+
+def _retry_class(exc: BaseException | None) -> tuple[bool, bool, bool]:
+    """Classify exception as (is_429, is_5xx, is_timeout) from _http_status."""
+    status = _http_status(exc)
+    if status == "timeout":
+        return (False, False, True)
+    if status == "5xx":
+        return (False, True, False)
+    if isinstance(status, int) and not isinstance(status, bool):
+        return (status == 429, 500 <= status < 600, False)
+    return (False, False, False)
+
 # ---------------------------------------------------------------------------
 # fetch_one — sequential, cache-aware, adaptive 429
 # ---------------------------------------------------------------------------
@@ -163,26 +220,44 @@ def fetch_one(
                 on_status(status_idx if status_idx is not None else 0, "done")
             except Exception:
                 pass
-        # Build ChapterContent from cached html (raw not filtered, but parse title/text)
+        # Clean through the SAME resolve_selectors + clean_html pipeline a fresh
+        # fetch uses, so cache-hit and fresh-fetch return the same ChapterContent
+        # shape (html = isolated body HTML, text = isolated text). Raw cache is
+        # never rewritten — cleaning happens on read (AD-2).
+        cleaned_html = cached
+        cleaned_text = ""
+        try:
+            from core.clean import resolve_selectors, clean_html
+
+            sel = resolve_selectors(adapter)
+            cleaned_html, cleaned_text = clean_html(cached, sel.start, sel.end)
+        except ValueError:
+            # invalid override/default selector → heuristic fallback, never raise
+            try:
+                from core.clean import clean_html as _clean_fallback
+
+                cleaned_html, cleaned_text = _clean_fallback(cached, None, None)
+            except Exception:
+                cleaned_html, cleaned_text = cached, ""
+        except Exception:
+            cleaned_html, cleaned_text = cached, ""
+        # title fallback (same as before)
         try:
             from bs4 import BeautifulSoup
 
             soup = BeautifulSoup(cached, "lxml")
-            # title fallback
             ttag = soup.find(["h1", "h2", "h3"])
             title = ttag.get_text(strip=True) if ttag else url
-            # text naive
-            for tag in soup(["script", "style", "nav", "aside"]):
-                tag.decompose()
-            body = soup
-            text = body.get_text(separator=" ", strip=True)
-            text = re.sub(r"\s+", " ", text).strip()
-            from core.ports import ChapterContent
-
-            return ChapterContent(url=url, title=title or url, html=cached, text=text or cached)
         except Exception:
-            # fallback: return raw string if ChapterContent import fails
-            return cached
+            title = url
+        if not cleaned_text and on_log:
+            try:
+                on_log(f"cache-hit isolation empty {url}")
+            except Exception:
+                pass
+        from core.ports import ChapterContent
+
+        return ChapterContent(url=url, title=title or url, html=cleaned_html or cached, text=cleaned_text or "")
 
     tier = "polite"
     # initial throttle emit polite
@@ -209,14 +284,12 @@ def fetch_one(
             cc = adapter.fetchChapter(url)
             if cc is None or not hasattr(cc, "html"):
                 raise ValueError("adapter returned non-list")
-            # write cache raw.html (AD-2 raw never filtered)
+            # write cache raw.html (AD-2 raw never filtered); never cache a
+            # non-HTML repr — an empty html must not poison the cache
             try:
                 html_to_cache = getattr(cc, "html", "") or ""
                 if html_to_cache:
                     write_cache(url, html_to_cache, cache_dir)
-                else:
-                    # fallback to text if html missing
-                    write_cache(url, str(cc), cache_dir)
             except Exception:
                 pass
             if on_status:
@@ -234,10 +307,11 @@ def fetch_one(
             last_exc = e
             msg = str(e)
             code = getattr(e, "code", "")
-            # detect 429 / 5xx / timeout — only these are retryable; 404/403 LIST_FAILED is NOT retryable
-            is_429 = "429" in msg or "429" in code or "Too Many" in msg
-            is_5xx = bool(re.search(r"\b5\d\d\b", msg)) or "5xx" in msg.lower()
-            is_timeout = "timeout" in msg.lower() or "timed out" in msg.lower()
+            # detect 429 / 5xx / timeout from the exception chain's HTTP status —
+            # only these are retryable; 404/403 LIST_FAILED is NOT retryable.
+            # Never substring the message: it embeds URLs whose chapter numbers
+            # (/chapter/500, /chapter/429) must not flip retry/throttle tiers.
+            is_429, is_5xx, is_timeout = _retry_class(e)
             retryable = is_429 or is_5xx or is_timeout
             if not retryable:
                 if on_status:
@@ -637,8 +711,10 @@ def fetch_many(
                     except Exception:
                         pass
                 failed.append(url)
-                # adaptive tier already handled in fetch_one; update tier if 429
-                if "429" in str(e):
+                # adaptive tier already handled in fetch_one; update tier if genuine HTTP 429
+                # (status derived from the __cause__ chain — never from the message,
+                # which embeds chapter-number URLs like /chapter/429)
+                if _http_status(e) == 429:
                     tier = "safe"
                     if on_throttle:
                         try:

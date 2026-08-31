@@ -161,4 +161,60 @@ describe("Preview 2.2 — selector boundary + live re-parse", () => {
     fireEvent.click(screen.getByTestId("preview-overlay"));
     expect(onClose).toHaveBeenCalled();
   });
+
+  it("sanitizes onerror payload in rendered Cleaned tab", async () => {
+    mockPreviewChapter.mockResolvedValue({
+      id: "1",
+      result: {
+        url: "https://www.novelphoenix.com/novel/123/chapter/42",
+        originalHtml: "<html>raw</html>",
+        originalText: "raw",
+        html: '<p>clean body</p><img src=x onerror="alert(1)">',
+        text: "clean body",
+        start: "div#chapter-content",
+        end: null,
+      },
+    });
+    render(<Preview open={true} onClose={vi.fn()} chapterUrl="https://www.novelphoenix.com/novel/123/chapter/42" chapterTitle="T" chapterIndex={1} />);
+    await vi.advanceTimersByTimeAsync(350);
+    const rendered = screen.getByTestId("preview-rendered");
+    const img = rendered.querySelector("img");
+    expect(img).not.toBeNull();
+    expect(img?.hasAttribute("onerror")).toBe(false);
+    // clean content still renders after sanitization
+    expect(rendered.textContent).toContain("clean body");
+  });
+
+  it("sanitizes onerror payload in rendered Original tab", async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    mockPreviewChapter.mockResolvedValue({
+      id: "1",
+      result: {
+        url: "https://www.novelphoenix.com/novel/123/chapter/42",
+        originalHtml: '<p>raw body</p><img src=x onerror="alert(1)" onclick="steal()">',
+        originalText: "raw body",
+        html: "<div>cleaned</div>",
+        text: "cleaned",
+        start: "div#chapter-content",
+        end: null,
+      },
+    });
+    render(<Preview open={true} onClose={vi.fn()} chapterUrl="https://www.novelphoenix.com/novel/123/chapter/42" chapterTitle="T" chapterIndex={1} />);
+    await vi.advanceTimersByTimeAsync(350);
+    await user.click(screen.getByTestId("preview-tab-original"));
+    const rendered = screen.getByTestId("preview-rendered");
+    const img = rendered.querySelector("img");
+    expect(img).not.toBeNull();
+    expect(img?.hasAttribute("onerror")).toBe(false);
+    expect(img?.hasAttribute("onclick")).toBe(false);
+    expect(rendered.textContent).toContain("raw body");
+  });
+
+  it("clean content still renders after sanitize in default Cleaned tab", async () => {
+    render(<Preview open={true} onClose={vi.fn()} chapterUrl="https://www.novelphoenix.com/novel/123/chapter/42" chapterTitle="T" chapterIndex={1} />);
+    await vi.advanceTimersByTimeAsync(350);
+    const rendered = screen.getByTestId("preview-rendered");
+    expect(rendered.textContent).toContain("cleaned");
+    expect(rendered.querySelector("div")).not.toBeNull();
+  });
 });

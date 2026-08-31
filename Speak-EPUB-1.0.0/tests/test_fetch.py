@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, MagicMock, patch
 
 import pytest
+import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -22,13 +23,29 @@ from core.fetch import (
     write_cache,
     polite_delay,
     _normalize_cache_key,
+    _http_status,
     fetch_one,
     fetch_many,
     CACHE_ROOT,
 )
-from core.ports import ChapterContent, ChapterInfo, AdapterError
+from core.ports import ChapterContent, ChapterInfo, AdapterError, Selectors
 
 # Helpers
+
+def _http_error(status_code: int, url: str = "https://www.novelphoenix.com/novel/123/chapter/1"):
+    """Build a requests HTTPError like adapters/_http._get raises."""
+    resp = Mock()
+    resp.status_code = status_code
+    resp.headers = {}
+    return requests.exceptions.HTTPError(f"{status_code} for {url}", response=resp)
+
+
+def _adapter_fetch_failed(status_code: int, url: str, message: str | None = None):
+    """AdapterError(FETCH_FAILED) wrapping an HTTPError(status) via __cause__."""
+    err = AdapterError(message or f"FETCH_FAILED: {status_code} for {url}", code="FETCH_FAILED")
+    err.__cause__ = _http_error(status_code, url)
+    return err
+
 
 def _mock_adapter_fetch(html="Real chapter text.", text="Real chapter text.", cover=None):
     adapter = Mock()
@@ -106,17 +123,94 @@ class TestCacheKey:
 class TestFetchOne:
     def test_fetch_one_cache_hit_no_network(self, tmp_path):
         url = "https://www.novelphoenix.com/novel/123/chapter/1"
-        html = "<div>Cached html</div>"
-        write_cache(url, html, cache_dir=tmp_path)
+        raw = (
+            '<html><body><h1>Chapter 1</h1>'
+            '<nav>site nav junk</nav>'
+            '<div id="chapter-content"><p>Cached html</p></div>'
+            '<footer>footer junk</footer>'
+            '</body></html>'
+        )
+        write_cache(url, raw, cache_dir=tmp_path)
         adapter = _mock_adapter_fetch()
+        adapter.getSelectors = Mock(return_value=Selectors(start="div#chapter-content", end=None))
         # ensure fetchChapter not called on hit
         logs = []
         statuses = []
         cc = fetch_one(url, adapter, cache_dir=tmp_path, on_log=lambda l: logs.append(l), on_status=lambda i,s: statuses.append(s))
         adapter.fetchChapter.assert_not_called()
-        assert cc.html == html
         assert any("skipped" in l for l in logs)
         assert "done" in statuses
+        # raw cache stays raw (AD-2: cleaning happens on read)
+        assert read_cache(url, tmp_path) == raw
+
+    def test_fetch_one_cache_hit_selector_isolation_parity(self, tmp_path):
+        # Cache hit, adapter selectors resolve — same ChapterContent shape as a
+        # fresh fetch: html = isolated body, text = isolated text (nav/footer gone).
+        url = "https://www.novelphoenix.com/novel/123/chapter/7"
+        raw = (
+            '<html><body><h1>Chapter 7</h1>'
+            '<nav>site nav junk</nav>'
+            '<div id="chapter-content"><p>Real chapter body</p></div>'
+            '<footer>footer junk</footer>'
+            '</body></html>'
+        )
+        write_cache(url, raw, cache_dir=tmp_path)
+        adapter = _mock_adapter_fetch()
+        adapter.getSelectors = Mock(return_value=Selectors(start="div#chapter-content", end=None))
+        cc = fetch_one(url, adapter, cache_dir=tmp_path)
+        assert cc.text == "Real chapter body"
+        assert "nav junk" not in cc.text
+        assert "footer junk" not in cc.text
+        assert cc.title == "Chapter 7"
+        # html is the isolated fragment, not the whole page
+        assert "chapter-content" in cc.html
+        assert "<nav>" not in cc.html
+        assert "<footer>" not in cc.html
+        assert cc.url == url
+
+    def test_fetch_one_cache_hit_no_selector_match_heuristic_fallback(self, tmp_path):
+        # Cache hit, no selectors match → (None, None) heuristic fallback like
+        # the adapter does; still returns ChapterContent.
+        url = "https://www.novelphoenix.com/novel/123/chapter/8"
+        raw = '<html><body><article><p>Heuristic body text</p></article></body></html>'
+        write_cache(url, raw, cache_dir=tmp_path)
+        adapter = _mock_adapter_fetch()
+        adapter.getSelectors = Mock(return_value=Selectors(start="div#chapter-content", end=None))
+        cc = fetch_one(url, adapter, cache_dir=tmp_path)
+        assert "Heuristic body text" in cc.text
+
+    def test_fetch_one_cache_hit_empty_isolation_still_returns_chaptercontent(self, tmp_path):
+        # Empty isolation result still returns ChapterContent, logged.
+        url = "https://www.novelphoenix.com/novel/123/chapter/9"
+        raw = '<html><body></body></html>'
+        write_cache(url, raw, cache_dir=tmp_path)
+        adapter = _mock_adapter_fetch()
+        adapter.getSelectors = Mock(return_value=Selectors(start="div#chapter-content", end=None))
+        logs = []
+        cc = fetch_one(url, adapter, cache_dir=tmp_path, on_log=lambda l: logs.append(l))
+        assert hasattr(cc, "text")
+        assert cc.text == ""
+        assert any("isolation empty" in l for l in logs)
+
+    def test_fetch_one_cache_hit_invalid_selector_never_raises(self, tmp_path):
+        # selector ValueError → retry with (None, None) heuristic fallback, never raise
+        url = "https://www.novelphoenix.com/novel/123/chapter/10"
+        raw = '<html><body><div id="chapter-content"><p>Body here</p></div></body></html>'
+        write_cache(url, raw, cache_dir=tmp_path)
+        adapter = _mock_adapter_fetch()
+        adapter.getSelectors = Mock(return_value=Selectors(start="???", end=None))
+        cc = fetch_one(url, adapter, cache_dir=tmp_path)
+        assert "Body here" in cc.text
+
+    def test_fetch_one_miss_empty_html_not_cached(self, tmp_path):
+        # Poisoning fix: non-HTML repr (empty html on ChapterContent) is never cached.
+        url = "https://www.novelphoenix.com/novel/123/chapter/3"
+        adapter = Mock()
+        adapter.fetchChapter = Mock(return_value=_chapter_content(url, html="", text="text only"))
+        with patch("core.fetch.time.sleep", return_value=None), patch("core.fetch.random.uniform", return_value=0.3):
+            cc = fetch_one(url, adapter, cache_dir=tmp_path)
+        assert cc is not None
+        assert read_cache(url, tmp_path) is None
 
     def test_fetch_one_miss_writes_cache(self, tmp_path):
         url = "https://www.novelphoenix.com/novel/123/chapter/1"
@@ -132,12 +226,12 @@ class TestFetchOne:
     def test_fetch_one_429_adaptive_safe(self, tmp_path):
         url = "https://www.novelphoenix.com/novel/123/chapter/42"
         adapter = Mock()
-        # first call raises 429, second succeeds
+        # first call raises a genuine HTTP 429 (via cause chain), second succeeds
         call_count = {"n": 0}
         def side(url):
             call_count["n"] += 1
             if call_count["n"] == 1:
-                raise AdapterError("429 Too Many Requests", code="FETCH_FAILED")
+                raise _adapter_fetch_failed(429, url, "FETCH_FAILED: 429 Too Many Requests")
             return _chapter_content(url, html="<div>ok</div>", text="ok")
         adapter.fetchChapter = Mock(side_effect=side)
         logs = []
@@ -156,7 +250,7 @@ class TestFetchOne:
     def test_fetch_one_after_5_retries_LIST_FAILED(self, tmp_path):
         url = "https://www.novelphoenix.com/novel/123/chapter/99"
         adapter = Mock()
-        adapter.fetchChapter = Mock(side_effect=AdapterError("429 still", code="FETCH_FAILED"))
+        adapter.fetchChapter = Mock(side_effect=lambda u: (_ for _ in ()).throw(_adapter_fetch_failed(429, u, "FETCH_FAILED: 429 still")))
         slept = []
         with patch("core.fetch.time.sleep", side_effect=lambda s: slept.append(s)), patch("core.fetch.random.uniform", return_value=0.3):
             with pytest.raises(AdapterError) as exc:
@@ -177,6 +271,27 @@ class TestFetchOne:
         with pytest.raises(ValueError):
             fetch_one("https://", adapter, cache_dir=tmp_path)
         adapter.fetchChapter.assert_not_called()
+
+# ------------------------------------------------------------------ retry classification (HTTP status from cause chain)
+class TestHttpStatusClassification:
+    def test_status_from_cause_chain(self):
+        err = _adapter_fetch_failed(429, "https://www.novelphoenix.com/novel/123/chapter/500")
+        assert _http_status(err) == 429
+
+    def test_chapter_number_in_url_is_not_status(self):
+        # /chapter/500 in the URL with a 404 cause must NOT be classified 5xx.
+        err = _adapter_fetch_failed(404, "https://www.novelphoenix.com/novel/123/chapter/500", "FETCH_FAILED: 404")
+        assert _http_status(err) == 404
+
+    def test_timeout_exception_maps_to_timeout(self):
+        err = AdapterError("FETCH_FAILED", code="FETCH_FAILED")
+        err.__cause__ = requests.exceptions.ConnectionError("connection reset")
+        assert _http_status(err) == "timeout"
+
+    def test_no_cause_unknown_status(self):
+        err = AdapterError("LIST_FAILED: https://x/chapter/429", code="LIST_FAILED")
+        assert _http_status(err) is None
+        assert _http_status(None) is None
 
 # ------------------------------------------------------------------ fetch_many bounded vs open-ended
 class TestFetchMany:
@@ -269,6 +384,29 @@ class TestFetchMany:
             with pytest.raises(AdapterError) as exc:
                 fetch_one("https://evil.com/novel/123/chapter/1", adapter, cache_dir=tmp_path)
             assert exc.value.code == "LIST_FAILED"
+
+    def test_fetch_many_403_on_chapter_429_no_tier_flip(self, tmp_path):
+        # Matrix via batch path: 403 on /chapter/429 must NOT flip tier to safe
+        # (message embeds the URL whose chapter number is 429).
+        url = "https://www.novelphoenix.com/novel/123/chapter/429"
+        adapter = Mock()
+        adapter.fetchChapter = Mock(side_effect=lambda u: (_ for _ in ()).throw(_adapter_fetch_failed(403, u)))
+        throttles = []
+        with patch("core.fetch.time.sleep", return_value=None), patch("core.fetch.random.uniform", return_value=0.3):
+            result = fetch_many([url], adapter, cache_dir=tmp_path, on_throttle=lambda tier,delay: throttles.append((tier,delay)), skip_delay=True)
+        assert result["failed"] == [url]
+        assert all(t != "safe" for t, _ in throttles)
+
+    def test_fetch_many_real_429_flips_tier_to_safe(self, tmp_path):
+        # Genuine HTTP 429 exhausted in batch → tier flips to safe.
+        url = "https://www.novelphoenix.com/novel/123/chapter/60"
+        adapter = Mock()
+        adapter.fetchChapter = Mock(side_effect=lambda u: (_ for _ in ()).throw(_adapter_fetch_failed(429, u)))
+        throttles = []
+        with patch("core.fetch.time.sleep", return_value=None), patch("core.fetch.random.uniform", return_value=0.3):
+            result = fetch_many([url], adapter, cache_dir=tmp_path, on_throttle=lambda tier,delay: throttles.append((tier,delay)), skip_delay=True)
+        assert result["failed"] == [url]
+        assert any(t == "safe" for t, _ in throttles)
 
     def test_sequential_no_parallel_lock(self, tmp_path):
         urls = [f"https://www.novelphoenix.com/novel/123/chapter/{i}" for i in range(1, 4)]

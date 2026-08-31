@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import DOMPurify from "dompurify";
 import { previewChapter, getSelectors, saveSelectors, clearSelectors, isPreviewResult } from "@/lib/sidecar";
 
 type PreviewProps = {
@@ -421,9 +422,9 @@ export default function Preview({ open, onClose, chapterUrl, chapterTitle, chapt
             <div className="border-b bg-muted/20 px-4 py-2 text-body-sm font-medium text-muted-foreground">Podgląd renderowany</div>
             <div className="prose prose-sm max-w-none p-4 text-body" data-testid="preview-rendered">
               {tab === "original" ? (
-                <div dangerouslySetInnerHTML={{ __html: originalHtml.slice(0, 20000) }} />
+                <div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(originalHtml.slice(0, 20000)) }} />
               ) : (
-                <div dangerouslySetInnerHTML={{ __html: (removedCount > 0 ? filteredHtml : cleanedHtml).slice(0, 20000) }} />
+                <div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize((removedCount > 0 ? filteredHtml : cleanedHtml).slice(0, 20000)) }} />
               )}
             </div>
           </div>

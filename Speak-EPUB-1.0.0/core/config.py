@@ -1240,9 +1240,11 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             except Exception:
                 raw_html = None
             if raw_html is None:
-                # fallback: try adapters._http._get raw fetch without cache (no write)
+                # fallback: Core-owned polite raw fetch without cache (no write);
+                # core.http mirrors adapters/_http.py politeness values without
+                # importing an adapter module (core-no-adapters contract)
                 try:
-                    from adapters._http import _get as _http_get
+                    from core.http import _get as _http_get
 
                     resp = _http_get(url_param, timeout=12, retries=2)
                     raw_html = resp.text or ""
