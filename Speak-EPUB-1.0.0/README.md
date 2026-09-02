@@ -9,7 +9,7 @@ Convert any EPUB file into a spoken-word audiobook using Microsoft Edge's free n
 - **Parallel generation** — several TTS requests run at the same time via a global queue (`--parallel`)
 - **Resume anywhere** — finished chapters and parts are skipped on re-run; if a run fails, just repeat the same command
 - **Single-file audiobooks** — optional M4B/M4A output with real chapter markers (requires FFmpeg)
-- **Interactive Windows launcher** — double-click `Run-SpeakEPUB.cmd`, no venv activation needed
+- **Interactive Windows launcher** — double-click `Run-SpeakEPUB.cmd` (or drag an EPUB onto it), no venv activation needed
 
 ## How it works
 
@@ -22,7 +22,7 @@ Convert any EPUB file into a spoken-word audiobook using Microsoft Edge's free n
 ## Requirements
 
 - Python 3.10+
-- FFmpeg on your PATH (only needed for `--m4b` / `--m4a`)
+- FFmpeg on your PATH (only needed for `--m4b` / `--m4a`; the Windows launcher can install it for you via winget)
 
 ## Installation
 
@@ -48,12 +48,15 @@ winget install ffmpeg
 
 #### Windows quick start (interactive)
 
-Prefer not to use the terminal? Double-click **`Run-SpeakEPUB.cmd`** (or run `Run-SpeakEPUB.ps1` from PowerShell). The launcher will:
+Prefer not to use the terminal? **Drag any `.epub` file onto `Run-SpeakEPUB.cmd`** and answer two questions — or just double-click `Run-SpeakEPUB.cmd` (or run `Run-SpeakEPUB.ps1` from PowerShell). The launcher will:
 
-- Create `venv` and install requirements automatically on first run
+- Find a usable Python (`python` or `py -3`) and create `venv` with requirements automatically on first run
+- Skip the EPUB prompt when you drag-and-dropped a file
+- Remember your last conversion in `last-run.json` and offer to repeat it with a single keypress
 - Ask for the EPUB path and output format (MP3 / M4B / M4A)
 - Optionally let you set voice, chapter range, parallel jobs, retries, chunk size, output folder, and more
-- Warn you if FFmpeg is missing when M4B/M4A output is selected
+- Offer to install FFmpeg with winget when it is missing and M4B/M4A output is selected
+- Let you convert another book without closing the window
 
 ### macOS
 

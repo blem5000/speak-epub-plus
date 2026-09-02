@@ -53,6 +53,7 @@ dist-ssr/
 
 # Store
 store.json
+last-run.json
 .bmad-loop/runs/
 .bmad-loop/cache/
 .bmad-loop/policy.toml
@@ -64,3 +65,6 @@ _bmad/render/
 !Speak-EPUB-1.0.0/_cache/.gitkeep
 !Speak-EPUB-1.0.0/_cache/**
 !Speak-EPUB-1.0.0/_cache/**/*.html
+
+# Tool state
+.cline/
