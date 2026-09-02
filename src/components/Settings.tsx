@@ -1,0 +1,772 @@
+import { useEffect, useRef, useState } from "react";
+import { t } from "@/i18n";
+import { getStore, setStore } from "@/lib/sidecar";
+
+type SettingsProps = {
+  open: boolean;
+  onClose: () => void;
+};
+
+const VOICE_OPTIONS = [
+  "en-US-AndrewNeural",
+  "pl-PL-ZofiaNeural",
+  "en-US-JennyNeural",
+  "pl-PL-MarekNeural",
+];
+
+const PRESET_DELAYS = [3000, 4000, 5000] as const;
+
+export default function Settings({ open, onClose }: SettingsProps): JSX.Element | null {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const firstFocusableRef = useRef<HTMLElement | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+
+  // form state
+  const [voice, setVoice] = useState<string>("en-US-AndrewNeural");
+  const [voiceCustom, setVoiceCustom] = useState<string>("");
+  const [isVoiceCustom, setIsVoiceCustom] = useState(false);
+  const [rateNum, setRateNum] = useState<number>(0);
+  const [parallel, setParallel] = useState<number>(3);
+  const [chunkSize, setChunkSize] = useState<number>(3500);
+  const [retries, setRetries] = useState<number>(5);
+  const [scrapeDelay, setScrapeDelay] = useState<number>(4000);
+  const [scrapeCustom, setScrapeCustom] = useState<number>(4000);
+  const [isScrapeCustom, setIsScrapeCustom] = useState(false);
+  const [safeMode, setSafeMode] = useState<boolean>(false);
+  const [keepEPUB, setKeepEPUB] = useState<boolean>(true);
+  const [keepMP3, setKeepMP3] = useState<boolean>(true);
+  const [keepM4B, setKeepM4B] = useState<boolean>(true);
+
+  // prev for revert
+  const prevRef = useRef<Record<string, unknown>>({});
+
+  const showToast = (msg: string): void => {
+    setToast(msg);
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 1500) as unknown as number;
+  };
+
+  // load on open
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    setLoading(true);
+    (async () => {
+      try {
+        const res = await getStore();
+        if (!alive) return;
+        const data = (res.result as Record<string, unknown>) ?? {};
+        // voice
+        const v = typeof data.voice === "string" ? (data.voice as string).trim() : "en-US-AndrewNeural";
+        const voiceVal = v || "en-US-AndrewNeural";
+        if (VOICE_OPTIONS.includes(voiceVal)) {
+          setVoice(voiceVal);
+          setIsVoiceCustom(false);
+          setVoiceCustom(voiceVal);
+        } else {
+          setVoice("custom");
+          setIsVoiceCustom(true);
+          setVoiceCustom(voiceVal);
+        }
+        prevRef.current["voice"] = voiceVal;
+        // rate
+        const rateStr = typeof data.rate === "string" ? (data.rate as string) : "+0%";
+        const m = String(rateStr).trim().match(/^([+-]?\d+)%$/);
+        let rn = 0;
+        if (m) {
+          try { rn = parseInt(m[1], 10); } catch { rn = 0; }
+        }
+        rn = Math.max(-100, Math.min(100, rn));
+        setRateNum(rn);
+        prevRef.current["rate"] = `${rn >= 0 ? "+" : ""}${rn}%`;
+        // parallel
+        let p = 3;
+        try { p = parseInt(String((data.parallel as unknown) ?? 3), 10); } catch { p = 3; }
+        if (!Number.isFinite(p)) p = 3;
+        p = Math.max(1, Math.min(6, p));
+        setParallel(p);
+        prevRef.current["parallel"] = p;
+        // chunk-size
+        let cs = 3500;
+        try {
+          const cand = (data as Record<string, unknown>)["chunk-size"] as unknown;
+          if (cand !== undefined) cs = parseInt(String(cand), 10);
+          else if ((data as Record<string, unknown>)["chunk_size"] !== undefined) cs = parseInt(String((data as Record<string, unknown>)["chunk_size"]), 10);
+        } catch { cs = 3500; }
+        if (!Number.isFinite(cs)) cs = 3500;
+        cs = Math.max(500, Math.min(5000, cs));
+        setChunkSize(cs);
+        prevRef.current["chunk-size"] = cs;
+        // retries
+        let rt = 5;
+        try { rt = parseInt(String((data.retries as unknown) ?? 5), 10); } catch { rt = 5; }
+        if (!Number.isFinite(rt)) rt = 5;
+        rt = Math.max(1, Math.min(10, rt));
+        setRetries(rt);
+        prevRef.current["retries"] = rt;
+        // scrapeDelay
+        let sd = 4000;
+        try {
+          const raw = (data.scrapeDelay as unknown) ?? (data as Record<string, unknown>)["scrape_delay"] ?? 4000;
+          sd = parseInt(String(raw), 10);
+        } catch { sd = 4000; }
+        if (!Number.isFinite(sd)) sd = 4000;
+        sd = Math.max(0, Math.min(20000, sd));
+        setScrapeDelay(sd);
+        if ((PRESET_DELAYS as readonly number[]).includes(sd)) {
+          setIsScrapeCustom(false);
+          setScrapeCustom(sd);
+        } else {
+          setIsScrapeCustom(true);
+          setScrapeCustom(sd);
+        }
+        prevRef.current["scrapeDelay"] = sd;
+        // safeMode
+        const sm = !!(data.safeMode ?? (data as Record<string, unknown>)["safe_mode"] ?? false);
+        setSafeMode(sm);
+        prevRef.current["safeMode"] = sm;
+        // keeps
+        setKeepEPUB(typeof data.keepEPUB === "boolean" ? (data.keepEPUB as boolean) : true);
+        prevRef.current["keepEPUB"] = typeof data.keepEPUB === "boolean" ? data.keepEPUB : true;
+        setKeepMP3(typeof data.keepMP3 === "boolean" ? (data.keepMP3 as boolean) : true);
+        prevRef.current["keepMP3"] = typeof data.keepMP3 === "boolean" ? data.keepMP3 : true;
+        setKeepM4B(typeof data.keepM4B === "boolean" ? (data.keepM4B as boolean) : true);
+        prevRef.current["keepM4B"] = typeof data.keepM4B === "boolean" ? data.keepM4B : true;
+        setLoading(false);
+      } catch {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => { alive = false; };
+  }, [open]);
+
+  // focus trap + Esc + auto focus
+  useEffect(() => {
+    if (!open) return;
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    // focus first focusable
+    const focusable = dialog.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    );
+    if (focusable.length > 0) {
+      firstFocusableRef.current = focusable[0];
+      focusable[0].focus();
+    } else {
+      dialog.focus();
+    }
+    const handleKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+        return;
+      }
+      if (e.key === "Tab" && dialog) {
+        const focusables = Array.from(dialog.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        )).filter(el => !el.hasAttribute("disabled") && el.getAttribute("aria-hidden") !== "true");
+        if (focusables.length === 0) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement as HTMLElement | null;
+        if (e.shiftKey) {
+          if (active === first) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else {
+          if (active === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      }
+    };
+    document.addEventListener("keydown", handleKey);
+    return () => document.removeEventListener("keydown", handleKey);
+  }, [open, onClose]);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    };
+  }, []);
+
+  const persist = async (patch: Record<string, unknown>, revertKey?: string, revertVal?: unknown): Promise<void> => {
+    try {
+      const res = await setStore(patch);
+      if (res.error) {
+        const msg = (res.error as { message?: string }).message ?? String(res.error);
+        showToast(msg);
+        // revert
+        if (revertKey && revertVal !== undefined) {
+          if (revertKey === "voice") {
+            const rv = String(revertVal);
+            if (VOICE_OPTIONS.includes(rv)) {
+              setVoice(rv);
+              setIsVoiceCustom(false);
+            } else {
+              setVoice("custom");
+              setIsVoiceCustom(true);
+              setVoiceCustom(rv);
+            }
+          } else if (revertKey === "rate") {
+            const ms = String(revertVal).match(/^([+-]?\d+)%$/);
+            if (ms) setRateNum(parseInt(ms[1], 10));
+          } else if (revertKey === "parallel") setParallel(Number(revertVal));
+          else if (revertKey === "chunk-size") setChunkSize(Number(revertVal));
+          else if (revertKey === "retries") setRetries(Number(revertVal));
+          else if (revertKey === "scrapeDelay") {
+            const rv = Number(revertVal);
+            setScrapeDelay(rv);
+            if ((PRESET_DELAYS as readonly number[]).includes(rv)) {
+              setIsScrapeCustom(false);
+              setScrapeCustom(rv);
+            } else {
+              setIsScrapeCustom(true);
+              setScrapeCustom(rv);
+            }
+          } else if (revertKey === "safeMode") setSafeMode(Boolean(revertVal));
+          else if (revertKey === "keepEPUB") setKeepEPUB(Boolean(revertVal));
+          else if (revertKey === "keepMP3") setKeepMP3(Boolean(revertVal));
+          else if (revertKey === "keepM4B") setKeepM4B(Boolean(revertVal));
+        }
+        return;
+      }
+      // success
+      // update prevRef for reverted key
+      if (revertKey) {
+        const val = (patch as Record<string, unknown>)[revertKey] ?? (patch as Record<string, unknown>)[Object.keys(patch)[0]];
+        prevRef.current[revertKey] = val as unknown;
+      } else {
+        for (const [k,v] of Object.entries(patch)) {
+          prevRef.current[k] = v;
+        }
+      }
+      const successMsg = (t("settings.toast.saved") as unknown as string) || "Zapisano";
+      showToast(successMsg);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      showToast(msg);
+      if (revertKey && revertVal !== undefined) {
+        if (revertKey === "voice") {
+          const rv = String(revertVal);
+          if (VOICE_OPTIONS.includes(rv)) { setVoice(rv); setIsVoiceCustom(false); } else { setVoice("custom"); setIsVoiceCustom(true); setVoiceCustom(rv); }
+        } else if (revertKey === "rate") { const ms = String(revertVal).match(/^([+-]?\d+)%$/); if (ms) setRateNum(parseInt(ms[1], 10)); }
+        else if (revertKey === "parallel") setParallel(Number(revertVal));
+        else if (revertKey === "chunk-size") setChunkSize(Number(revertVal));
+        else if (revertKey === "retries") setRetries(Number(revertVal));
+        else if (revertKey === "scrapeDelay") { const rv = Number(revertVal); setScrapeDelay(rv); if ((PRESET_DELAYS as readonly number[]).includes(rv)) { setIsScrapeCustom(false); setScrapeCustom(rv); } else { setIsScrapeCustom(true); setScrapeCustom(rv); } }
+        else if (revertKey === "safeMode") setSafeMode(Boolean(revertVal));
+        else if (revertKey === "keepEPUB") setKeepEPUB(Boolean(revertVal));
+        else if (revertKey === "keepMP3") setKeepMP3(Boolean(revertVal));
+        else if (revertKey === "keepM4B") setKeepM4B(Boolean(revertVal));
+      }
+    }
+  };
+
+  const handleVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>): void => {
+    const val = e.target.value;
+    if (val === "custom") {
+      setIsVoiceCustom(true);
+      setVoice("custom");
+      // focus custom input next tick
+      setTimeout(() => {
+        const el = document.querySelector<HTMLInputElement>('[data-testid="settings-audio-voice-custom"]');
+        if (el) el.focus();
+      }, 0);
+      return;
+    }
+    const prev = prevRef.current["voice"];
+    setVoice(val);
+    setIsVoiceCustom(false);
+    setVoiceCustom(val);
+    void persist({ voice: val }, "voice", prev);
+  };
+
+  const handleVoiceCustomBlur = (e: React.FocusEvent<HTMLInputElement>): void => {
+    const vv = e.target.value.trim();
+    const prev = prevRef.current["voice"];
+    if (!vv) {
+      showToast("voice must be non-empty");
+      // revert
+      const rv = String(prev ?? "en-US-AndrewNeural");
+      setVoiceCustom(rv);
+      if (VOICE_OPTIONS.includes(rv)) {
+        setVoice(rv);
+        setIsVoiceCustom(false);
+      } else {
+        setVoiceCustom(rv);
+      }
+      return;
+    }
+    if (vv.length > 100) {
+      // core will clamp, but show truncated
+    }
+    setVoiceCustom(vv);
+    // if custom value matches option, switch select
+    if (VOICE_OPTIONS.includes(vv)) {
+      setVoice(vv);
+      setIsVoiceCustom(false);
+    } else {
+      setVoice("custom");
+    }
+    void persist({ voice: vv }, "voice", prev);
+  };
+
+  const handleRateSlider = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    const v = parseInt(e.target.value, 10);
+    if (!Number.isFinite(v)) return;
+    setRateNum(v);
+  };
+  const handleRateSliderBlur = (): void => {
+    const prev = prevRef.current["rate"];
+    const clamped = Math.max(-100, Math.min(100, rateNum));
+    const rateStr = `${clamped >= 0 ? "+" : ""}${clamped}%`;
+    // validate pattern
+    if (!/^[+-]?\d+%$/.test(rateStr)) {
+      showToast(`invalid rate pattern ${rateStr}`);
+      const ms = String(prev ?? "+0%").match(/^([+-]?\d+)%$/);
+      if (ms) setRateNum(parseInt(ms[1], 10));
+      return;
+    }
+    setRateNum(clamped);
+    void persist({ rate: rateStr }, "rate", prev);
+  };
+  const handleRateNumberChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    const raw = e.target.value;
+    // allow empty while typing
+    if (raw === "" || raw === "-" || raw === "+") {
+      // keep raw? For controlled we need parse; we can keep as string but state expects number
+      // store as 0 temporarily
+      return;
+    }
+    const v = parseInt(raw, 10);
+    if (!Number.isFinite(v)) return;
+    setRateNum(Math.max(-100, Math.min(100, v)));
+  };
+  const handleRateNumberBlur = (e: React.FocusEvent<HTMLInputElement>): void => {
+    const raw = e.target.value.trim();
+    const prev = prevRef.current["rate"];
+    // empty => revert
+    if (!raw) {
+      const ms = String(prev ?? "+0%").match(/^([+-]?\d+)%$/);
+      if (ms) setRateNum(parseInt(ms[1], 10));
+      return;
+    }
+    // allow raw like "-10" or "-10%" or "+10%" — normalize
+    let candidate = raw;
+    // if raw is like "-10" without %, add %
+    if (/^[+-]?\d+$/.test(candidate)) candidate = `${candidate}%`;
+    if (!/^[+-]?\d+%$/.test(candidate)) {
+      showToast(`invalid rate pattern ${candidate}`);
+      const ms = String(prev ?? "+0%").match(/^([+-]?\d+)%$/);
+      if (ms) setRateNum(parseInt(ms[1], 10));
+      return;
+    }
+    const num = parseInt(candidate.slice(0, -1), 10);
+    const clamped = Math.max(-100, Math.min(100, num));
+    const rateStr = `${clamped >= 0 ? "+" : ""}${clamped}%`;
+    setRateNum(clamped);
+    void persist({ rate: rateStr }, "rate", prev);
+  };
+
+  const handleParallelChange = (e: React.ChangeEvent<HTMLSelectElement>): void => {
+    const prev = prevRef.current["parallel"];
+    let v = parseInt(e.target.value, 10);
+    if (!Number.isFinite(v)) v = 3;
+    v = Math.max(1, Math.min(6, v));
+    setParallel(v);
+    void persist({ parallel: v }, "parallel", prev);
+  };
+  const handleParallelBlur = (e: React.FocusEvent<HTMLSelectElement>): void => {
+    // also handle blur for consistency
+    const val = parseInt((e.target as HTMLSelectElement).value, 10);
+    if (Number.isFinite(val)) {
+      const clamped = Math.max(1, Math.min(6, val));
+      if (clamped !== parallel) {
+        const prev = prevRef.current["parallel"];
+        setParallel(clamped);
+        void persist({ parallel: clamped }, "parallel", prev);
+      }
+    }
+  };
+
+  const handleChunkBlur = (e: React.FocusEvent<HTMLInputElement>): void => {
+    const prev = prevRef.current["chunk-size"];
+    let v = parseInt(e.target.value, 10);
+    if (!Number.isFinite(v)) v = 3500;
+    v = Math.max(500, Math.min(5000, v));
+    e.target.value = String(v);
+    setChunkSize(v);
+    void persist({ "chunk-size": v }, "chunk-size", prev);
+  };
+
+  const handleRetriesBlur = (e: React.FocusEvent<HTMLInputElement>): void => {
+    const prev = prevRef.current["retries"];
+    let v = parseInt(e.target.value, 10);
+    if (!Number.isFinite(v)) v = 5;
+    v = Math.max(1, Math.min(10, v));
+    e.target.value = String(v);
+    setRetries(v);
+    void persist({ retries: v }, "retries", prev);
+  };
+
+  const handleScrapeDelayChange = (e: React.ChangeEvent<HTMLSelectElement>): void => {
+    const val = e.target.value;
+    if (val === "custom") {
+      setIsScrapeCustom(true);
+      // keep custom value as is, focus input
+      setTimeout(() => {
+        const el = document.querySelector<HTMLInputElement>('[data-testid="settings-scrape-custom"]');
+        if (el) el.focus();
+      }, 0);
+      return;
+    }
+    const prev = prevRef.current["scrapeDelay"];
+    let v = parseInt(val, 10);
+    if (!Number.isFinite(v)) v = 4000;
+    v = Math.max(0, Math.min(20000, v));
+    setScrapeDelay(v);
+    setScrapeCustom(v);
+    setIsScrapeCustom(false);
+    void persist({ scrapeDelay: v }, "scrapeDelay", prev);
+  };
+
+  const handleScrapeCustomBlur = (e: React.FocusEvent<HTMLInputElement>): void => {
+    const prev = prevRef.current["scrapeDelay"];
+    let v = parseInt(e.target.value, 10);
+    if (!Number.isFinite(v)) v = 0;
+    v = Math.max(0, Math.min(20000, v));
+    e.target.value = String(v);
+    setScrapeCustom(v);
+    setScrapeDelay(v);
+    setIsScrapeCustom(true);
+    void persist({ scrapeDelay: v }, "scrapeDelay", prev);
+  };
+
+  const handleSafeModeChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    const prev = prevRef.current["safeMode"];
+    const checked = e.target.checked;
+    setSafeMode(checked);
+    void persist({ safeMode: checked }, "safeMode", prev);
+  };
+
+  const handleKeepChange = (key: "keepEPUB" | "keepMP3" | "keepM4B") => (e: React.ChangeEvent<HTMLInputElement>): void => {
+    const prev = prevRef.current[key];
+    const checked = e.target.checked;
+    if (key === "keepEPUB") setKeepEPUB(checked);
+    else if (key === "keepMP3") setKeepMP3(checked);
+    else setKeepM4B(checked);
+    void persist({ [key]: checked }, key, prev);
+  };
+
+  if (!open) return null;
+
+  const rateSliderValue = Math.max(-50, Math.min(50, rateNum));
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      role="presentation"
+      onClick={onClose}
+      data-testid="settings-overlay"
+    >
+      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" aria-hidden="true" />
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("settings.title") as string}
+        data-testid="settings-dialog"
+        tabIndex={-1}
+        className="relative max-h-[90vh] w-full max-w-[560px] overflow-auto rounded-lg border bg-card shadow-lg focus-visible:outline-none"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sticky top-0 flex items-center justify-between border-b bg-card px-6 py-4">
+          <h2 className="text-heading font-semibold">{t("settings.title")}</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={t("settings.title") as string}
+            className="rounded-md p-2 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            data-testid="settings-close"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="space-y-4 p-6">
+          {loading ? (
+            <p className="text-body-sm text-muted-foreground">...</p>
+          ) : (
+            <>
+              {/* Audio */}
+              <section className="rounded-lg border bg-card p-6 shadow-sm" aria-label={t("settings.audio.title") as string}>
+                <h3 className="text-heading font-semibold">{t("settings.audio.title")}</h3>
+
+                <div className="mt-4 space-y-4">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-body-sm font-medium">{t("settings.audio.voice")}</span>
+                    <select
+                      data-testid="settings-audio-voice"
+                      value={isVoiceCustom ? "custom" : voice}
+                      onChange={handleVoiceChange}
+                      className="h-9 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      {VOICE_OPTIONS.map((opt) => (
+                        <option key={opt} value={opt}>
+                          {opt}
+                        </option>
+                      ))}
+                      <option value="custom">{t("settings.scrape.custom")}</option>
+                    </select>
+                    <span className="text-body-sm text-muted-foreground">{t("settings.helper.voice")}</span>
+                  </label>
+                  {isVoiceCustom ? (
+                    <label className="flex flex-col gap-1">
+                      <span className="text-body-sm font-medium">{t("settings.scrape.custom")}</span>
+                      <input
+                        data-testid="settings-audio-voice-custom"
+                        value={voiceCustom}
+                        placeholder="pl-PL-ZofiaNeural"
+                        onChange={(e) => setVoiceCustom(e.target.value)}
+                        onBlur={handleVoiceCustomBlur}
+                        className="h-9 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      />
+                    </label>
+                  ) : null}
+
+                  <div className="flex flex-col gap-2">
+                    <span className="text-body-sm font-medium">{t("settings.audio.rate")}</span>
+                    <div className="flex items-center gap-3">
+                      <input
+                        data-testid="settings-audio-rate-slider"
+                        type="range"
+                        min={-50}
+                        max={50}
+                        step={5}
+                        value={rateSliderValue}
+                        onChange={handleRateSlider}
+                        onBlur={handleRateSliderBlur}
+                        className="flex-1 accent-accent"
+                        aria-label={t("settings.audio.rate") as string}
+                      />
+                      <input
+                        data-testid="settings-audio-rate"
+                        type="number"
+                        value={rateNum}
+                        onChange={handleRateNumberChange}
+                        onBlur={handleRateNumberBlur}
+                        min={-100}
+                        max={100}
+                        step={5}
+                        className="h-9 w-20 rounded-md border border-input bg-card px-2 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        aria-label={t("settings.audio.rate") as string}
+                      />
+                      <span className="text-body-sm text-muted-foreground">%</span>
+                    </div>
+                    <span className="text-body-sm text-muted-foreground">{t("settings.helper.rate")}</span>
+                  </div>
+                </div>
+              </section>
+
+              {/* Performance */}
+              <section className="rounded-lg border bg-card p-6 shadow-sm" aria-label={t("settings.performance.title") as string}>
+                <h3 className="text-heading font-semibold">{t("settings.performance.title")}</h3>
+                <div className="mt-4 space-y-4">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-body-sm font-medium">{t("settings.performance.parallel")}</span>
+                    <select
+                      data-testid="settings-perf-parallel"
+                      value={String(parallel)}
+                      onChange={handleParallelChange}
+                      onBlur={handleParallelBlur}
+                      className="h-9 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      {[1, 2, 3, 4, 5, 6].map((n) => (
+                        <option key={n} value={n}>
+                          {n}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-body-sm text-muted-foreground">{t("settings.helper.parallel")}</span>
+                  </label>
+
+                  <label className="flex flex-col gap-1">
+                    <span className="text-body-sm font-medium">{t("settings.performance.chunkSize")}</span>
+                    <input
+                      data-testid="settings-perf-chunk"
+                      type="number"
+                      value={chunkSize}
+                      min={500}
+                      max={5000}
+                      step={100}
+                      onBlur={handleChunkBlur}
+                      className="h-9 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        if (raw === "") {
+                          setChunkSize(500);
+                          return;
+                        }
+                        const v = parseInt(raw, 10);
+                        if (Number.isFinite(v)) setChunkSize(v);
+                      }}
+                    />
+                    <span className="text-body-sm text-muted-foreground">{t("settings.helper.chunkSize")}</span>
+                  </label>
+
+                  <label className="flex flex-col gap-1">
+                    <span className="text-body-sm font-medium">{t("settings.performance.retries")}</span>
+                    <input
+                      data-testid="settings-perf-retries"
+                      type="number"
+                      value={retries}
+                      min={1}
+                      max={10}
+                      step={1}
+                      onBlur={handleRetriesBlur}
+                      className="h-9 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        if (raw === "") {
+                          setRetries(1);
+                          return;
+                        }
+                        const v = parseInt(raw, 10);
+                        if (Number.isFinite(v)) setRetries(v);
+                      }}
+                    />
+                    <span className="text-body-sm text-muted-foreground">{t("settings.helper.retries")}</span>
+                  </label>
+                </div>
+              </section>
+
+              {/* Scrape */}
+              <section className="rounded-lg border bg-card p-6 shadow-sm" aria-label={t("settings.scrape.title") as string}>
+                <h3 className="text-heading font-semibold">{t("settings.scrape.title")}</h3>
+                <div className="mt-4 space-y-4">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-body-sm font-medium">{t("settings.scrape.delay")}</span>
+                    <select
+                      data-testid="settings-scrape-delay"
+                      value={isScrapeCustom ? "custom" : String(scrapeDelay)}
+                      onChange={handleScrapeDelayChange}
+                      className="h-9 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <option value="3000">3000</option>
+                      <option value="4000">4000</option>
+                      <option value="5000">5000</option>
+                      <option value="custom">{t("settings.scrape.custom")}</option>
+                    </select>
+                    <span className="text-body-sm text-muted-foreground">{t("settings.helper.scrapeDelay")}</span>
+                  </label>
+
+                  {isScrapeCustom ? (
+                    <label className="flex flex-col gap-1">
+                      <span className="text-body-sm font-medium">{t("settings.scrape.custom")}</span>
+                      <input
+                        data-testid="settings-scrape-custom"
+                        type="number"
+                        value={scrapeCustom}
+                        min={0}
+                        max={20000}
+                        step={100}
+                        onBlur={handleScrapeCustomBlur}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          if (raw === "") {
+                            setScrapeCustom(0);
+                            return;
+                          }
+                          const v = parseInt(raw, 10);
+                          if (Number.isFinite(v)) setScrapeCustom(v);
+                        }}
+                        className="h-9 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      />
+                    </label>
+                  ) : null}
+
+                  <label className="flex items-center justify-between gap-4">
+                    <div className="flex flex-col">
+                      <span className="text-body-sm font-medium">{t("settings.scrape.safeMode")}</span>
+                      <span className="text-body-sm text-muted-foreground">{t("settings.helper.safeMode")}</span>
+                    </div>
+                    <input
+                      data-testid="settings-scrape-safe"
+                      type="checkbox"
+                      checked={safeMode}
+                      onChange={handleSafeModeChange}
+                      className="h-4 w-4 rounded border-input"
+                      role="switch"
+                      aria-checked={safeMode}
+                    />
+                  </label>
+                </div>
+              </section>
+
+              {/* Outputs */}
+              <section className="rounded-lg border bg-card p-6 shadow-sm" aria-label={t("settings.outputs.title") as string}>
+                <h3 className="text-heading font-semibold">{t("settings.outputs.title")}</h3>
+                <p className="text-body-sm text-muted-foreground mt-1">{t("settings.helper.outputs")}</p>
+                <div className="mt-4 space-y-3">
+                  <label className="flex items-center justify-between gap-4">
+                    <span className="text-body-sm font-medium">{t("settings.outputs.keepEPUB")}</span>
+                    <input
+                      data-testid="settings-output-keepEPUB"
+                      type="checkbox"
+                      checked={keepEPUB}
+                      onChange={handleKeepChange("keepEPUB")}
+                      className="h-4 w-4 rounded border-input"
+                      role="switch"
+                      aria-checked={keepEPUB}
+                    />
+                  </label>
+                  <label className="flex items-center justify-between gap-4">
+                    <span className="text-body-sm font-medium">{t("settings.outputs.keepMP3")}</span>
+                    <input
+                      data-testid="settings-output-keepMP3"
+                      type="checkbox"
+                      checked={keepMP3}
+                      onChange={handleKeepChange("keepMP3")}
+                      className="h-4 w-4 rounded border-input"
+                      role="switch"
+                      aria-checked={keepMP3}
+                    />
+                  </label>
+                  <label className="flex items-center justify-between gap-4">
+                    <span className="text-body-sm font-medium">{t("settings.outputs.keepM4B")}</span>
+                    <input
+                      data-testid="settings-output-keepM4B"
+                      type="checkbox"
+                      checked={keepM4B}
+                      onChange={handleKeepChange("keepM4B")}
+                      className="h-4 w-4 rounded border-input"
+                      role="switch"
+                      aria-checked={keepM4B}
+                    />
+                  </label>
+                </div>
+              </section>
+            </>
+          )}
+        </div>
+
+        {toast ? (
+          <div
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            data-testid="settings-toast"
+            className="fixed bottom-4 left-1/2 -translate-x-1/2 rounded-md bg-card border shadow-lg px-4 py-2 text-body-sm"
+          >
+            {toast}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}

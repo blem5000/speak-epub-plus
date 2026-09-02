@@ -9,11 +9,16 @@ const catalogs: Record<Locale, Messages> = {
   pl: pl as Messages,
 };
 
-function detectLocale(): Locale {
-  const lang =
-    typeof navigator !== "undefined" ? navigator.language.toLowerCase() : "en";
-  if (lang.startsWith("pl")) return "pl";
-  return "en";
+export function detectLocale(): Locale {
+  try {
+    const navLang =
+      typeof navigator !== "undefined" ? (navigator as unknown as { language?: unknown }).language : undefined;
+    const lang = typeof navLang === "string" ? navLang.toLowerCase() : "en";
+    if (lang.startsWith("pl")) return "pl";
+    return "en";
+  } catch {
+    return "en";
+  }
 }
 
 let currentLocale: Locale = detectLocale();
@@ -23,10 +28,14 @@ export function getLocale(): Locale {
   return currentLocale;
 }
 
-export function setLocale(locale: Locale): void {
-  if (catalogs[locale]) {
+export function setLocale(locale: string): void {
+  // only accept en|pl — guard strict per spec 4.2
+  if (locale === "en" || locale === "pl") {
     currentLocale = locale;
     currentMessages = catalogs[locale];
+    // keep exported snapshots in sync for consumers that import `locale`/`messages` directly
+    locale = currentLocale;
+    messages = currentMessages;
   }
 }
 
@@ -43,6 +52,16 @@ export function t(
   );
 }
 
-// Auto-detect on import; expose for App usage
-export const locale = currentLocale;
-export const messages = currentMessages;
+// Auto-detect on import; expose for App usage (mutable to stay in sync after setLocale)
+export let locale: Locale = currentLocale;
+export let messages: Messages = currentMessages;
+
+// test hook: re-run detection (useful after mocking navigator.language)
+export function __resetLocaleForTest(): void {
+  currentLocale = detectLocale();
+  currentMessages = catalogs[currentLocale];
+  locale = currentLocale;
+  messages = currentMessages;
+}
+
+export { catalogs };

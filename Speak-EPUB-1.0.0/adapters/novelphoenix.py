@@ -220,52 +220,77 @@ class NovelPhoenixAdapter(ScraperPort):
             raise AdapterError(f"FETCH_FAILED: {e}", code="FETCH_FAILED") from e
 
         soup = BeautifulSoup(resp.text or "", "lxml")
-        # title extraction
+        # title extraction — keep outside clean (not selector-dependent)
         title_tag = soup.find(["h1", "h2", "h3"])
         raw_title = title_tag.get_text(strip=True) if title_tag else ""
         title = raw_title if raw_title else url
 
-        selectors = self.getSelectors()
-        target = None
-        html = ""
-        text = ""
-        if selectors.start:
+        # delegate isolation to Core clean.py via dynamic import (AD-1 linter exception)
+        try:
+            import importlib as _il
+
+            _mod = _il.import_module("core.clean")
+            resolve_selectors = getattr(_mod, "resolve_selectors")
+            clean_html = getattr(_mod, "clean_html")
+            selectors = resolve_selectors(self)
+            html, text = clean_html(resp.text or "", selectors.start, selectors.end)
+        except ValueError as ve:
+            # invalid selector from override — fallback to heuristic/body via clean_html with None
             try:
-                target = soup.select_one(selectors.start)
+                import importlib as _il2
+
+                _mod2 = _il2.import_module("core.clean")
+                clean_html2 = getattr(_mod2, "clean_html")
+                html, text = clean_html2(resp.text or "", None, None)
             except Exception:
-                target = None
-        if target is not None:
-            for tag in target(["script", "style", "nav", "aside"]):
-                tag.decompose()
-            html = str(target)
-            text = target.get_text(separator=" ", strip=True)
-            text = re.sub(r"\s+", " ", text).strip()
-            if not text:
-                target = None
-        if target is None:
-            # heuristic fallback: article/#content/.chapter-content
-            heuristic = None
-            for sel in ["article", "#content", ".chapter-content", "#chapter-content", ".content", "#chapters"]:
-                try:
-                    heuristic = soup.select_one(sel)
-                    if heuristic is not None:
-                        break
-                except Exception:
-                    continue
-            if heuristic is not None:
-                for tag in heuristic(["script", "style", "nav", "aside"]):
-                    tag.decompose()
-                html = str(heuristic)
-                text = heuristic.get_text(separator=" ", strip=True)
-                text = re.sub(r"\s+", " ", text).strip()
-            else:
-                # fallback whole body
+                # ultimate fallback: heuristic inline
                 for tag in soup(["script", "style", "nav", "aside"]):
                     tag.decompose()
                 body = soup.body or soup
                 html = str(body)
                 text = body.get_text(separator=" ", strip=True)
                 text = re.sub(r"\s+", " ", text).strip()
+        except Exception:
+            # fallback heuristic inline if clean module missing
+            selectors = self.getSelectors()
+            target = None
+            html = ""
+            text = ""
+            if selectors.start:
+                try:
+                    target = soup.select_one(selectors.start)
+                except Exception:
+                    target = None
+            if target is not None:
+                for tag in target(["script", "style", "nav", "aside"]):
+                    tag.decompose()
+                html = str(target)
+                text = target.get_text(separator=" ", strip=True)
+                text = re.sub(r"\s+", " ", text).strip()
+                if not text:
+                    target = None
+            if target is None:
+                heuristic = None
+                for sel in ["article", "#content", ".chapter-content", "#chapter-content", ".content", "#chapters"]:
+                    try:
+                        heuristic = soup.select_one(sel)
+                        if heuristic is not None:
+                            break
+                    except Exception:
+                        continue
+                if heuristic is not None:
+                    for tag in heuristic(["script", "style", "nav", "aside"]):
+                        tag.decompose()
+                    html = str(heuristic)
+                    text = heuristic.get_text(separator=" ", strip=True)
+                    text = re.sub(r"\s+", " ", text).strip()
+                else:
+                    for tag in soup(["script", "style", "nav", "aside"]):
+                        tag.decompose()
+                    body = soup.body or soup
+                    html = str(body)
+                    text = body.get_text(separator=" ", strip=True)
+                    text = re.sub(r"\s+", " ", text).strip()
 
         return ChapterContent(url=url, title=title, html=html, text=text)
 

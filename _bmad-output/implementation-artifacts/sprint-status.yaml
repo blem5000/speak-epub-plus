@@ -1,0 +1,340 @@
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created, ready for development
+#   - in-progress: Developer actively working on implementation
+#   - review: Implementation complete, ready for review
+#   - done: Story completed
+
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when its first story starts (via build's sprint sync)
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates the next story after the previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; the status view surfaces open ones
+generated: 08-27-2026 07:30
+last_updated: 09-02-2026
+project: speak epub
+project_key: NOKEY
+tracking_system: file-system
+story_location: C:\Users\admin\Documents\programowanie\speak 
+  epub\_bmad-output\implementation-artifacts
+development_status:
+  epic-1: done
+  1-1-scaffold-tauri-python-sidecar-scraperport-tokeny: done
+  1-2-adapter-novelphoenix-search-listchapters-cover-metadata: done
+  1-3-powierzchnia-find-input-agregator-tabela-wynikÃ³w: done
+  1-4-powierzchnia-chapter-list-from-to-checkboxes: done
+  epic-1-retrospective: done
+
+  epic-2: in-progress
+  2-1-polite-fetcher-cache-adaptive-429-resume: done
+  2-2-content-boundary-selektory-per-adapter-heuristic-preview-kor: done
+  2-3-filtry-plain-regex-na-etapie-epub-build: done
+  2-4-epub-assembly-result-card-epubcheck: done
+  epic-2-retrospective: done
+
+  epic-3: done
+  3-1-tts-chunking-partjob-queue-ratyfikacja-brownfield: done
+  3-2-edge-tts-parallel-2-3-retries-_parts-skip: done
+  3-3-ffmpeg-merge-per-chapter-single-m4b-z-markerami: done
+  epic-3-retrospective: done
+
+  epic-4: done
+  4-1-live-queue-expansion-event-bus-throttle-badge-log: done
+  4-2-settings-form-persist-store-json-i18n-auto-detect: done
+  4-3-filters-window-pelny-integracja-z-preview-epub-gate: done
+  4-4-state-treatments-a11y-aa-responsive-platform: done
+  epic-4-retrospective: done
+action_items:
+  - id: "epic-1-retro-item-1-close-virtualized-windowing-with-react-w"
+    epic: 1
+    action: "Close virtualized windowing with react-window/@tanstack/virtual replacing
+      cap 100 + Show all"
+    owner: "GUI"
+    status: done
+    resolution: "D1 (09-02-2026): closed — cap 100 + Show all acceptable for <1k lists,
+      deferred 3x; revisit only if list performance becomes a real problem."
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-1-retro-08-28-2026.md"
+  - id: "epic-1-retro-item-2-wire-_chapter_cache-ttl-invalidation-vs"
+    epic: 1
+    action: "Wire _CHAPTER_CACHE TTL/invalidation vs Never:cache keep or document
+      as canonical"
+    owner: "Core"
+    status: done
+    resolution: "D2 (09-02-2026): _CHAPTER_CACHE documented as canonical — small in-memory
+      cache, query-stripped key, per-run lifetime; TTL judged over-engineering."
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-1-retro-08-28-2026.md"
+  - id: "epic-1-retro-item-3-add-cross-verification-venv-path-rust-vs"
+    epic: 1
+    action: "Add cross-verification venv path Rust vs Python"
+    owner: "Scaffold"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-1-retro-08-28-2026.md"
+  - id: "epic-1-retro-item-4-drain-rust-sidecar-stderr-and-kill-child"
+    epic: 1
+    action: "Drain Rust sidecar stderr and kill child on timeout"
+    owner: "Sidecar"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-1-retro-08-28-2026.md"
+  - id: "epic-1-retro-item-5-harden-tauri-csp-and-http-fallback-isola"
+    epic: 1
+    action: "Harden Tauri CSP and http fallback isolation"
+    owner: "Security"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-1-retro-08-28-2026.md"
+  - id: "epic-1-retro-item-6-pin-remaining-find-chapterlist-verificat"
+    epic: 1
+    action: "Pin remaining Find/ChapterList verification gaps (skeleton, cover, host
+      guard, clamp/prune)"
+    owner: "QA"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-1-retro-08-28-2026.md"
+
+
+  - id: "epic-2-retro-item-7-sanitize-preview-rendered-html-dompurify"
+    epic: 2
+    action: "Sanitize Preview rendered HTML (DOMPurify) before dangerouslySetInnerHTML
+      in src/components/Preview.tsx:424,426 + sanitization test"
+    owner: "GUI"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
+  - id: "epic-2-retro-item-8-scope-tauri-capabilities-remove-path-sco"
+    epic: 2
+    action: "Scope Tauri capabilities: remove/path-scope shell:allow-spawn and opener:allow-open-path
+      (capabilities/default.json:13,20); revisit csp null"
+    owner: "Security"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
+  - id: "epic-2-retro-item-9-cache-hit-path-in-core-fetch-py-153-185"
+    epic: 2
+    action: "Cache-hit path in core/fetch.py:153-185 must run clean pipeline (resolve_selectors+clean_html)
+      and remove write_cache(url, str(cc)) repr-poisoning fallback at :217-219"
+    owner: "Core"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
+  - id: "epic-2-retro-item-10-fix-retryable-classification-in-core-fet"
+    epic: 2
+    action: "Fix retryable classification in core/fetch.py:238-239: derive HTTP status
+      from exception code/attributes not message substring incl URL"
+    owner: "Core"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
+  - id: "epic-2-retro-item-11-restore-lint-imports-green-replace-core"
+    epic: 2
+    action: "Restore lint-imports green: replace core.config to adapters._http fallback
+      (config.py:1245, introduced c40695e) with Port-based fetch or documented exception;
+      gate lint:imports per story DoD"
+    owner: "Core"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
+  - id: "epic-2-retro-item-12-remove-or-feature-flag-the-lord-mock-sea"
+    epic: 2
+    action: "Feature-flag the lord mock search fallback in core/config.py:213-236 behind
+      env SPEAK_LORD_MOCK=1 (decided 09-02-2026 per triage D3; production path stays
+      mock-free, offline/demo affordance preserved)"
+    owner: "Core"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
+  - id: "epic-2-retro-item-13-map-rpc-error-codes-from-exception-code"
+    epic: 2
+    action: "Map RPC error codes from exception code attributes not message substrings
+      (core/config.py:1912-1916)"
+    owner: "Core"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
+  - id: "epic-2-retro-item-14-fix-getepubstatus-filter-epub-candidates"
+    epic: 2
+    action: "Fix getEpubStatus: filter epub candidates by novel slug and surface run_epubcheck
+      failure instead of ok true (core/config.py:1939-1960)"
+    owner: "Core"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
+  - id: "epic-2-retro-item-15-dedupe-_normalize_cache_key-fetch-py-31"
+    epic: 2
+    action: "Dedupe _normalize_cache_key (fetch.py:31-47 vs config.py:65-82) and URL
+      http(s) validation into single source"
+    owner: "Core"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
+  - id: "epic-2-retro-item-16-spec-reconciliation-human-applies-cover"
+    epic: 2
+    action: "Spec reconciliation (human applies): cover fetch in core/epub.py:584-586
+      bypasses ScraperPort contradicting spec-2-3 Never bypass port for cover/metadata"
+    owner: "Architect"
+    status: done
+    resolution: "D4 (09-02-2026): spec-2-3 reconciled — cover fetch kept as direct
+      requests call with UA, documented in spec-2-3 as an explicit exception (single-URL
+      demo fetch; port-surface cost not justified)."
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
+  - id: "epic-2-retro-item-17-add-cross-story-pipeline-tests-fetch-sel"
+    epic: 2
+    action: "Add cross-story pipeline tests: fetch->selectors->filters->buildEpub
+      shared fixtures; buildEpub with corrupt store filters; multi-novel getEpubStatus;
+      non-contiguous selection mapping; Polish diacritics metadata"
+    owner: "QA"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
+  - id: "epic-2-retro-item-18-fix-npm-run-build-remove-unused-usereven"
+    epic: 2
+    action: "Fix npm run build: remove unused userEvent import in src/App.announcer.test.tsx:3
+      (introduced c700be5 epic 4-4)"
+    owner: "GUI"
+    status: open
+    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
+  - id: "epic-3-retro-item-19-move-keep_parts-deletion-in-finalize_cha"
+    epic: 3
+    action: "Move keep_parts deletion in finalize_chapter_audio into the success-only
+      branch so a failed merge keeps part files referenced by audio_entries (core/tts.py:583-589)"
+    owner: "Core"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
+  - id: "epic-3-retro-item-20-add-file-survival-assertions-parts-still"
+    epic: 3
+    action: "Add file-survival assertions (parts still exist after merge failure)
+      to test_finalize_concat_failure_fallback (tests/test_tts.py:1418-1439)"
+    owner: "QA"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
+  - id: "epic-3-retro-item-21-catch-asyncio-cancellederror-in-worker-c"
+    epic: 3
+    action: "Catch asyncio.CancelledError in worker cleanup so cancelled jobs leave
+      no truncated MP3s that resume then skips (core/tts.py:216-224,415-417,339)"
+    owner: "Core"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
+  - id: "epic-3-retro-item-22-skip-guard-should-regenerate-zero-byte-c"
+    epic: 3
+    action: "Skip-guard should regenerate zero-byte/corrupt existing part files (core/tts.py:339-351,527-535)"
+    owner: "Core"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
+  - id: "epic-3-retro-item-23-verify-apostrophe-escaping-against-a-rea"
+    epic: 3
+    action: "Verify apostrophe escaping against a real ffmpeg binary and fix concat
+      quoting if confirmed (core/tts.py:454,641; sanitize_filename:41)"
+    owner: "Core"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
+  - id: "epic-3-retro-item-24-resolve-root-speak-py-vs-speak-epub-1-0"
+    epic: 3
+    action: "Resolve root speak.py vs Speak-EPUB-1.0.0/speak.py duplication: pick
+      canonical, remove the other or add a sync-pin test"
+    owner: "Scaffold"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
+  - id: "epic-3-retro-item-25-update-core-tts-py-docstring-purity-cont"
+    epic: 3
+    action: "Update core/tts.py docstring purity contract to match current I/O responsibilities
+      (tts.py:14 vs 19-23,209-212)"
+    owner: "Core"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
+  - id: "epic-3-retro-item-26-split-core-tts-py-725-lines-4-responsibi"
+    epic: 3
+    action: "Split core/tts.py (725 lines, 4 responsibilities) into focused modules"
+    owner: "Core"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
+  - id: "epic-3-retro-item-27-guard-against-concurrent-resume-runs-dou"
+    epic: 3
+    action: "Guard against concurrent resume runs double-writing the same part MP3
+      (no lock at core/tts.py:339)"
+    owner: "Core"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
+  - id: "epic-3-retro-item-28-process-lesson-failure-path-tests-must-a"
+    epic: 3
+    action: "Process lesson: failure-path tests must assert post-condition invariants
+      (e.g. file survival), not just return values"
+    owner: "QA"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
+  - id: "epic-4-retro-item-29-replace-hardcoded-polish-alerts-with-t-t"
+    epic: 4
+    action: "Replace hardcoded Polish alerts with t(toast.ban)/t(ffmpeg.missing) keys
+      that exist unused in locales (src/App.tsx:467,480)"
+    owner: "GUI"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
+  - id: "epic-4-retro-item-30-fix-broken-i18n-ternary-on-filterswindow"
+    epic: 4
+    action: "Fix broken i18n ternary on FiltersWindow close button (src/components/FiltersWindow.tsx:105)"
+    owner: "GUI"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
+  - id: "epic-4-retro-item-31-route-hardcoded-strings-through-i18n-set"
+    epic: 4
+    action: "Route hardcoded strings through i18n: Settings toasts (Settings.tsx:293,330,364),
+      Queue (Queue.tsx:172,220), App start button (App.tsx:747), Preview removed-count
+      chip via existing filters.chip key (Preview.tsx:340-346)"
+    owner: "GUI"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
+  - id: "epic-4-retro-item-32-implement-or-spec-reconcile-the-missing"
+    epic: 4
+    action: "Implement or spec-reconcile the missing 1120px preview breakpoint (spec
+      4-4 vs App.tsx:385, lg=1024 only)"
+    owner: "GUI"
+    status: done
+    resolution: "D5 (09-02-2026): spec-4-4 reconciled to Tailwind default lg=1024;
+      custom 1120px breakpoint removed from spec (no code change needed)."
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
+  - id: "epic-4-retro-item-33-restore-focus-to-settings-dialog-trigger"
+    epic: 4
+    action: "Restore focus to Settings dialog trigger on close, matching FiltersWindow
+      (Settings.tsx:187-188)"
+    owner: "GUI"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
+  - id: "epic-4-retro-item-34-unify-chapter-status-ownership-into-a-si"
+    epic: 4
+    action: "Unify chapter-status ownership into a single reducer (useFetcher.ts:79-101,285-327
+      vs App.tsx:288-340)"
+    owner: "GUI"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
+  - id: "epic-4-retro-item-35-extract-app-tsx-811-lines-orchestrations"
+    epic: 4
+    action: "Extract App.tsx (811 lines) orchestrations into hooks/components: selection
+      persistence, EPUB build orchestration, clamp/swap/prune effects (App.tsx:67-81,275-347,139-183)"
+    owner: "GUI"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
+  - id: "epic-4-retro-item-36-remove-or-gate-the-demo-token-section-an"
+    epic: 4
+    action: "Remove or gate the demo token section and legacy-ref stub from production
+      render (App.tsx:500-539,776-777)"
+    owner: "GUI"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
+  - id: "epic-4-retro-item-37-add-tests-settings-revert-paths-and-conc"
+    epic: 4
+    action: "Add tests: Settings revert paths and concurrent blur persistence, useFetcher
+      unmount leak and non-sequential done-marking, Queue error+parts rendering"
+    owner: "QA"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
+  - id: "epic-4-retro-item-38-process-lesson-gate-npm-run-build-tsc-pe"
+    epic: 4
+    action: "Process lesson: gate npm run build (tsc) per story DoD - a broken build
+      landed in a done story"
+    owner: "Process"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"

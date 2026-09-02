@@ -1,20 +1,26 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window — shell + store + core events",
+  "description": "Capability for the main window — store + core events + scoped opener",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:event:default",
     "core:event:allow-emit",
     "core:event:allow-listen",
-    "shell:default",
-    "shell:allow-open",
-    "shell:allow-spawn",
     "store:default",
     "store:allow-get",
     "store:allow-set",
     "store:allow-load",
-    "store:allow-save"
+    "store:allow-save",
+    "opener:default",
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [
+        { "path": "**/*.epub" },
+        { "path": "**/output" },
+        { "path": "**/output/**" }
+      ]
+    }
   ]
 }

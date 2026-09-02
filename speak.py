@@ -60,32 +60,31 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 Chapter = tuple[int, str, str]
 AudioEntry = tuple[int, str, str]
 
+# Root vs inner path handling: when executed from project root, core lives in Speak-EPUB-1.0.0/core
+if not (Path(__file__).resolve().parent / "core").is_dir():
+    _candidate = Path(__file__).resolve().parent / "Speak-EPUB-1.0.0"
+    if _candidate.is_dir() and str(_candidate) not in sys.path:
+        sys.path.insert(0, str(_candidate))
 
-@dataclass(frozen=True)
-class PartJob:
-    chapter_number: int
-    chapter_title: str
-    part_number: int
-    part_count: int
-    text: str
-    output_path: str
-    is_final_chapter_file: bool
-
-
-@dataclass
-class ChapterPlan:
-    chapter_number: int
-    title: str
-    chapter_mp3: str
-    part_paths: list[str]
-    marker_entries_if_unmerged: list[AudioEntry]
+# Core delegation — single source of truth AD-1 (3.1/3.3 ratyfikacja brownfield)
+# core/tts.py is pure Core-owned; speak.py delegates, does not duplicate.
+from core.tts import PartJob, ChapterPlan
+from core.tts import sanitize_filename as _core_sanitize
+from core.tts import split_text_for_tts as _core_split_tts
+from core.tts import build_generation_plan as _core_build_plan
+from core.tts import tts_text_to_mp3 as _core_tts
+from core.tts import run_part_jobs as _core_run
+from core.tts import ffmpeg_available as _core_ffmpeg
+from core.tts import ffprobe_available as _core_ffprobe
+from core.tts import concat_mp3_files as _core_concat
+from core.tts import get_duration_ms as _core_dur
+from core.tts import escape_ffmeta as _core_escape
+from core.tts import finalize_chapter_audio as _core_finalize
+from core.tts import build_m4b as _core_m4b
 
 
 def sanitize_filename(value: str, fallback: str = "chapter", max_len: int = 60) -> str:
-    safe = re.sub(r'[\\/:*?"<>|]', "_", value).strip()
-    safe = re.sub(r"\s+", " ", safe).strip()
-    safe = safe[:max_len].strip()
-    return safe or fallback
+    return _core_sanitize(value, fallback, max_len)
 
 
 def extract_chapters(epub_path: str, start_chapter: int = 1, end_chapter: Optional[int] = None) -> list[Chapter]:
@@ -126,65 +125,12 @@ def extract_chapters(epub_path: str, start_chapter: int = 1, end_chapter: Option
 
 
 def split_text_for_tts(text: str, max_chars: int = 3500) -> list[str]:
-    text = re.sub(r"\s+", " ", text).strip()
-    if not text:
-        return []
-    if len(text) <= max_chars:
-        return [text]
-
-    sentences = re.split(r"(?<=[.!?;:])\s+", text)
-    chunks: list[str] = []
-    current = ""
-
-    def flush_current() -> None:
-        nonlocal current
-        if current.strip():
-            chunks.append(current.strip())
-            current = ""
-
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-
-        if len(sentence) > max_chars:
-            flush_current()
-            start = 0
-            while start < len(sentence):
-                part = sentence[start:start + max_chars].strip()
-                if part:
-                    chunks.append(part)
-                start += max_chars
-            continue
-
-        if not current:
-            current = sentence
-        elif len(current) + 1 + len(sentence) <= max_chars:
-            current += " " + sentence
-        else:
-            flush_current()
-            current = sentence
-
-    flush_current()
-    return chunks
+    return _core_split_tts(text, max_chars)
 
 
 async def tts_text_to_mp3(text: str, output_path: str, voice: str, retries: int = 5) -> None:
-    last_error: Optional[Exception] = None
-
-    for attempt in range(1, retries + 1):
-        try:
-            communicate = edge_tts.Communicate(text, voice)
-            await communicate.save(output_path)
-            return
-        except Exception as e:
-            last_error = e
-            if attempt < retries:
-                wait_seconds = min(20, 2 * attempt)
-                print(f"        retry {attempt}/{retries - 1} for {Path(output_path).name}: {e}")
-                await asyncio.sleep(wait_seconds)
-
-    raise RuntimeError(f"TTS failed after {retries} attempts for {output_path}: {last_error}")
+    # Delegates to core/tts.py — single source, no duplication (Story 3.2)
+    return await _core_tts(text, output_path, voice, retries=retries)
 
 
 async def list_voices(all_languages: bool = False) -> None:
@@ -205,284 +151,40 @@ async def list_voices(all_languages: bool = False) -> None:
 
 
 def ffmpeg_available() -> bool:
-    return shutil.which("ffmpeg") is not None
+    return _core_ffmpeg()
 
 
 def ffprobe_available() -> bool:
-    return shutil.which("ffprobe") is not None
+    return _core_ffprobe()
 
 
 def concat_mp3_files(input_paths: list[str], output_path: str) -> None:
-    if not ffmpeg_available():
-        raise RuntimeError("ffmpeg is not available")
-
-    concat_file = str(Path(output_path).with_suffix(".concat.txt"))
-    try:
-        with open(concat_file, "w", encoding="utf-8") as f:
-            for p in input_paths:
-                safe = os.path.abspath(p).replace("\\", "/").replace("'", "\\'")
-                f.write(f"file '{safe}'\n")
-
-        subprocess.run(
-            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file, "-c", "copy", output_path],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    finally:
-        if os.path.exists(concat_file):
-            os.remove(concat_file)
+    return _core_concat(input_paths, output_path)
 
 
 def get_duration_ms(path: str) -> int:
-    if not ffprobe_available():
-        return 0
-
-    result = subprocess.run(
-        [
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", path,
-        ],
-        capture_output=True,
-        text=True,
-    )
-    try:
-        return int(float(result.stdout.strip()) * 1000)
-    except ValueError:
-        return 0
+    return _core_dur(path)
 
 
 def escape_ffmeta(s: str) -> str:
-    return re.sub(r"([=;#\\])", r"\\\1", s).replace("\n", "\\n")
+    return _core_escape(s)
 
 
 def build_generation_plan(chapters: list[Chapter], output_dir: str, chunk_size: int) -> tuple[list[ChapterPlan], list[PartJob]]:
-    plans: list[ChapterPlan] = []
-    jobs: list[PartJob] = []
-    part_dir = os.path.join(output_dir, "_parts")
-
-    for chapter_number, title, text in chapters:
-        safe_title = sanitize_filename(title, fallback=f"Chapter_{chapter_number:03d}")
-        chapter_mp3 = os.path.join(output_dir, f"{chapter_number:03d}_{safe_title}.mp3")
-        chunks = split_text_for_tts(text, max_chars=chunk_size)
-
-        if not chunks:
-            plans.append(ChapterPlan(chapter_number, title, chapter_mp3, [], []))
-            continue
-
-        if len(chunks) == 1:
-            plans.append(ChapterPlan(chapter_number, title, chapter_mp3, [chapter_mp3], [(chapter_number, title, chapter_mp3)]))
-            if not os.path.exists(chapter_mp3):
-                jobs.append(
-                    PartJob(
-                        chapter_number=chapter_number,
-                        chapter_title=title,
-                        part_number=1,
-                        part_count=1,
-                        text=chunks[0],
-                        output_path=chapter_mp3,
-                        is_final_chapter_file=True,
-                    )
-                )
-            return_marker = None
-            continue
-
-        os.makedirs(part_dir, exist_ok=True)
-        part_paths: list[str] = []
-        marker_entries: list[AudioEntry] = []
-
-        for part_number, chunk in enumerate(chunks, 1):
-            part_path = os.path.join(part_dir, f"{chapter_number:03d}_{safe_title}_part{part_number:03d}.mp3")
-            part_paths.append(part_path)
-            marker_entries.append((chapter_number, f"{title} - part {part_number}", part_path))
-
-            if not os.path.exists(chapter_mp3) and not os.path.exists(part_path):
-                jobs.append(
-                    PartJob(
-                        chapter_number=chapter_number,
-                        chapter_title=title,
-                        part_number=part_number,
-                        part_count=len(chunks),
-                        text=chunk,
-                        output_path=part_path,
-                        is_final_chapter_file=False,
-                    )
-                )
-
-        plans.append(ChapterPlan(chapter_number, title, chapter_mp3, part_paths, marker_entries))
-
-    return plans, jobs
+    return _core_build_plan(chapters, output_dir, chunk_size)
 
 
 async def run_part_jobs(jobs: list[PartJob], voice: str, parallel: int, retries: int) -> None:
-    if not jobs:
-        print("No TTS jobs to generate. Existing files will be reused.")
-        return
-
-    queue: asyncio.Queue[Optional[PartJob]] = asyncio.Queue()
-    for job in jobs:
-        queue.put_nowait(job)
-
-    for _ in range(parallel):
-        queue.put_nowait(None)
-
-    total_jobs = len(jobs)
-    completed = 0
-    completed_lock = asyncio.Lock()
-
-    async def worker(worker_id: int) -> None:
-        nonlocal completed
-        while True:
-            job = await queue.get()
-            if job is None:
-                queue.task_done()
-                break
-
-            try:
-                if os.path.exists(job.output_path):
-                    size_kb = os.path.getsize(job.output_path) // 1024
-                    print(
-                        f"worker {worker_id}: skip Chapter {job.chapter_number:03d} "
-                        f"part {job.part_number:03d}/{job.part_count:03d} ({size_kb} KB)"
-                    )
-                else:
-                    print(
-                        f"worker {worker_id}: start Chapter {job.chapter_number:03d} "
-                        f"part {job.part_number:03d}/{job.part_count:03d}"
-                    )
-                    await tts_text_to_mp3(job.text, job.output_path, voice, retries=retries)
-                    size_kb = os.path.getsize(job.output_path) // 1024
-                    print(
-                        f"worker {worker_id}: done  Chapter {job.chapter_number:03d} "
-                        f"part {job.part_number:03d}/{job.part_count:03d} ({size_kb} KB)"
-                    )
-
-                async with completed_lock:
-                    completed += 1
-                    print(f"progress: {completed}/{total_jobs} TTS part job(s) complete")
-            finally:
-                queue.task_done()
-
-    workers = [asyncio.create_task(worker(i + 1)) for i in range(parallel)]
-
-    try:
-        await queue.join()
-        await asyncio.gather(*workers)
-    except Exception:
-        for task in workers:
-            task.cancel()
-        raise
+    # Delegates to core/tts.py — single source, no duplication (Story 3.2)
+    return await _core_run(jobs, voice, parallel, retries)
 
 
 def finalize_chapter_audio(plans: list[ChapterPlan], keep_parts: bool) -> list[AudioEntry]:
-    audio_entries: list[AudioEntry] = []
-    has_ffmpeg = ffmpeg_available()
-
-    print("\nFinalizing chapter files...")
-
-    for plan in plans:
-        if not plan.part_paths:
-            continue
-
-        # Single-chunk chapter.
-        if len(plan.part_paths) == 1 and plan.part_paths[0] == plan.chapter_mp3:
-            if os.path.exists(plan.chapter_mp3):
-                audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
-            else:
-                print(f"Warning: missing chapter MP3: {plan.chapter_mp3}")
-            continue
-
-        # Multi-part chapter.
-        if os.path.exists(plan.chapter_mp3):
-            audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
-            size_kb = os.path.getsize(plan.chapter_mp3) // 1024
-            print(f"Chapter {plan.chapter_number:03d}: existing merged file reused ({size_kb} KB)")
-            continue
-
-        missing_parts = [p for p in plan.part_paths if not os.path.exists(p)]
-        if missing_parts:
-            print(f"Warning: Chapter {plan.chapter_number:03d} has missing part files; keeping available parts only.")
-            for entry in plan.marker_entries_if_unmerged:
-                if os.path.exists(entry[2]):
-                    audio_entries.append(entry)
-            continue
-
-        if has_ffmpeg:
-            print(f"Chapter {plan.chapter_number:03d}: merging {len(plan.part_paths)} part(s)")
-            concat_mp3_files(plan.part_paths, plan.chapter_mp3)
-            audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
-
-            if not keep_parts:
-                for part_path in plan.part_paths:
-                    if os.path.exists(part_path):
-                        os.remove(part_path)
-        else:
-            print(f"Chapter {plan.chapter_number:03d}: ffmpeg unavailable, keeping {len(plan.part_paths)} part files")
-            audio_entries.extend(plan.marker_entries_if_unmerged)
-
-    # Try to remove empty _parts folder.
-    if not keep_parts:
-        part_dirs = sorted({str(Path(p).parent) for plan in plans for p in plan.part_paths if "_parts" in str(Path(p).parent)})
-        for part_dir in part_dirs:
-            try:
-                os.rmdir(part_dir)
-            except OSError:
-                pass
-
-    audio_entries.sort(key=lambda x: (x[0], x[2]))
-    return audio_entries
+    return _core_finalize(plans, keep_parts)
 
 
 def build_m4b(output_dir: str, audio_entries: list[AudioEntry], book_title: str, ext: str = "m4b") -> None:
-    if not ffmpeg_available():
-        print(f"\nWarning: ffmpeg not found on PATH - skipping {ext.upper()} creation.")
-        print("Install FFmpeg from https://ffmpeg.org/download.html and add it to PATH.")
-        return
-    if not ffprobe_available():
-        print(f"\nWarning: ffprobe not found on PATH - skipping {ext.upper()} creation.")
-        print("ffprobe is normally installed together with FFmpeg.")
-        return
-
-    print(f"\nBuilding {ext.upper()}...")
-    concat_file = os.path.join(output_dir, "_concat.txt")
-
-    with open(concat_file, "w", encoding="utf-8") as f:
-        for _, _, path in audio_entries:
-            safe = os.path.abspath(path).replace("\\", "/").replace("'", "\\'")
-            f.write(f"file '{safe}'\n")
-
-    metadata_file = os.path.join(output_dir, "_metadata.txt")
-    with open(metadata_file, "w", encoding="utf-8") as f:
-        f.write(";FFMETADATA1\n")
-        f.write(f"title={escape_ffmeta(book_title)}\n\n")
-        cursor = 0
-        for chapter_number, marker_title, path in audio_entries:
-            duration = get_duration_ms(path)
-            chapter_title = f"{chapter_number:03d} - {marker_title}"
-            f.write("[CHAPTER]\n")
-            f.write("TIMEBASE=1/1000\n")
-            f.write(f"START={cursor}\n")
-            f.write(f"END={cursor + duration}\n")
-            f.write(f"title={escape_ffmeta(chapter_title)}\n\n")
-            cursor += duration
-
-    out_path = os.path.join(output_dir, f"{book_title}.{ext}")
-    try:
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file,
-                "-i", metadata_file, "-map_metadata", "1", "-c:a", "aac", "-b:a", "64k", out_path,
-            ],
-            check=True,
-        )
-    finally:
-        if os.path.exists(concat_file):
-            os.remove(concat_file)
-        if os.path.exists(metadata_file):
-            os.remove(metadata_file)
-
-    size_mb = os.path.getsize(out_path) / (1024 * 1024)
-    print(f"{ext.upper()} saved: {out_path} ({size_mb:.1f} MB)")
+    return _core_m4b(output_dir, audio_entries, book_title, ext)
 
 
 async def convert(

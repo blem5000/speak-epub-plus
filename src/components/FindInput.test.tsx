@@ -5,6 +5,10 @@ import { useState } from "react";
 
 vi.mock("@/lib/sidecar", () => ({
   callSidecar: vi.fn(),
+  getStore: vi.fn().mockResolvedValue({ id: "0", result: { keepEPUB: true } }),
+  setStore: vi.fn().mockResolvedValue({ id: "0", result: {} }),
+  buildEpub: vi.fn().mockResolvedValue({ id: "0", result: { path: "dummy.epub", size: 1234, chapter_count: 1, epubcheck_ok: true, messages: [] } }),
+  isEpubResult: vi.fn().mockReturnValue(true),
 }));
 
 // Must import after mock
