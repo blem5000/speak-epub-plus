@@ -14,6 +14,7 @@ Convert any EPUB file into a spoken-word audiobook using Microsoft Edge's free n
 - **Resume anywhere** — finished chapters and parts are skipped on re-run; if a run fails, just repeat the same command
 - **Single-file audiobooks** — optional M4B/M4A output with real chapter markers (requires FFmpeg)
 - **Interactive Windows launcher** — double-click `Run-SpeakEPUB.cmd`, no venv activation needed
+- **Desktop app** — full GUI (find → preview → filters → EPUB build → TTS queue → M4B) driving the same core pipeline through a Python sidecar — see [Desktop app](#desktop-app-tauri--python-sidecar)
 
 ## How it works
 
@@ -181,7 +182,9 @@ A selection of recommended voices:
 
 Run `python speak.py --list-voices` for the full English list, or `--list-voices --all-languages` for all languages.
 
-## Desktop scaffold (Tauri + sidecar)
+## Desktop app (Tauri + Python sidecar)
+
+The repository contains a full desktop app — a React + Tauri GUI driving the same core pipeline as the CLI through a Python JSON-RPC sidecar.
 
 Prerequisites: Node 24+, Rust 1.77+, Python 3.10+, FFmpeg on PATH.
 
@@ -190,16 +193,51 @@ Prerequisites: Node 24+, Rust 1.77+, Python 3.10+, FFmpeg on PATH.
 npm install
 # dev with Tauri shell (window 960px / min 900)
 npm run tauri dev
-# production build (checks tokens via CSS vars)
+# or just Vite
+npm run dev
+# typecheck + production bundle
 npm run build
 ```
+
+**App features**
+
+- **Find** — search web novels via site adapters (aggregator with per-adapter fault isolation); results table with title, chapter count and cover
+- **Chapter list** — spine-ordered chapters with from/to range and per-chapter checkboxes
+- **Preview** — polite fetching with a raw-HTML resume cache and selector-based content isolation; Original/Cleaned tabs with XSS-sanitized rendering (DOMPurify)
+- **Filters** — plain/regex line filters applied once at the EPUB build gate; CRUD persisted in `store.json`, live preview with removed-count
+- **EPUB build** — EPUB assembly with epubcheck validation and a result card (Open uses a path-scoped opener permission)
+- **TTS queue** — Edge TTS parts through a global parallel queue (2–3 recommended) with live progress events, throttle badge, retry/backoff; finished parts are skipped on re-run
+- **M4B/M4A** — per-chapter merge plus a single audiobook file with chapter markers (FFmpeg)
+- **Settings** — persisted atomically to `store.json`; UI locale auto-detects `pl`/`en` from `navigator.language` (fallback `en`)
+
+**Architecture**
+
+The GUI (`src/`) talks JSON-RPC over stdio to the Python sidecar (`Speak-EPUB-1.0.0/core/config.py:handle_rpc`), which orchestrates the core pipeline: `core/fetch.py` (polite fetching, resume cache, adaptive 429) → `core/clean.py` (selector isolation) → `core/filters.py` (plain/regex filters) → `core/epub.py` (assembly) → `core/tts.py` (chunking, PartJob queue, FFmpeg merge). The dependency direction (GUI → Core → Port → Adapter) is enforced by import-linter (`npm run lint:imports`). Tauri capabilities are least-privilege: shell permissions are removed and the opener is scoped to `**/*.epub` plus the output directory (`src-tauri/capabilities/default.json`).
 
 Python sidecar path is OS-aware via `core/config.py:get_venv_python()`:
 
 - Windows: `Speak-EPUB-1.0.0/venv/Scripts/python.exe`
 - macOS/Linux: `Speak-EPUB-1.0.0/venv/bin/python`
 
-Never use bare `python`; always spawn via that path (see `docs/sidecar-fallback.md` for HTTP fallback on `http://localhost:17381` if stdin/stdout spawn fails).
+Never use bare `python`; always spawn via that path (see `docs/sidecar-fallback.md` for the HTTP fallback on `http://localhost:17381` if stdin/stdout spawn fails).
+
+**Testing**
+
+```bash
+# frontend units (vitest)
+npm test
+# core + adapters + sidecar (pytest; always via the venv interpreter)
+Speak-EPUB-1.0.0/venv/Scripts/python.exe -m pytest Speak-EPUB-1.0.0/tests
+# architecture contracts (import-linter)
+npm run lint:imports
+# sanity-check core contracts
+Speak-EPUB-1.0.0/venv/Scripts/python.exe -m py_compile Speak-EPUB-1.0.0/core/ports.py Speak-EPUB-1.0.0/core/config.py
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+**Design system**
+
+Design tokens from `_bmad-output/planning-artifacts/ux-designs/` are exposed as CSS vars in `src/styles/globals.css` (`--background #F8F9FA`, `--ring #2B5CE6`, `--radius-md 8px`, `--font-mono JetBrains Mono 12px`) and via `src/styles/tokens.ts` / Tailwind theme. The UI meets WCAG 2.1 AA state-contrast requirements and is responsive down to narrow widths.
 
 ## Credits & License
 

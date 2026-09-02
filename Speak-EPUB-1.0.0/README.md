@@ -177,38 +177,9 @@ A selection of recommended voices:
 
 Run `python speak.py --list-voices` for the full English list, or `--list-voices --all-languages` for all languages.
 
-## Desktop scaffold (Tauri + sidecar)
+## Desktop app
 
-Prerequisites: Node 24+, Rust 1.77+, Python 3.10+, FFmpeg on PATH.
-
-```bash
-# install frontend
-npm install
-# dev with Tauri shell (window 960px / min 900)
-npm run tauri dev
-
-# or just Vite
-npm run dev
-# production build (checks tokens via CSS vars)
-npm run build
-```
-
-Python sidecar path is OS-aware via `core/config.py:get_venv_python()`:
-
-- Windows: `Speak-EPUB-1.0.0/venv/Scripts/python.exe`
-- macOS/Linux: `Speak-EPUB-1.0.0/venv/bin/python`
-
-Never use bare `python`; always spawn via that path (see `docs/sidecar-fallback.md` for HTTP fallback on `http://localhost:17381` if stdin/stdout spawn fails).
-
-```bash
-# verify core contracts
-Speak-EPUB-1.0.0/venv/Scripts/python.exe -m py_compile Speak-EPUB-1.0.0/core/ports.py Speak-EPUB-1.0.0/core/config.py
-Speak-EPUB-1.0.0/venv/Scripts/python.exe -c "from core.ports import ScraperPort; from adapters.novelphoenix import NovelPhoenixAdapter; print(issubclass(NovelPhoenixAdapter, ScraperPort))"
-npm run lint:imports
-cargo check --manifest-path src-tauri/Cargo.toml
-```
-
-Design tokens from `ux-designs/DESIGN.md` are exposed as CSS vars in `src/styles/globals.css` (`--background #F8F9FA`, `--ring #2B5CE6`, `--radius-md 8px`, `--font-mono JetBrains Mono 12px`) and via `src/styles/tokens.ts` / `tailwind.config.ts`. Locale auto-detect (`navigator.language` → `pl`/`en`, fallback `en`) via `src/i18n/`.
+This package preserves the original CLI (`speak.py`) plus the Python core/adapters it depends on. The desktop app (React + Tauri GUI driving this core through a JSON-RPC sidecar) lives at the repository root — see the root [`README.md`](../README.md), section **Desktop app (Tauri + Python sidecar)**, for features, architecture, testing and design-system notes.
 
 ## License
 
