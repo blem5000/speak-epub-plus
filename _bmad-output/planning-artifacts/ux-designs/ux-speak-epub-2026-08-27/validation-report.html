@@ -1,0 +1,23 @@
+﻿<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Validation Report — speak epub</title><style>body{font-family:Inter,system-ui,sans-serif;max-width:900px;margin:32px auto;padding:0 24px;line-height:1.5;color:#1A1D23}h1{font-size:24px}h2{font-size:18px;margin-top:24px;border-bottom:1px solid #E5E7EB;padding-bottom:8px}.badge{display:inline-block;padding:2px 8px;border-radius:9999px;font-size:12px;font-weight:600}.strong{background:#E6F4EA;color:#0E9F6E}.adequate{background:#EFF3FF;color:#2B5CE6}.thin{background:#FEF3C7;color:#92400E}.critical{color:#E02424;font-weight:600}.high{color:#C2410C}.medium{color:#92400E}.low{color:#6B7280}pre{background:#F8F9FA;padding:12px;border-radius:8px;overflow:auto}</style></head><body>
+<h1>Validation Report — speak epub</h1>
+<p><strong>DESIGN.md:</strong> _bmad-output/planning-artifacts/ux-designs/ux-speak-epub-2026-08-27/DESIGN.md<br><strong>EXPERIENCE.md:</strong> _bmad-output/planning-artifacts/ux-designs/ux-speak-epub-2026-08-27/EXPERIENCE.md<br><strong>Run at:</strong> 2026-08-27T06:55</p>
+<h2>Overall verdict</h2><p>Spine merytorycznie domknięty dla v1 hobby — pokrywa cały flow URL/title → EPUB/M4B, zachowuje politykę polite i progressive disclosure. Ryzyko downstream niskie; po dodaniu 3 key-screenów (Find, Chapter-preview, Queue) luka wizualna zamknięta. Po lekkich poprawkach nazewnictwa spine gotowy do architektury.</p>
+<h2>Category verdicts</h2>
+<ul>
+<li>Flow coverage — adequate → strong po dopisaniu gałęzi 429/ban w Marta</li>
+<li>Token completeness — strong</li>
+<li>Component coverage — adequate → strong po ujednoliceniu Range bar / Queue list</li>
+<li>State coverage — strong</li>
+<li>Visual reference coverage — thin → strong po promocji 3 mocków do mockups/</li>
+<li>Bloat & overspecification — strong</li>
+<li>Inheritance discipline — adequate → strong</li>
+<li>Shape fit — strong</li>
+</ul>
+<h2>Findings by severity</h2>
+<h3>Critical (0)</h3><p>Brak.</p>
+<h3>High (1 → 0 po fix)</h3><p><span class="high">[Visual reference coverage]</span> — Brak wizualnych odniesień dla Preview/Queue (§ EXPERIENCE.md:IA). <em>Fix:</em> dodano mockups/find.html, chapter-preview.html, queue.html z inline linkami — resolved.</p>
+<h3>Medium (2 → 0 po fix)</h3><p><span class="medium">[Flow]</span> — brak failure path w Marta (§ Key Flows). Fix: dopisano gałąź 429→safe 10s / ban→pauza — resolved.</p><p><span class="medium">[Component]</span> — nazwy nieidentyczne DESIGN vs EXPERIENCE (§ Components). Fix: ujednolicono Range bar / Queue list / Button primary — resolved.</p>
+<h3>Low (3)</h3><p><span class="low">[Token]</span> — niewykorzystane typography.body-sm — cosmetic, no action.</p><p><span class="low">[Flow]</span> — brak osobnej podróży Wznów — optional for v1, odnotowane.</p><p><span class="low">[Inheritance]</span> — Chapters vs Chapter List naming — fixed (IA renamed).</p>
+<h2>Reviewer files</h2><ul><li>review-rubric.md</li></ul>
+<p><em>Next: bmad-architecture, potem bmad-create-epics-and-stories.</em></p>
+</body></html>

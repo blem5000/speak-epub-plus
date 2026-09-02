@@ -1,0 +1,1281 @@
+diff --git a/Speak-EPUB-1.0.0/core/config.py b/Speak-EPUB-1.0.0/core/config.py
+index 63ff25f..cafcc58 100644
+--- a/Speak-EPUB-1.0.0/core/config.py
++++ b/Speak-EPUB-1.0.0/core/config.py
+@@ -1240,9 +1240,11 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
+             except Exception:
+                 raw_html = None
+             if raw_html is None:
+-                # fallback: try adapters._http._get raw fetch without cache (no write)
++                # fallback: Core-owned polite raw fetch without cache (no write);
++                # core.http mirrors adapters/_http.py politeness values without
++                # importing an adapter module (core-no-adapters contract)
+                 try:
+-                    from adapters._http import _get as _http_get
++                    from core.http import _get as _http_get
+ 
+                     resp = _http_get(url_param, timeout=12, retries=2)
+                     raw_html = resp.text or ""
+diff --git a/Speak-EPUB-1.0.0/core/fetch.py b/Speak-EPUB-1.0.0/core/fetch.py
+index 431fdee..76eb01a 100644
+--- a/Speak-EPUB-1.0.0/core/fetch.py
++++ b/Speak-EPUB-1.0.0/core/fetch.py
+@@ -107,6 +107,63 @@ def _backoff_delay(attempt: int) -> float:
+     """Exponential backoff cap 20s + jitter 0.2–0.6, attempt 1-based."""
+     return min(20, 2 * attempt) + random.uniform(0.2, 0.6)
+ 
++
++def _http_status(exc: BaseException | None) -> int | str | None:
++    """Derive the HTTP status behind *exc* from the exception chain.
++
++    The adapter wraps the transport error: AdapterError(FETCH_FAILED) → cause
++    HTTPError(response=resp) → resp.status_code, so the status lives on the
++    ``__cause__`` chain, not on the raised exception itself. This helper climbs
++    that chain looking for ``.response.status_code`` and maps
++    Timeout/ConnectionError to the literal ``"timeout"``.
++
++    As a last resort it substring-matches the ``code`` attribute only — never
++    ``str(exc)``, whose message embeds the target URL and its chapter numbers
++    (``/chapter/500``, ``/chapter/429``) that must not be misread as status
++    codes.
++
++    Returns an int status, ``"timeout"``, ``"5xx"`` or None when unknown.
++    """
++    if exc is None:
++        return None
++    seen: set[int] = set()
++    cur: BaseException | None = exc
++    while cur is not None and id(cur) not in seen:
++        seen.add(id(cur))
++        resp = getattr(cur, "response", None)
++        status = getattr(resp, "status_code", None)
++        if isinstance(status, int) and not isinstance(status, bool):
++            return status
++        cname = type(cur).__name__
++        if "Timeout" in cname or "ConnectionError" in cname:
++            return "timeout"
++        code = getattr(cur, "code", None)
++        if isinstance(code, str) and code:
++            low = code.lower()
++            if "timeout" in low:
++                return "timeout"
++            if "429" in code:
++                return 429
++            m = re.search(r"\b5\d\d\b", code)
++            if m:
++                return int(m.group(0))
++            if "5xx" in low:
++                return "5xx"
++        cur = getattr(cur, "__cause__", None)
++    return None
++
++
++def _retry_class(exc: BaseException | None) -> tuple[bool, bool, bool]:
++    """Classify exception as (is_429, is_5xx, is_timeout) from _http_status."""
++    status = _http_status(exc)
++    if status == "timeout":
++        return (False, False, True)
++    if status == "5xx":
++        return (False, True, False)
++    if isinstance(status, int) and not isinstance(status, bool):
++        return (status == 429, 500 <= status < 600, False)
++    return (False, False, False)
++
+ # ---------------------------------------------------------------------------
+ # fetch_one — sequential, cache-aware, adaptive 429
+ # ---------------------------------------------------------------------------
+@@ -163,26 +220,44 @@ def fetch_one(
+                 on_status(status_idx if status_idx is not None else 0, "done")
+             except Exception:
+                 pass
+-        # Build ChapterContent from cached html (raw not filtered, but parse title/text)
++        # Clean through the SAME resolve_selectors + clean_html pipeline a fresh
++        # fetch uses, so cache-hit and fresh-fetch return the same ChapterContent
++        # shape (html = isolated body HTML, text = isolated text). Raw cache is
++        # never rewritten — cleaning happens on read (AD-2).
++        cleaned_html = cached
++        cleaned_text = ""
++        try:
++            from core.clean import resolve_selectors, clean_html
++
++            sel = resolve_selectors(adapter)
++            cleaned_html, cleaned_text = clean_html(cached, sel.start, sel.end)
++        except ValueError:
++            # invalid override/default selector → heuristic fallback, never raise
++            try:
++                from core.clean import clean_html as _clean_fallback
++
++                cleaned_html, cleaned_text = _clean_fallback(cached, None, None)
++            except Exception:
++                cleaned_html, cleaned_text = cached, ""
++        except Exception:
++            cleaned_html, cleaned_text = cached, ""
++        # title fallback (same as before)
+         try:
+             from bs4 import BeautifulSoup
+ 
+             soup = BeautifulSoup(cached, "lxml")
+-            # title fallback
+             ttag = soup.find(["h1", "h2", "h3"])
+             title = ttag.get_text(strip=True) if ttag else url
+-            # text naive
+-            for tag in soup(["script", "style", "nav", "aside"]):
+-                tag.decompose()
+-            body = soup
+-            text = body.get_text(separator=" ", strip=True)
+-            text = re.sub(r"\s+", " ", text).strip()
+-            from core.ports import ChapterContent
+-
+-            return ChapterContent(url=url, title=title or url, html=cached, text=text or cached)
+         except Exception:
+-            # fallback: return raw string if ChapterContent import fails
+-            return cached
++            title = url
++        if not cleaned_text and on_log:
++            try:
++                on_log(f"cache-hit isolation empty {url}")
++            except Exception:
++                pass
++        from core.ports import ChapterContent
++
++        return ChapterContent(url=url, title=title or url, html=cleaned_html or cached, text=cleaned_text or "")
+ 
+     tier = "polite"
+     # initial throttle emit polite
+@@ -209,14 +284,12 @@ def fetch_one(
+             cc = adapter.fetchChapter(url)
+             if cc is None or not hasattr(cc, "html"):
+                 raise ValueError("adapter returned non-list")
+-            # write cache raw.html (AD-2 raw never filtered)
++            # write cache raw.html (AD-2 raw never filtered); never cache a
++            # non-HTML repr — an empty html must not poison the cache
+             try:
+                 html_to_cache = getattr(cc, "html", "") or ""
+                 if html_to_cache:
+                     write_cache(url, html_to_cache, cache_dir)
+-                else:
+-                    # fallback to text if html missing
+-                    write_cache(url, str(cc), cache_dir)
+             except Exception:
+                 pass
+             if on_status:
+@@ -234,10 +307,11 @@ def fetch_one(
+             last_exc = e
+             msg = str(e)
+             code = getattr(e, "code", "")
+-            # detect 429 / 5xx / timeout — only these are retryable; 404/403 LIST_FAILED is NOT retryable
+-            is_429 = "429" in msg or "429" in code or "Too Many" in msg
+-            is_5xx = bool(re.search(r"\b5\d\d\b", msg)) or "5xx" in msg.lower()
+-            is_timeout = "timeout" in msg.lower() or "timed out" in msg.lower()
++            # detect 429 / 5xx / timeout from the exception chain's HTTP status —
++            # only these are retryable; 404/403 LIST_FAILED is NOT retryable.
++            # Never substring the message: it embeds URLs whose chapter numbers
++            # (/chapter/500, /chapter/429) must not flip retry/throttle tiers.
++            is_429, is_5xx, is_timeout = _retry_class(e)
+             retryable = is_429 or is_5xx or is_timeout
+             if not retryable:
+                 if on_status:
+@@ -637,8 +711,10 @@ def fetch_many(
+                     except Exception:
+                         pass
+                 failed.append(url)
+-                # adaptive tier already handled in fetch_one; update tier if 429
+-                if "429" in str(e):
++                # adaptive tier already handled in fetch_one; update tier if genuine HTTP 429
++                # (status derived from the __cause__ chain — never from the message,
++                # which embeds chapter-number URLs like /chapter/429)
++                if _http_status(e) == 429:
+                     tier = "safe"
+                     if on_throttle:
+                         try:
+diff --git a/Speak-EPUB-1.0.0/core/http.py b/Speak-EPUB-1.0.0/core/http.py
+new file mode 100644
+index 0000000..fa78476
+--- /dev/null
++++ b/Speak-EPUB-1.0.0/core/http.py
+@@ -0,0 +1,83 @@
++"""core/http.py — Core-owned polite HTTP helper (AD-1 firewall).
++
++Mirrors adapters/_http.py politeness values exactly — UA SpeakEPUB/1.0,
++timeout 12s, retries 2, jitter 0.2-0.6s, backoff min(20, 2*attempt) — so
++behavior is indistinguishable from the adapter-local helper. Exists so
++core.config's preview fallback no longer imports an adapter module
++(core-no-adapters contract in .importlinter).
++
++Retry policy: on Timeout/ConnectionError and on HTTP 429/5xx always
++retry; on other 4xx also retry for robustness. Caller decides final
++mapping to [] or AdapterError.
++"""
++from __future__ import annotations
++
++import random
++import time
++
++import requests
++
++
++UA = "SpeakEPUB/1.0"
++_HEADERS = {"User-Agent": UA}
++
++
++def _get(url: str, timeout: float = 12, retries: int = 2) -> requests.Response:
++    """GET with polite UA, retry, jitter and capped backoff.
++
++    Retries `retries` times (total attempts = retries+1). Between attempts
++    sleeps `min(20, 2*attempt) + uniform(0.2,0.6)` to respect politeness.
++    Retries on network Timeout/ConnectionError and on HTTP 429 / 5xx;
++    also retries other 4xx for robustness (final caller maps to []).
++    Raises the last exception after exhausting retries.
++    """
++    if not isinstance(url, str) or not url.strip():
++        raise ValueError("invalid url")
++    if not isinstance(retries, int) or retries < 0:
++        retries = 2
++    if not isinstance(timeout, (int, float)) or timeout <= 0:
++        timeout = 12
++    last_exc: Exception | None = None
++    for attempt in range(retries + 1):
++        try:
++            resp = requests.get(url, headers=_HEADERS, timeout=timeout)
++            # Success
++            if resp.status_code < 400:
++                return resp
++            # Error status -> decide retry
++            # Treat 429 and 5xx as retryable
++            retryable = resp.status_code == 429 or 500 <= resp.status_code < 600
++            # For robustness, also retry other 4xx up to retries
++            if not retryable and 400 <= resp.status_code < 500:
++                retryable = True
++            if retryable and attempt < retries:
++                wait = min(20, 2 * (attempt + 1)) + random.uniform(0.2, 0.6)
++                time.sleep(wait)
++                continue
++            # After retries or non-retryable, raise to caller
++            # Attach response for caller to inspect status
++            http_err = requests.exceptions.HTTPError(
++                f"{resp.status_code} for {url}", response=resp
++            )
++            raise http_err
++        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
++            last_exc = e
++            if attempt < retries:
++                wait = min(20, 2 * (attempt + 1)) + random.uniform(0.2, 0.6)
++                time.sleep(wait)
++                continue
++            raise
++        except requests.exceptions.HTTPError:
++            # already handled retry above; re-raise if not retried
++            raise
++        except Exception as e:
++            last_exc = e
++            if attempt < retries:
++                wait = min(20, 2 * (attempt + 1)) + random.uniform(0.2, 0.6)
++                time.sleep(wait)
++                continue
++            raise
++    # Fallback (should not reach)
++    if last_exc is not None:
++        raise last_exc
++    raise RuntimeError(f"request failed after {retries} retries: {url}")
+diff --git a/Speak-EPUB-1.0.0/tests/test_fetch.py b/Speak-EPUB-1.0.0/tests/test_fetch.py
+index b388828..d015104 100644
+--- a/Speak-EPUB-1.0.0/tests/test_fetch.py
++++ b/Speak-EPUB-1.0.0/tests/test_fetch.py
+@@ -7,6 +7,7 @@ from pathlib import Path
+ from unittest.mock import Mock, MagicMock, patch
+ 
+ import pytest
++import requests
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+ if str(ROOT) not in sys.path:
+@@ -22,14 +23,30 @@ from core.fetch import (
+     write_cache,
+     polite_delay,
+     _normalize_cache_key,
++    _http_status,
+     fetch_one,
+     fetch_many,
+     CACHE_ROOT,
+ )
+-from core.ports import ChapterContent, ChapterInfo, AdapterError
++from core.ports import ChapterContent, ChapterInfo, AdapterError, Selectors
+ 
+ # Helpers
+ 
++def _http_error(status_code: int, url: str = "https://www.novelphoenix.com/novel/123/chapter/1"):
++    """Build a requests HTTPError like adapters/_http._get raises."""
++    resp = Mock()
++    resp.status_code = status_code
++    resp.headers = {}
++    return requests.exceptions.HTTPError(f"{status_code} for {url}", response=resp)
++
++
++def _adapter_fetch_failed(status_code: int, url: str, message: str | None = None):
++    """AdapterError(FETCH_FAILED) wrapping an HTTPError(status) via __cause__."""
++    err = AdapterError(message or f"FETCH_FAILED: {status_code} for {url}", code="FETCH_FAILED")
++    err.__cause__ = _http_error(status_code, url)
++    return err
++
++
+ def _mock_adapter_fetch(html="Real chapter text.", text="Real chapter text.", cover=None):
+     adapter = Mock()
+     # keep _last_cover_url for cover plumbing
+@@ -106,17 +123,94 @@ class TestCacheKey:
+ class TestFetchOne:
+     def test_fetch_one_cache_hit_no_network(self, tmp_path):
+         url = "https://www.novelphoenix.com/novel/123/chapter/1"
+-        html = "<div>Cached html</div>"
+-        write_cache(url, html, cache_dir=tmp_path)
++        raw = (
++            '<html><body><h1>Chapter 1</h1>'
++            '<nav>site nav junk</nav>'
++            '<div id="chapter-content"><p>Cached html</p></div>'
++            '<footer>footer junk</footer>'
++            '</body></html>'
++        )
++        write_cache(url, raw, cache_dir=tmp_path)
+         adapter = _mock_adapter_fetch()
++        adapter.getSelectors = Mock(return_value=Selectors(start="div#chapter-content", end=None))
+         # ensure fetchChapter not called on hit
+         logs = []
+         statuses = []
+         cc = fetch_one(url, adapter, cache_dir=tmp_path, on_log=lambda l: logs.append(l), on_status=lambda i,s: statuses.append(s))
+         adapter.fetchChapter.assert_not_called()
+-        assert cc.html == html
+         assert any("skipped" in l for l in logs)
+         assert "done" in statuses
++        # raw cache stays raw (AD-2: cleaning happens on read)
++        assert read_cache(url, tmp_path) == raw
++
++    def test_fetch_one_cache_hit_selector_isolation_parity(self, tmp_path):
++        # Cache hit, adapter selectors resolve — same ChapterContent shape as a
++        # fresh fetch: html = isolated body, text = isolated text (nav/footer gone).
++        url = "https://www.novelphoenix.com/novel/123/chapter/7"
++        raw = (
++            '<html><body><h1>Chapter 7</h1>'
++            '<nav>site nav junk</nav>'
++            '<div id="chapter-content"><p>Real chapter body</p></div>'
++            '<footer>footer junk</footer>'
++            '</body></html>'
++        )
++        write_cache(url, raw, cache_dir=tmp_path)
++        adapter = _mock_adapter_fetch()
++        adapter.getSelectors = Mock(return_value=Selectors(start="div#chapter-content", end=None))
++        cc = fetch_one(url, adapter, cache_dir=tmp_path)
++        assert cc.text == "Real chapter body"
++        assert "nav junk" not in cc.text
++        assert "footer junk" not in cc.text
++        assert cc.title == "Chapter 7"
++        # html is the isolated fragment, not the whole page
++        assert "chapter-content" in cc.html
++        assert "<nav>" not in cc.html
++        assert "<footer>" not in cc.html
++        assert cc.url == url
++
++    def test_fetch_one_cache_hit_no_selector_match_heuristic_fallback(self, tmp_path):
++        # Cache hit, no selectors match → (None, None) heuristic fallback like
++        # the adapter does; still returns ChapterContent.
++        url = "https://www.novelphoenix.com/novel/123/chapter/8"
++        raw = '<html><body><article><p>Heuristic body text</p></article></body></html>'
++        write_cache(url, raw, cache_dir=tmp_path)
++        adapter = _mock_adapter_fetch()
++        adapter.getSelectors = Mock(return_value=Selectors(start="div#chapter-content", end=None))
++        cc = fetch_one(url, adapter, cache_dir=tmp_path)
++        assert "Heuristic body text" in cc.text
++
++    def test_fetch_one_cache_hit_empty_isolation_still_returns_chaptercontent(self, tmp_path):
++        # Empty isolation result still returns ChapterContent, logged.
++        url = "https://www.novelphoenix.com/novel/123/chapter/9"
++        raw = '<html><body></body></html>'
++        write_cache(url, raw, cache_dir=tmp_path)
++        adapter = _mock_adapter_fetch()
++        adapter.getSelectors = Mock(return_value=Selectors(start="div#chapter-content", end=None))
++        logs = []
++        cc = fetch_one(url, adapter, cache_dir=tmp_path, on_log=lambda l: logs.append(l))
++        assert hasattr(cc, "text")
++        assert cc.text == ""
++        assert any("isolation empty" in l for l in logs)
++
++    def test_fetch_one_cache_hit_invalid_selector_never_raises(self, tmp_path):
++        # selector ValueError → retry with (None, None) heuristic fallback, never raise
++        url = "https://www.novelphoenix.com/novel/123/chapter/10"
++        raw = '<html><body><div id="chapter-content"><p>Body here</p></div></body></html>'
++        write_cache(url, raw, cache_dir=tmp_path)
++        adapter = _mock_adapter_fetch()
++        adapter.getSelectors = Mock(return_value=Selectors(start="???", end=None))
++        cc = fetch_one(url, adapter, cache_dir=tmp_path)
++        assert "Body here" in cc.text
++
++    def test_fetch_one_miss_empty_html_not_cached(self, tmp_path):
++        # Poisoning fix: non-HTML repr (empty html on ChapterContent) is never cached.
++        url = "https://www.novelphoenix.com/novel/123/chapter/3"
++        adapter = Mock()
++        adapter.fetchChapter = Mock(return_value=_chapter_content(url, html="", text="text only"))
++        with patch("core.fetch.time.sleep", return_value=None), patch("core.fetch.random.uniform", return_value=0.3):
++            cc = fetch_one(url, adapter, cache_dir=tmp_path)
++        assert cc is not None
++        assert read_cache(url, tmp_path) is None
+ 
+     def test_fetch_one_miss_writes_cache(self, tmp_path):
+         url = "https://www.novelphoenix.com/novel/123/chapter/1"
+@@ -132,12 +226,12 @@ class TestFetchOne:
+     def test_fetch_one_429_adaptive_safe(self, tmp_path):
+         url = "https://www.novelphoenix.com/novel/123/chapter/42"
+         adapter = Mock()
+-        # first call raises 429, second succeeds
++        # first call raises a genuine HTTP 429 (via cause chain), second succeeds
+         call_count = {"n": 0}
+         def side(url):
+             call_count["n"] += 1
+             if call_count["n"] == 1:
+-                raise AdapterError("429 Too Many Requests", code="FETCH_FAILED")
++                raise _adapter_fetch_failed(429, url, "FETCH_FAILED: 429 Too Many Requests")
+             return _chapter_content(url, html="<div>ok</div>", text="ok")
+         adapter.fetchChapter = Mock(side_effect=side)
+         logs = []
+@@ -156,7 +250,7 @@ class TestFetchOne:
+     def test_fetch_one_after_5_retries_LIST_FAILED(self, tmp_path):
+         url = "https://www.novelphoenix.com/novel/123/chapter/99"
+         adapter = Mock()
+-        adapter.fetchChapter = Mock(side_effect=AdapterError("429 still", code="FETCH_FAILED"))
++        adapter.fetchChapter = Mock(side_effect=lambda u: (_ for _ in ()).throw(_adapter_fetch_failed(429, u, "FETCH_FAILED: 429 still")))
+         slept = []
+         with patch("core.fetch.time.sleep", side_effect=lambda s: slept.append(s)), patch("core.fetch.random.uniform", return_value=0.3):
+             with pytest.raises(AdapterError) as exc:
+@@ -178,6 +272,27 @@ class TestFetchOne:
+             fetch_one("https://", adapter, cache_dir=tmp_path)
+         adapter.fetchChapter.assert_not_called()
+ 
++# ------------------------------------------------------------------ retry classification (HTTP status from cause chain)
++class TestHttpStatusClassification:
++    def test_status_from_cause_chain(self):
++        err = _adapter_fetch_failed(429, "https://www.novelphoenix.com/novel/123/chapter/500")
++        assert _http_status(err) == 429
++
++    def test_chapter_number_in_url_is_not_status(self):
++        # /chapter/500 in the URL with a 404 cause must NOT be classified 5xx.
++        err = _adapter_fetch_failed(404, "https://www.novelphoenix.com/novel/123/chapter/500", "FETCH_FAILED: 404")
++        assert _http_status(err) == 404
++
++    def test_timeout_exception_maps_to_timeout(self):
++        err = AdapterError("FETCH_FAILED", code="FETCH_FAILED")
++        err.__cause__ = requests.exceptions.ConnectionError("connection reset")
++        assert _http_status(err) == "timeout"
++
++    def test_no_cause_unknown_status(self):
++        err = AdapterError("LIST_FAILED: https://x/chapter/429", code="LIST_FAILED")
++        assert _http_status(err) is None
++        assert _http_status(None) is None
++
+ # ------------------------------------------------------------------ fetch_many bounded vs open-ended
+ class TestFetchMany:
+     def test_bounded_diff_20_100(self, tmp_path):
+@@ -270,6 +385,29 @@ class TestFetchMany:
+                 fetch_one("https://evil.com/novel/123/chapter/1", adapter, cache_dir=tmp_path)
+             assert exc.value.code == "LIST_FAILED"
+ 
++    def test_fetch_many_403_on_chapter_429_no_tier_flip(self, tmp_path):
++        # Matrix via batch path: 403 on /chapter/429 must NOT flip tier to safe
++        # (message embeds the URL whose chapter number is 429).
++        url = "https://www.novelphoenix.com/novel/123/chapter/429"
++        adapter = Mock()
++        adapter.fetchChapter = Mock(side_effect=lambda u: (_ for _ in ()).throw(_adapter_fetch_failed(403, u)))
++        throttles = []
++        with patch("core.fetch.time.sleep", return_value=None), patch("core.fetch.random.uniform", return_value=0.3):
++            result = fetch_many([url], adapter, cache_dir=tmp_path, on_throttle=lambda tier,delay: throttles.append((tier,delay)), skip_delay=True)
++        assert result["failed"] == [url]
++        assert all(t != "safe" for t, _ in throttles)
++
++    def test_fetch_many_real_429_flips_tier_to_safe(self, tmp_path):
++        # Genuine HTTP 429 exhausted in batch → tier flips to safe.
++        url = "https://www.novelphoenix.com/novel/123/chapter/60"
++        adapter = Mock()
++        adapter.fetchChapter = Mock(side_effect=lambda u: (_ for _ in ()).throw(_adapter_fetch_failed(429, u)))
++        throttles = []
++        with patch("core.fetch.time.sleep", return_value=None), patch("core.fetch.random.uniform", return_value=0.3):
++            result = fetch_many([url], adapter, cache_dir=tmp_path, on_throttle=lambda tier,delay: throttles.append((tier,delay)), skip_delay=True)
++        assert result["failed"] == [url]
++        assert any(t == "safe" for t, _ in throttles)
++
+     def test_sequential_no_parallel_lock(self, tmp_path):
+         urls = [f"https://www.novelphoenix.com/novel/123/chapter/{i}" for i in range(1, 4)]
+         adapter = Mock()
+diff --git a/Speak-EPUB-1.0.0/tests/test_handle_rpc_preview.py b/Speak-EPUB-1.0.0/tests/test_handle_rpc_preview.py
+index ac7747e..a533242 100644
+--- a/Speak-EPUB-1.0.0/tests/test_handle_rpc_preview.py
++++ b/Speak-EPUB-1.0.0/tests/test_handle_rpc_preview.py
+@@ -91,13 +91,34 @@ def test_previewChapter_end_selector():
+ 
+ 
+ def test_previewChapter_no_cache_fallback_missing():
+-    # when both cache and _get fail, should return LIST_FAILED
++    # when both cache and core.http._get fail, should return LIST_FAILED
+     with patch("core.fetch.read_cache", return_value=None):
+-        with patch("adapters._http._get", side_effect=Exception("network fail")):
++        with patch("core.http._get", side_effect=Exception("network fail")):
+             r = handle_rpc({"id": "1", "method": "previewChapter", "params": {"url": _valid_url(), "start": "div#chapter-content"}})
+             assert r["error"]["code"] == "LIST_FAILED"
+ 
+ 
++def test_previewChapter_no_cache_uses_core_http_fallback(tmp_path, monkeypatch):
++    # Matrix: config fallback fetch — no cache, core/http._get used, response
++    # handling identical to before (resp.text), still selector-isolated.
++    import core.clean as clean
++    monkeypatch.setattr(clean, "_OVERRIDES_DIR", tmp_path / "overrides")
++    raw = '<html><body><div id="chapter-content"><p>Fresh body</p><nav>nav</nav></div></body></html>'
++    mock_resp = Mock()
++    mock_resp.text = raw
++    with patch("core.fetch.read_cache", return_value=None):
++        with patch("core.http._get", return_value=mock_resp) as mock_get:
++            r = handle_rpc({"id": "1", "method": "previewChapter", "params": {"url": _valid_url(), "start": "div#chapter-content"}})
++            assert "result" in r
++            assert "Fresh body" in r["result"]["text"]
++            assert "nav" not in r["result"]["text"]
++            mock_get.assert_called_once()
++            args, kwargs = mock_get.call_args
++            assert args[0] == _valid_url()
++            assert kwargs.get("timeout") == 12
++            assert kwargs.get("retries") == 2
++
++
+ def test_fetchChapter_uses_override(tmp_path, monkeypatch):
+     import core.clean as clean
+     monkeypatch.setattr(clean, "_OVERRIDES_DIR", tmp_path / "overrides")
+diff --git a/_bmad-output/implementation-artifacts/action-item-triage-08-31-2026.md b/_bmad-output/implementation-artifacts/action-item-triage-08-31-2026.md
+new file mode 100644
+index 0000000..4d3e0be
+--- /dev/null
++++ b/_bmad-output/implementation-artifacts/action-item-triage-08-31-2026.md
+@@ -0,0 +1,53 @@
++# Action-Item Triage — manual (Loop module off) — 08-31-2026
++
++All 38 open action items in sprint-status.yaml were verified against the current working tree on 08-31-2026. Epic-3/4 items come from today's retros (sources in the retro docs); epic-1/2 items were re-verified inline for this triage.
++
++## Decisions (human choice)
++
++| D# | Item(s) | Options | Recommendation |
++|----|---------|---------|-----------------|
++| D1 | epic-1:1 - virtualized windowing | (a) build as new story (react-window); (b) keep deferred; (c) close: cap 100 + Show all is acceptable for <1k lists (deferred 3x) | (c) close - stop re-deferring; revisit only if list performance becomes a real problem |
++| D2 | epic-1:2 - _CHAPTER_CACHE | (a) document as canonical (in-memory, query-stripped key, per-run); (b) implement TTL/invalidation; (c) keep-open | (a) document - tiny in-memory cache, TTL is over-engineering |
++| D3 | epic-2:6 - lord mock | (a) feature-flag behind env (SPEAK_LORD_MOCK=1); (b) remove entirely; (c) keep-open | (a) flag - keep the offline/demo affordance, remove production-path surprise |
++| D4 | epic-2:10 - cover fetch ScraperPort bypass | (a) reconcile spec (accept direct requests fetch with UA, document exception); (b) route cover via ScraperPort; (c) keep-open | (a) reconcile - cover is a single-URL demo fetch; port-bypass cost is not worth the adapter surface |
++| D5 | epic-4:4 - 1120px breakpoint | (a) implement 1120 max-w; (b) reconcile spec to lg=1024 (Tailwind default); (c) keep-open | (b) reconcile - 1024 lg is the Tailwind ecosystem default, less special-casing |
++
++## Bundles (buildable now)
++
++| Bundle | Cohesive goal | Items | Owner |
++|--------|---------------|-------|-------|
++| B1 land-remediation-patch | Commit the verified working-tree remediation and restore a green build+test baseline: fetch cache-hit pipeline fix, DOMPurify in Preview (+tests), core/http replacing the lint-imports violation, remove unused userEvent (npm run build), gate: tsc + vitest + pytest | epic-2:1, 2-3, 2-4 (commit part), 2-5, 2-12; epic-4:10 (DoD gate) | Core+GUI |
++| B2 security-hardening | Strengthen Tauri security: set non-null CSP (default-src 'self' + connect-src for sidecar), commit capabilities scoping (shell removed, opener scoped to epub/output), isolate http fallback (localhost:17381) | epic-1:5, epic-2:2 | Security |
++| B3 error-code-mapping | Derive HTTP/RPC status from exception code/attributes in core/config.py (372-374, 1914-1918), no message substrings; extend the _http_status pattern from fetch.py to config.py | epic-2:4 (extension part), 2-7 | Core |
++| B4 get-epub-status-hardening | getEpubStatus: filter epub candidates by novel slug + surface run_epubcheck failure instead of ok:true | epic-2:8 | Core |
++| B5 cache-key-dedupe | One normalize_cache_key + URL validation (fetch.py:31-47 vs config.py:65-82) | epic-2:9 | Core |
++| B6 tts-failure-recovery | tts.py failure/recovery: keep_parts deletion success-only + file-survival tests, cleanup on cancellation and zero-byte regeneration, process lesson: failure tests assert invariants | epic-3:1,2,3,4,10 | Core+QA |
++| B7 tts-module-decomposition | Split core/tts.py (725 lines, 4 responsibilities) + fix the docstring contract | epic-3:7,8 | Core |
++| B8 ffmpeg-escape-verify | Verify apostrophe escaping in concat against a real ffmpeg binary + fix | epic-3:5 | Core |
++| B9 speak-duplication | Resolve root vs inner speak.py duplication (canonical + sync-pin test) | epic-3:6 | Scaffold |
++| B10 tts-concurrent-lock | Cross-process lock on part writes (resume race, core/tts.py:339) | epic-3:9 | Core |
++| B11 qa-verification-matrix | Cross-story pipeline tests (fetch->selectors->filters->buildEpub, corrupt store, multi-novel status, non-contiguous mapping, PL diacritics) + Find/ChapterList verification pins (host guard, cover, skeleton, clamp) | epic-2:11, epic-1:6 | QA |
++| B12 i18n-hardening | i18n: wire existing keys (toast.ban/ffmpeg.missing), fix FiltersWindow ternary, route hardcoded strings, chip via filters.chip | epic-4:1,2,3 | GUI |
++| B13 dialog-focus-restore | Settings dialog focus-restore on close matching FiltersWindow | epic-4:5 | GUI |
++| B14 app-state-unification | A single chapter-status reducer + extract App.tsx orchestration into hooks/components; remove demo token section + legacy-ref stub | epic-4:6,7,8 | GUI |
++| B15 frontend-edge-tests | Settings revert/concurrent blur, useFetcher unmount leak + non-sequential done, Queue error+parts | epic-4:9 | QA |
++
++## Skip / blocked
++
++None - every open item is either a buildable bundle or a human decision. (Twenty epic-3/4 items were added in today's retros and are all still open.)
++
++## Suggested sequencing
++
++Run decisions D1-D5 first (none block bundles, but cheap to settle), then bundles by impact: B1 -> B2 -> B3/B5 -> B6 -> B12 -> B14 -> rest. B1 is the cheapest, highest-value item: it commits verified work and restores a green build.
++
++## Decisions resolved (09-02-2026)
++
++| D# | Decision | Effect |
++|----|----------|--------|
++| D1 | **(c) close** — cap 100 + Show all accepted for <1k lists; stop re-deferring. Revisit only if list performance becomes a real problem. | epic-1-retro-item-1 → done |
++| D2 | **(a) document** — `_CHAPTER_CACHE` is canonical: small in-memory cache, query-stripped key, per-run lifetime; TTL judged over-engineering. | epic-1-retro-item-2 → done |
++| D3 | **(a) feature-flag** — lord mock search fallback behind env `SPEAK_LORD_MOCK=1`; production path mock-free, offline/demo affordance preserved. | epic-2-retro-item-12 stays open, action narrowed (buildable, fold into a Core bundle) |
++| D4 | **(a) reconcile spec** — cover fetch direct `requests` with UA documented in spec-2-3 as an explicit exception (single-URL demo fetch). | epic-2-retro-item-16 → done, spec-2-3 updated |
++| D5 | **(b) reconcile spec** — preview breakpoint reconciled to Tailwind `lg` = 1024px; custom 1120px dropped from spec-4-4. No code change. | epic-4-retro-item-32 → done, spec-4-4 updated |
++
++Remaining open items after decisions: D3 build work (item-12) + bundles B2-B15. Suggested next bundle: **B2 security-hardening**.
+\ No newline at end of file
+diff --git a/_bmad-output/implementation-artifacts/spec-2-3-filtry-plain-regex-na-etapie-epub-build.md b/_bmad-output/implementation-artifacts/spec-2-3-filtry-plain-regex-na-etapie-epub-build.md
+new file mode 100644
+index 0000000..9e78f41
+--- /dev/null
++++ b/_bmad-output/implementation-artifacts/spec-2-3-filtry-plain-regex-na-etapie-epub-build.md
+@@ -0,0 +1,110 @@
++---
++title: 'Filtry — plain+regex na etapie EPUB build'
++type: 'feature'
++created: '2026-08-28'
++status: 'done'
++review_loop_iteration: 0
++review_loop_iteration: 0
++context:
++  - _bmad-output/planning-artifacts/architecture/architecture-speak-epub-2026-08-27/ARCHITECTURE-SPINE.md
++  - _bmad-output/implementation-artifacts/epic-2-context.md
++  - _bmad-output/planning-artifacts/epics.md
++warnings: []
++---
++
++<intent-contract>
++
++## Intent
++
++**Problem:** After selector isolation in `core/clean.py` the pipeline still ships subscription/nag lines into EPUB and TTS because no filter gate exists — e.g. `Subscribe` (plain) and `subscribe.*patreon` (regex) must be stripped once at EPUB build after `clean_html`, while raw cache `_cache/<sha1>/raw.html` (AD-9) must stay unfiltered (AD-2 invariant) and GUI must expose CRUD with live average and per-chapter preview chips.
++
++**Approach:** Add Core-owned `core/filters.py` (plain `contains` + regex `re.search` line-wise, compiled once, applied once after selector isolation) consumed by `core/config.py` RPC `getFilters/saveFilters/addFilter/removeFilter` + extended `previewChapter` (returns filtered html/text + removed count) and future `core/epub.py` (2.4); persist `filters[]` via `store.json` atomic `save_store`, and build `Filters` panel + Preview chip + average badge in GUI.
++
++## Boundaries & Constraints
++
++**Always:** `GUI→Core→Port→Adapter` AD-1 — `core/filters.py` pure, no adapter imports; `core/config.py` RPC uses dynamic `importlib` for `core.clean`/`core.filters` (documented `.importlinter` exception); `raw` never filtered AD-2 (filter applies to `cleaned_text` only, original stays); filter gate idempotent and applied once per `cleaned_text` before EPUB/TTS (AD-2, AD-8); `store.json` `filters[]` shape `{pattern:string,isRegex:boolean}` persisted via `load_store`/`save_store` atomic `tmp.replace` AD-10; compile regex once per call and cache; `re.sub \s+` already in clean, filters do not alter whitespace; i18n via `t()` no hardcode; `JetBrains 12` mono for inputs; persist on blur, no save button.
++
++**Ask First:** Change of `filters[]` JSON shape or storage location (store.json vs Rust store), regex flags (case-sensitive default vs `(?i)`), line semantic (remove whole line vs substring), max filters count/length, add Types/Scopes beyond plain/regex.
++
++**Never:** Modify `core/fetch.py` politeness/cache/resume (2.1), overwrite `core/clean.py` selector/heuristic logic (2.2) or `adapters/novelphoenix.py:298 getSelectors`; add parallel scrape or move filter to fetch/TTS chunker; filter raw cache or write filtered back to `_cache`; introduce drag-to-reorder/infinite scroll; bypass `port` for chapter content fetch — cover/metadata direct fetch in `core/epub.py` is an explicitly **documented exception** (reconciled 09-02-2026 per triage D4 / epic-2 retro item-16: single-URL demo fetch with UA; port-surface cost not justified).
++
++## I/O & Edge-Case Matrix
++
++| Scenario | Input / State | Expected Output / Behavior | Error Handling |
++|----------|--------------|---------------------------|----------------|
++| Plain hit | `cleaned="Intro\nSubscribe to read\nNext"` + `[{pattern:"Subscribe",isRegex:false}]` | `filtered="Intro\nNext"` removed 1, `filtered_html` without that line | N/A |
++| Regex hit | `cleaned="Support on patreon.com/subscribeX\nHello"` + `[{pattern:"subscribe.*patreon",isRegex:true}]` (case-sensitive) | line removed if `re.search` matches; removed 1; regex matched via `re.compile(pattern)` without flags | N/A |
++| Combined | both filters, `cleaned` contains both lines | each line checked against all filters OR (plain OR regex); removed 2, avg `2` | N/A |
++| No filters | `filters=[]` | `filtered === cleaned`, removed 0, chip `0` | N/A |
++| Empty text | `cleaned=""` | `filtered=""`, removed 0 | N/A |
++| Raw invariant | `raw="<nav>Subscribe</nav><div id='chapter-content'>Hello</div>"` → `cleaned="Hello\nSubscribe"` after `clean_html` → `filtered="Hello"` | `read_cache(url)` still returns raw containing `Subscribe`, filtered/EPUB does not | assert `Subscribe in read_cache and not in filtered` |
++| Invalid regex | `pattern="[*"` `isRegex:true` | `apply_filters` raises `ValueError("invalid regex: ...")` → RPC `VALUE_ERROR` muted chip, keep previous filtered | GUI shows muted error, save blocked |
++| Duplicate/invalid persistence | `addFilter` duplicate pattern+type | dedup, no second entry; invalid empty pattern → `VALUE_ERROR` | N/A |
++| Override+filter | selector override active, then filter | filters apply after `resolve_selectors` + `clean_html` (isolated text) not before | N/A |
++| Long text preview | 8000 chars | preview truncates `originalText[:8000]` already, filtered preview uses same `clean_html` then filters, chip live <300ms | N/A |
++
++</intent-contract>
++
++## Code Map
++
++- `Speak-EPUB-1.0.0/core/filters.py` — **NEW** — `Filter = {pattern:str,isRegex:bool}`, `compile_filters(filters)->list[Compiled]`, `apply_filters(cleaned_text:str,filters:list[dict])->tuple[str,int]` line-wise remove if `pattern in line` (plain) or `regex.search(line)` (regex, case-sensitive, no flags unless (?i) in pattern), `count_removed(cleaned,filtered)`; pure AD-2, compiled once, idempotent
++- `Speak-EPUB-1.0.0/core/config.py:41` — **READ-ONLY** — `DEFAULT_STORE filters:[]`; `:104 load_store`, `:118 save_store` atomic; extend handle_rpc with `getFilters/addFilter/updateFilter/removeFilter/saveFilters` + extend `previewChapter:979` to apply `core.filters.apply_filters` after `clean_html` and return `filteredHtml/filteredText/removedCount/removedLines`
++- `Speak-EPUB-1.0.0/core/clean.py:147` — **REUSE** — `clean_html(raw,start,end)->(html,text)` isolation entry; filters consume its `text`/`html` not raw; heuristic fallback unchanged
++- `Speak-EPUB-1.0.0/core/fetch.py:56` — **REUSE** — `read_cache/get_cache_path` raw invariant `_cache/<sha1>/raw.html` never filtered
++- `Speak-EPUB-1.0.0/core/ports.py:14` — **READ-ONLY** — `Selectors`, `ChapterContent`; not touched
++- `Speak-EPUB-1.0.0/adapters/novelphoenix.py:298` — **READ-ONLY** — `getSelectors()->Selectors(start="div#chapter-content")` source
++- `src/lib/sidecar.ts:25` — **EXTEND** — `callSidecar` generic + `getFilters/addFilter/removeFilter/previewChapter` wrappers with `trim` + strict `isFiltersResult` guard like `isPreviewResult:299`
++- `src/components/Preview.tsx:285` — **EXTEND** — split 40/60 tabs `Original/Cleaned`, add `Filtered` tab? keep 2 tabs but add chip `data-testid="filter-chip"` showing `removed N` + live re-parse via debounced `previewChapter` 300ms `seqRef`; `Reset do adaptera` stays, filtered recomputed after filter change
++- `src/components/Filters.tsx` — **NEW** — table `type badge plain/regex + phrase + x`, Input `data-testid="filter-input"` + toggle `isRegex` + `Add` button, delete `data-testid="filter-delete-<idx>"`, live `avgRemoved` `data-testid="filter-avg"` computed as `totalRemoved/numChaptersSample` or `removed/len(filters)`, persist on blur via `saveFilters` atomic
++- `src/App.tsx:613` — **EXTEND** — host `Filters` panel behind gear or below Queue minimal; wire `handlePreview` filtered chip
++- `src/i18n/locales/en.json:29` + `pl.json:39` — **EXTEND** — keys `filters.title`, `filters.add`, `filters.plain`, `filters.regex`, `filters.avg`, `filters.chip`, `filters.invalidRegex`
++- `Speak-EPUB-1.0.0/tests/test_filters.py` — **NEW** — `apply_filters` plain/regex/combined/no-filters/empty/invalid/rawInvariant/overrideInteraction + dedup + compiles once (mock `re.compile` count)
++- `Speak-EPUB-1.0.0/tests/test_handle_rpc_filters.py` — **NEW** — `getFilters/add/remove/save`, `VALUE_ERROR` invalid regex/empty, `previewChapter` filtered vs original filtered invariant, `store.json` atomic persistence via `tmp_path` isolate
++- `src/components/Filters.test.tsx` — **NEW** — add plain/regex, delete, invalid blocked, avg `usuwa średnio 2 linie/rozdz.` calculation, persist on blur `saveFilters` called, Preview chip `removed N`
++
++## Tasks & Acceptance
++
++**Execution:**
++- [x] `Speak-EPUB-1.0.0/core/filters.py` — NEW `APPLY_FILTERS_GATE` plain case-sensitive `in` + regex `re.search` (no flags unless inline `(?i)`), line-wise removal `text.splitlines()` preserve order, `compile_filters` caches `re.compile` per pattern, raises `ValueError("invalid regex: {pattern}")` on `re.error`, idempotent `filtered==apply(apply(cleaned))`; no adapter import, pure
++- [x] `Speak-EPUB-1.0.0/core/config.py` — EXTEND handle_rpc `getFilters` (load_store filters[] sanitized [{pattern:stripped,isRegex:bool}]), `addFilter` `{pattern,isRegex}` trim validate non-empty ≤200 chars, dedup (case-sensitive pattern+isRegex), atomic `save_store`, `removeFilter` by index/pattern, `saveFilters` bulk, `updateFilter`; extend `previewChapter` to load `filters=load_store().filters`, after `clean_html` call `apply_filters(cleaned_text,filters)` and return `filteredHtml` (html lines filtered analogously or via text->html fallback), `filteredText`, `removedCount`, `originalText`; `VALUE_ERROR` for invalid regex kept, raw invariant: never write filtered back to cache
++- [x] `src/lib/sidecar.ts` — EXTEND `getFilters`, `addFilter`, `removeFilter`, `saveFilters` wrappers + `isFiltersResult` guard, mirror `previewChapter` param trimming & `urls` `trim` pattern; keep `callSidecar` id check + fallback `http://localhost:17381`
++- [x] `src/components/Filters.tsx` — NEW panel: Table `site|type badge|phrase|×` (`data-testid="filters-table"`), Input `data-testid="filter-input"` mono, toggle `data-testid="filter-regex-toggle"` (plain/regex), `Add` disabled if empty/duplicate/invalid regex (muted `VALUE_ERROR`), Delete `data-testid="filter-delete-*"` immediate, `avg` badge `data-testid="filter-avg"` live `usuwa średnio ${avg} linie/rozdz.` computed from preview sample or stored counts, persist on blur via debounced `saveFilters` (300ms) toast `Zapisano`
++- [x] `src/components/Preview.tsx` — EXTEND add chip `data-testid="filter-chip"` showing `Usunięto ${removedCount} linii` + `live` filtered diff; tabs keep `Original/Cleaned` but `Cleaned` now shows `filteredText` when filters present? Keep Original/Cleaned as before, add small badge in Cleaned header; live re-parse debounced 300ms calls `previewChapter({url,start,end})` which now includes `filtered*` + `removedCount`; invalid selector/filter shows muted error keep previous
++- [x] `src/App.tsx` — EXTEND mount `Filters` panel (e.g. below Queue or gear modal) + wire Preview chip propagation; keep selection persistence `getSelection/setSelection` untouched
++- [x] `src/i18n/locales/en.json` + `pl.json` — EXTEND add `filters.*` keys no hardcode strings
++- [x] `Speak-EPUB-1.0.0/tests/test_filters.py` + `Speak-EPUB-1.0.0/tests/test_handle_rpc_filters.py` — NEW coverage for I/O matrix + raw invariant + RPC persistence; mock `store.json` via `tmp_path` + `load_store` override, assert `re.compile` called ≤ `len(filters)` once per `apply_filters`
++- [x] `src/components/Filters.test.tsx` + update `src/components/Preview.test.tsx` — NEW GUI pin: add plain/regex, delete, invalid muted, avg calc, Preview chip; mock `sidecar` `vi.mock` pattern like `Preview.test.tsx:24`
++
++**Acceptance Criteria:**
++- Given filtry `Subscribe` plain i `subscribe.*patreon` regex w `store.json` gdy `previewChapter` woła `clean_html` → `apply_filters`, then `filteredText` nie zawiera linii z `Subscribe` ani `patreon` subscription, `originalText` nadal zawiera, `removedCount` = liczba linii usuniętych, `raw` w `_cache/<hash>/raw.html` nadal zawiera `Subscribe` (invariant AD-2)
++- Given Filters UI gdy dodaję plain `Unlimited access` i regex `subscribe.*patreon` i usuwam via ×, then tabela aktualizuje się (`type badge` + `phrase` + `x`), `live count` `usuwa średnio ${avg} linie/rozdz.` aktualizuje się, `persist on blur` (`saveFilters`) zapisuje `store.json` `filters[]` atomic, brak save button
++- Given Preview gdy filtr aktywny, then chip `Usunięto N linii` widoczny, tabs `Original` vs `Cleaned` diff pokazuje usunięcie, `Reset do adaptera` nie usuwa filtrów tylko selektory, filtry nakładane po izolacji selektorów
++
++## Spec Change Log
++
++
++## Design Notes
++
++Filters are line filter: `cleaned_text.splitlines()` → `keep = not any( plain_pat in line or regex.search(line) for f in filters )` → `"\n".join(keep)`. For html, derive `filteredHtml` by filtering text lines or stripping `<p>` lines analogously; keep simple text comparison for epub check. Plain `contains` is case-sensitive (use `in`), regex case-sensitive unless pattern contains `(?i)`. Store shape canonical `{pattern: str trimmed, isRegex: bool}`; deduplicate by `f"{pattern}|{isRegex}"`. Compile once: `compiled = [(f, re.compile(f.pattern)) if isRegex else f]` cached per call. Invalid regex surfaces as `VALUE_ERROR` with `invalid regex` message, GUI muted. Raw invariant test: `assert pattern in read_cache(url) and pattern not in filtered`.
++
++## Verification
++
++**Commands:**
++- `Speak-EPUB-1.0.0/venv\Scripts\python.exe -m py_compile Speak-EPUB-1.0.0/core/filters.py` -- 0 exit
++- `Speak-EPUB-1.0.0/venv\Scripts\python.exe -m pytest Speak-EPUB-1.0.0/tests/test_filters.py -v` -- plain/regex/combined/empty/invalid/dedup/compile-once/rawInvariant -- pass
++- `Speak-EPUB-1.0.0/venv\Scripts\python.exe -m pytest Speak-EPUB-1.0.0/tests/test_handle_rpc_filters.py -v` -- get/add/remove/save/previewFiltered VALUE_ERROR -- pass
++- `Speak-EPUB-1.0.0/venv\Scripts\python.exe -m pytest Speak-EPUB-1.0.0/tests/test_handle_rpc_preview.py Speak-EPUB-1.0.0/tests/test_clean.py -v` -- still pass, preview includes filtered
++- `npm test -- src/components/Filters.test.tsx -v` -- add/delete/avg/chip -- pass
++- `npm test -- src/components/Preview.test.tsx -v` -- live chip pass
++- `npm run build` -- Vite OK Filters included
++- `cargo check --manifest-path src-tauri/Cargo.toml` -- Tauri 2.11.5 OK
++
++**Manual checks (if no CLI):**
++- Find → ChapterList 1–3 double-click → Preview chip `Usunięto 0`; add filter `Subscribe` plain → Preview Cleaned loses line, chip `Usunięto 1`, raw `_cache/.../raw.html` still contains `Subscribe` via `Get-Content`; add regex `subscribe.*patreon` → second line removed, Filters table badge `regex` + `×`; avg `usuwa średnio 2 linie/rozdz.`; persist: close app → reopen → filters still there (store.json).
++
++## Spec Change Log
++
++| Date | Change | Source |
++|------|--------|--------|
++| 09-02-2026 | D4 reconciliation: cover/metadata direct fetch (with UA) in `core/epub.py` documented as an explicit exception to the "bypass `port`" Never rule — single-URL demo fetch; port-surface cost not justified. Rule narrowed to: never bypass `port` for chapter content fetch. | action-item-triage-08-31-2026.md (D4), epic-2-retro-08-31-2026.md item-16 |
++
+diff --git a/_bmad-output/implementation-artifacts/spec-4-4-state-treatments-a11y-aa-responsive-platform.md b/_bmad-output/implementation-artifacts/spec-4-4-state-treatments-a11y-aa-responsive-platform.md
+index 6ccd24a..edd0d17 100644
+--- a/_bmad-output/implementation-artifacts/spec-4-4-state-treatments-a11y-aa-responsive-platform.md
++++ b/_bmad-output/implementation-artifacts/spec-4-4-state-treatments-a11y-aa-responsive-platform.md
+@@ -35,7 +35,7 @@ deferred:
+ 
+ **Problem:** After discovery, fetch, EPUB, TTS and filters lands, the app still lacks polished state surfaces, WCAG 2.2 AA guarantees and responsive/platform hardening — cold launch has no announced focus, 429/ban/empty/FFmpeg-missing states are muted, queue focus/aria is partial, and platform traits (drag region, open-folder, reduced-motion, narrow preview) are not explicit.
+ 
+-**Approach:** Add discrete state treatments, a11y AA and responsive/platform polish on top of existing 4.1/4.2/4.3 without rewriting fetch/clean/TTS: cold focus via `autoFocus`, skeleton/empty/429/ban/FFmpeg warnings with `role`/`aria-live`, strengthened focus rings + keyboard roving + Esc traps, `prefers-reduced-motion`, responsive containers (`max 960` / preview `1120` / single-col `900-1199`), Tauri `data-tauri-drag-region` and window `minWidth 900` already, native opener and opt-in notification hook.
++**Approach:** Add discrete state treatments, a11y AA and responsive/platform polish on top of existing 4.1/4.2/4.3 without rewriting fetch/clean/TTS: cold focus via `autoFocus`, skeleton/empty/429/ban/FFmpeg warnings with `role`/`aria-live`, strengthened focus rings + keyboard roving + Esc traps, `prefers-reduced-motion`, responsive containers (`max 960` / preview `lg 1024` / single-col `900-1023`), Tauri `data-tauri-drag-region` and window `minWidth 900` already, native opener and opt-in notification hook.
+ 
+ ## Boundaries & Constraints
+ 
+@@ -58,7 +58,7 @@ deferred:
+ | Empty preview | Selector isolates 0 chars | `preview-empty` banner `Nie wyizolowano — spróbuj poprawić selektor` `role=alert` | No error |
+ | FFmpeg missing | `ffmpeg -version` not found / `which` null | Result warning `FFmpeg nie znaleziono — części pozostaną niescalone` with path hint `ffmpeg -version`, keep `_parts/*.mp3` | No crash, fallback copy |
+ | Focus AA | Tab through Find→table→CTA→chapters→filters | Each `focus-visible:ring-2 ring-ring` 2px, contrast AA, roving `tabIndex 0/-1` in Results/Chapter tables, arrows/home/end/space work, Esc closes topmost modal with trap, `prefers-reduced-motion` disables pulse/smooth | No error |
+-| Responsive | width `960` vs `1120` preview, narrow `900-1199`, min `900` | Container `max-w-[960px] centered`, preview dialog `w-[1120px] max-w-[95vw]` → single-col stacked under `1024`? computed, window `tauri.conf minWidth 900` blocks resize, `data-tauri-drag-region` on header | No error |
++| Responsive | width `960` vs `1024` preview, narrow `900-1023`, min `900` | Container `max-w-[960px] centered`, preview dialog widened at Tailwind `lg 1024` `max-w-[95vw]` → single-col stacked under `1024`, window `tauri.conf minWidth 900` blocks resize, `data-tauri-drag-region` on header | No error |
+ | Offline | After fetch cached, offline build | EPUB build + preview + queue work offline, no network call | CACHE_MISS only if missing chapter |
+ 
+ </intent-contract>
+@@ -94,7 +94,7 @@ deferred:
+ **Acceptance Criteria:**
+ - Given Find cold launch when otwieram app then focus w input, cold skeleton rows gdy searching, no results display-sm + Wklej URL CTA, chapter list loading skeleton 6 rows, 429 toast warning, ban error row + resume hint, empty preview `Nie wyizolowano`, FFmpeg missing warning z path hint
+ - Given WCAG AA when Tab roving po tabelach then focus ring `ring` 2px AA, aria-live na queue, screen reader `Wyszukiwanie / Lista 142 / Wybrano 6 / Kolejka 5/10`, Esc zamyka modal z focus trap, respects `prefers-reduced-motion`, status pills text+color+icon
+-- Given breakpoints when width 960 vs 1120 preview then centered 960, preview widened 1120, 900-1199 single-col Preview, window min 900, Tauri drag region + native open-folder via opener + opt-in native notifications, no auto-update
++- Given breakpoints when width 960 vs 1024 preview then centered 960, preview widened 1024 (Tailwind `lg`, reconciled 09-02-2026 per triage D5 — custom 1120px dropped), 900-1023 single-col Preview, window min 900, Tauri drag region + native open-folder via opener + opt-in native notifications, no auto-update
+ 
+ ## Spec Change Log
+ 
+@@ -170,3 +170,6 @@ Verification performed:
+ Residual risks:
+ - Dialog inert background lock not full — deferred low, focus trap loops but no `inert` attr
+ - Notification opt-in not wired — deferred low, Settings form lacks notification toggle
++
++Spec change (09-02-2026, triage D5 / epic-4 retro item-32): responsive preview breakpoint reconciled from custom `1120px` to Tailwind default `lg` (1024px); single-col range narrowed to `900-1023`. No code change needed — App.tsx already breaks at lg=1024.
++
+diff --git a/_bmad-output/implementation-artifacts/sprint-status.yaml b/_bmad-output/implementation-artifacts/sprint-status.yaml
+index b17b9dc..a4cea38 100644
+--- a/_bmad-output/implementation-artifacts/sprint-status.yaml
++++ b/_bmad-output/implementation-artifacts/sprint-status.yaml
+@@ -1,4 +1,4 @@
+-﻿# STATUS DEFINITIONS:
++# STATUS DEFINITIONS:
+ # ==================
+ # Epic Status:
+ #   - backlog: Epic not yet started
+@@ -29,7 +29,7 @@
+ # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+ # - Retrospective appends its action items to action_items; the status view surfaces open ones
+ generated: 08-27-2026 07:30
+-last_updated: 08-31-2026 19:00
++last_updated: 09-02-2026
+ project: speak epub
+ project_key: NOKEY
+ tracking_system: file-system
+@@ -48,34 +48,38 @@ development_status:
+   2-2-content-boundary-selektory-per-adapter-heuristic-preview-kor: done
+   2-3-filtry-plain-regex-na-etapie-epub-build: done
+   2-4-epub-assembly-result-card-epubcheck: done
+-  epic-2-retrospective: optional
++  epic-2-retrospective: done
+ 
+   epic-3: done
+   3-1-tts-chunking-partjob-queue-ratyfikacja-brownfield: done
+   3-2-edge-tts-parallel-2-3-retries-_parts-skip: done
+   3-3-ffmpeg-merge-per-chapter-single-m4b-z-markerami: done
+-  epic-3-retrospective: optional
++  epic-3-retrospective: done
+ 
+   epic-4: done
+   4-1-live-queue-expansion-event-bus-throttle-badge-log: done
+   4-2-settings-form-persist-store-json-i18n-auto-detect: done
+   4-3-filters-window-pelny-integracja-z-preview-epub-gate: done
+   4-4-state-treatments-a11y-aa-responsive-platform: done
+-  epic-4-retrospective: optional
++  epic-4-retrospective: done
+ action_items:
+   - id: "epic-1-retro-item-1-close-virtualized-windowing-with-react-w"
+     epic: 1
+     action: "Close virtualized windowing with react-window/@tanstack/virtual replacing
+       cap 100 + Show all"
+     owner: "GUI"
+-    status: open
++    status: done
++    resolution: "D1 (09-02-2026): closed — cap 100 + Show all acceptable for <1k lists,
++      deferred 3x; revisit only if list performance becomes a real problem."
+     ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-1-retro-08-28-2026.md"
+   - id: "epic-1-retro-item-2-wire-_chapter_cache-ttl-invalidation-vs"
+     epic: 1
+     action: "Wire _CHAPTER_CACHE TTL/invalidation vs Never:cache keep or document
+       as canonical"
+     owner: "Core"
+-    status: open
++    status: done
++    resolution: "D2 (09-02-2026): _CHAPTER_CACHE documented as canonical — small in-memory
++      cache, query-stripped key, per-run lifetime; TTL judged over-engineering."
+     ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-1-retro-08-28-2026.md"
+   - id: "epic-1-retro-item-3-add-cross-verification-venv-path-rust-vs"
+     epic: 1
+@@ -104,3 +108,233 @@ action_items:
+     ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-1-retro-08-28-2026.md"
+ 
+ 
++  - id: "epic-2-retro-item-7-sanitize-preview-rendered-html-dompurify"
++    epic: 2
++    action: "Sanitize Preview rendered HTML (DOMPurify) before dangerouslySetInnerHTML
++      in src/components/Preview.tsx:424,426 + sanitization test"
++    owner: "GUI"
++    status: open
++    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
++  - id: "epic-2-retro-item-8-scope-tauri-capabilities-remove-path-sco"
++    epic: 2
++    action: "Scope Tauri capabilities: remove/path-scope shell:allow-spawn and opener:allow-open-path
++      (capabilities/default.json:13,20); revisit csp null"
++    owner: "Security"
++    status: open
++    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
++  - id: "epic-2-retro-item-9-cache-hit-path-in-core-fetch-py-153-185"
++    epic: 2
++    action: "Cache-hit path in core/fetch.py:153-185 must run clean pipeline (resolve_selectors+clean_html)
++      and remove write_cache(url, str(cc)) repr-poisoning fallback at :217-219"
++    owner: "Core"
++    status: open
++    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
++  - id: "epic-2-retro-item-10-fix-retryable-classification-in-core-fet"
++    epic: 2
++    action: "Fix retryable classification in core/fetch.py:238-239: derive HTTP status
++      from exception code/attributes not message substring incl URL"
++    owner: "Core"
++    status: open
++    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
++  - id: "epic-2-retro-item-11-restore-lint-imports-green-replace-core"
++    epic: 2
++    action: "Restore lint-imports green: replace core.config to adapters._http fallback
++      (config.py:1245, introduced c40695e) with Port-based fetch or documented exception;
++      gate lint:imports per story DoD"
++    owner: "Core"
++    status: open
++    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
++  - id: "epic-2-retro-item-12-remove-or-feature-flag-the-lord-mock-sea"
++    epic: 2
++    action: "Feature-flag the lord mock search fallback in core/config.py:213-236 behind
++      env SPEAK_LORD_MOCK=1 (decided 09-02-2026 per triage D3; production path stays
++      mock-free, offline/demo affordance preserved)"
++    owner: "Core"
++    status: open
++    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
++  - id: "epic-2-retro-item-13-map-rpc-error-codes-from-exception-code"
++    epic: 2
++    action: "Map RPC error codes from exception code attributes not message substrings
++      (core/config.py:1912-1916)"
++    owner: "Core"
++    status: open
++    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
++  - id: "epic-2-retro-item-14-fix-getepubstatus-filter-epub-candidates"
++    epic: 2
++    action: "Fix getEpubStatus: filter epub candidates by novel slug and surface run_epubcheck
++      failure instead of ok true (core/config.py:1939-1960)"
++    owner: "Core"
++    status: open
++    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
++  - id: "epic-2-retro-item-15-dedupe-_normalize_cache_key-fetch-py-31"
++    epic: 2
++    action: "Dedupe _normalize_cache_key (fetch.py:31-47 vs config.py:65-82) and URL
++      http(s) validation into single source"
++    owner: "Core"
++    status: open
++    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
++  - id: "epic-2-retro-item-16-spec-reconciliation-human-applies-cover"
++    epic: 2
++    action: "Spec reconciliation (human applies): cover fetch in core/epub.py:584-586
++      bypasses ScraperPort contradicting spec-2-3 Never bypass port for cover/metadata"
++    owner: "Architect"
++    status: done
++    resolution: "D4 (09-02-2026): spec-2-3 reconciled — cover fetch kept as direct
++      requests call with UA, documented in spec-2-3 as an explicit exception (single-URL
++      demo fetch; port-surface cost not justified)."
++    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
++  - id: "epic-2-retro-item-17-add-cross-story-pipeline-tests-fetch-sel"
++    epic: 2
++    action: "Add cross-story pipeline tests: fetch->selectors->filters->buildEpub
++      shared fixtures; buildEpub with corrupt store filters; multi-novel getEpubStatus;
++      non-contiguous selection mapping; Polish diacritics metadata"
++    owner: "QA"
++    status: open
++    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
++  - id: "epic-2-retro-item-18-fix-npm-run-build-remove-unused-usereven"
++    epic: 2
++    action: "Fix npm run build: remove unused userEvent import in src/App.announcer.test.tsx:3
++      (introduced c700be5 epic 4-4)"
++    owner: "GUI"
++    status: open
++    ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
++  - id: "epic-3-retro-item-19-move-keep_parts-deletion-in-finalize_cha"
++    epic: 3
++    action: "Move keep_parts deletion in finalize_chapter_audio into the success-only
++      branch so a failed merge keeps part files referenced by audio_entries (core/tts.py:583-589)"
++    owner: "Core"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
++  - id: "epic-3-retro-item-20-add-file-survival-assertions-parts-still"
++    epic: 3
++    action: "Add file-survival assertions (parts still exist after merge failure)
++      to test_finalize_concat_failure_fallback (tests/test_tts.py:1418-1439)"
++    owner: "QA"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
++  - id: "epic-3-retro-item-21-catch-asyncio-cancellederror-in-worker-c"
++    epic: 3
++    action: "Catch asyncio.CancelledError in worker cleanup so cancelled jobs leave
++      no truncated MP3s that resume then skips (core/tts.py:216-224,415-417,339)"
++    owner: "Core"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
++  - id: "epic-3-retro-item-22-skip-guard-should-regenerate-zero-byte-c"
++    epic: 3
++    action: "Skip-guard should regenerate zero-byte/corrupt existing part files (core/tts.py:339-351,527-535)"
++    owner: "Core"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
++  - id: "epic-3-retro-item-23-verify-apostrophe-escaping-against-a-rea"
++    epic: 3
++    action: "Verify apostrophe escaping against a real ffmpeg binary and fix concat
++      quoting if confirmed (core/tts.py:454,641; sanitize_filename:41)"
++    owner: "Core"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
++  - id: "epic-3-retro-item-24-resolve-root-speak-py-vs-speak-epub-1-0"
++    epic: 3
++    action: "Resolve root speak.py vs Speak-EPUB-1.0.0/speak.py duplication: pick
++      canonical, remove the other or add a sync-pin test"
++    owner: "Scaffold"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
++  - id: "epic-3-retro-item-25-update-core-tts-py-docstring-purity-cont"
++    epic: 3
++    action: "Update core/tts.py docstring purity contract to match current I/O responsibilities
++      (tts.py:14 vs 19-23,209-212)"
++    owner: "Core"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
++  - id: "epic-3-retro-item-26-split-core-tts-py-725-lines-4-responsibi"
++    epic: 3
++    action: "Split core/tts.py (725 lines, 4 responsibilities) into focused modules"
++    owner: "Core"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
++  - id: "epic-3-retro-item-27-guard-against-concurrent-resume-runs-dou"
++    epic: 3
++    action: "Guard against concurrent resume runs double-writing the same part MP3
++      (no lock at core/tts.py:339)"
++    owner: "Core"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
++  - id: "epic-3-retro-item-28-process-lesson-failure-path-tests-must-a"
++    epic: 3
++    action: "Process lesson: failure-path tests must assert post-condition invariants
++      (e.g. file survival), not just return values"
++    owner: "QA"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-3-retro-08-31-2026.md"
++  - id: "epic-4-retro-item-29-replace-hardcoded-polish-alerts-with-t-t"
++    epic: 4
++    action: "Replace hardcoded Polish alerts with t(toast.ban)/t(ffmpeg.missing) keys
++      that exist unused in locales (src/App.tsx:467,480)"
++    owner: "GUI"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
++  - id: "epic-4-retro-item-30-fix-broken-i18n-ternary-on-filterswindow"
++    epic: 4
++    action: "Fix broken i18n ternary on FiltersWindow close button (src/components/FiltersWindow.tsx:105)"
++    owner: "GUI"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
++  - id: "epic-4-retro-item-31-route-hardcoded-strings-through-i18n-set"
++    epic: 4
++    action: "Route hardcoded strings through i18n: Settings toasts (Settings.tsx:293,330,364),
++      Queue (Queue.tsx:172,220), App start button (App.tsx:747), Preview removed-count
++      chip via existing filters.chip key (Preview.tsx:340-346)"
++    owner: "GUI"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
++  - id: "epic-4-retro-item-32-implement-or-spec-reconcile-the-missing"
++    epic: 4
++    action: "Implement or spec-reconcile the missing 1120px preview breakpoint (spec
++      4-4 vs App.tsx:385, lg=1024 only)"
++    owner: "GUI"
++    status: done
++    resolution: "D5 (09-02-2026): spec-4-4 reconciled to Tailwind default lg=1024;
++      custom 1120px breakpoint removed from spec (no code change needed)."
++    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
++  - id: "epic-4-retro-item-33-restore-focus-to-settings-dialog-trigger"
++    epic: 4
++    action: "Restore focus to Settings dialog trigger on close, matching FiltersWindow
++      (Settings.tsx:187-188)"
++    owner: "GUI"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
++  - id: "epic-4-retro-item-34-unify-chapter-status-ownership-into-a-si"
++    epic: 4
++    action: "Unify chapter-status ownership into a single reducer (useFetcher.ts:79-101,285-327
++      vs App.tsx:288-340)"
++    owner: "GUI"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
++  - id: "epic-4-retro-item-35-extract-app-tsx-811-lines-orchestrations"
++    epic: 4
++    action: "Extract App.tsx (811 lines) orchestrations into hooks/components: selection
++      persistence, EPUB build orchestration, clamp/swap/prune effects (App.tsx:67-81,275-347,139-183)"
++    owner: "GUI"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
++  - id: "epic-4-retro-item-36-remove-or-gate-the-demo-token-section-an"
++    epic: 4
++    action: "Remove or gate the demo token section and legacy-ref stub from production
++      render (App.tsx:500-539,776-777)"
++    owner: "GUI"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
++  - id: "epic-4-retro-item-37-add-tests-settings-revert-paths-and-conc"
++    epic: 4
++    action: "Add tests: Settings revert paths and concurrent blur persistence, useFetcher
++      unmount leak and non-sequential done-marking, Queue error+parts rendering"
++    owner: "QA"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
++  - id: "epic-4-retro-item-38-process-lesson-gate-npm-run-build-tsc-pe"
++    epic: 4
++    action: "Process lesson: gate npm run build (tsc) per story DoD - a broken build
++      landed in a done story"
++    owner: "Process"
++    status: open
++    ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
+diff --git a/package-lock.json b/package-lock.json
+index fddcf86..d9939b4 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -11,6 +11,7 @@
+         "@tauri-apps/api": "^2.11.0",
+         "@tauri-apps/plugin-shell": "^2.3.5",
+         "@tauri-apps/plugin-store": "^2.4.4",
++        "dompurify": "^3.4.14",
+         "react": "18.3.1",
+         "react-dom": "18.3.1"
+       },
+@@ -2139,6 +2140,13 @@
+         "@types/react": "^18.0.0"
+       }
+     },
++    "node_modules/@types/trusted-types": {
++      "version": "2.0.7",
++      "resolved": "https://registry.npmjs.org/@types/trusted-types/-/trusted-types-2.0.7.tgz",
++      "integrity": "sha512-ScaPdn1dQczgbl0QFTeTOmVHFULt394XJgOQNoyVhZ6r2vLnMLJfBPd53SB52T/3G36VI1/g2MZaX0cwDuXsfw==",
++      "license": "MIT",
++      "optional": true
++    },
+     "node_modules/@vitejs/plugin-react": {
+       "version": "4.3.4",
+       "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-4.3.4.tgz",
+@@ -2641,6 +2649,15 @@
+       "license": "MIT",
+       "peer": true
+     },
++    "node_modules/dompurify": {
++      "version": "3.4.14",
++      "resolved": "https://registry.npmjs.org/dompurify/-/dompurify-3.4.14.tgz",
++      "integrity": "sha512-dVoH9z+MY+C9IilgGCk3YfFqjLi3fChm2OiKJMzh6axrJ5qwxqWaZamgmHrpv22CN/KdbZJuGEGgfQoL00LTdg==",
++      "license": "(MPL-2.0 OR Apache-2.0)",
++      "optionalDependencies": {
++        "@types/trusted-types": "^2.0.7"
++      }
++    },
+     "node_modules/electron-to-chromium": {
+       "version": "1.5.415",
+       "resolved": "https://registry.npmjs.org/electron-to-chromium/-/electron-to-chromium-1.5.415.tgz",
+diff --git a/package.json b/package.json
+index e6bbfbb..7e3ec8c 100644
+--- a/package.json
++++ b/package.json
+@@ -12,29 +12,30 @@
+     "lint:imports": "\"Speak-EPUB-1.0.0\\venv\\Scripts\\lint-imports.exe\""
+   },
+   "dependencies": {
+-    "react": "18.3.1",
+-    "react-dom": "18.3.1",
+     "@tauri-apps/api": "^2.11.0",
+     "@tauri-apps/plugin-shell": "^2.3.5",
+-    "@tauri-apps/plugin-store": "^2.4.4"
++    "@tauri-apps/plugin-store": "^2.4.4",
++    "dompurify": "^3.4.14",
++    "react": "18.3.1",
++    "react-dom": "18.3.1"
+   },
+   "devDependencies": {
++    "@tailwindcss/vite": "4.1.13",
++    "@tauri-apps/cli": "2.11.4",
++    "@testing-library/jest-dom": "6.6.3",
++    "@testing-library/react": "16.3.0",
++    "@testing-library/user-event": "14.6.3",
++    "@types/node": "22.13.10",
+     "@types/react": "18.3.12",
+     "@types/react-dom": "18.3.7",
+-    "@types/node": "22.13.10",
+     "@vitejs/plugin-react": "4.3.4",
+-    "typescript": "5.8.3",
+-    "vite": "6.3.6",
+-    "@tauri-apps/cli": "2.11.4",
+-    "tailwindcss": "4.1.13",
+-    "@tailwindcss/vite": "4.1.13",
+-    "clsx": "2.1.1",
+-    "tailwind-merge": "3.2.0",
+     "class-variance-authority": "0.7.1",
+-    "vitest": "3.2.4",
++    "clsx": "2.1.1",
+     "jsdom": "26.1.0",
+-    "@testing-library/react": "16.3.0",
+-    "@testing-library/jest-dom": "6.6.3",
+-    "@testing-library/user-event": "14.6.3"
++    "tailwind-merge": "3.2.0",
++    "tailwindcss": "4.1.13",
++    "typescript": "5.8.3",
++    "vite": "6.3.6",
++    "vitest": "3.2.4"
+   }
+ }
+diff --git a/src-tauri/capabilities/default.json b/src-tauri/capabilities/default.json
+index 804136f..cfcbfb8 100644
+--- a/src-tauri/capabilities/default.json
++++ b/src-tauri/capabilities/default.json
+@@ -1,22 +1,26 @@
+ {
+   "$schema": "../gen/schemas/desktop-schema.json",
+   "identifier": "default",
+-  "description": "Capability for the main window — shell + store + core events",
++  "description": "Capability for the main window — store + core events + scoped opener",
+   "windows": ["main"],
+   "permissions": [
+     "core:default",
+     "core:event:default",
+     "core:event:allow-emit",
+     "core:event:allow-listen",
+-    "shell:default",
+-    "shell:allow-open",
+-    "shell:allow-spawn",
+     "store:default",
+     "store:allow-get",
+     "store:allow-set",
+     "store:allow-load",
+     "store:allow-save",
+     "opener:default",
+-    "opener:allow-open-path"
++    {
++      "identifier": "opener:allow-open-path",
++      "allow": [
++        { "path": "**/*.epub" },
++        { "path": "**/output" },
++        { "path": "**/output/**" }
++      ]
++    }
+   ]
+ }
+diff --git a/src/App.announcer.test.tsx b/src/App.announcer.test.tsx
+index 63059e2..69d9dee 100644
+--- a/src/App.announcer.test.tsx
++++ b/src/App.announcer.test.tsx
+@@ -1,6 +1,5 @@
+ import { describe, it, expect, vi, beforeEach } from "vitest";
+ import { render, screen } from "@testing-library/react";
+-import userEvent from "@testing-library/user-event";
+ 
+ const mockGetFilters = vi.fn();
+ const mockCallSidecar = vi.fn();
+diff --git a/src/components/Preview.test.tsx b/src/components/Preview.test.tsx
+index 40d4a3c..bcc6805 100644
+--- a/src/components/Preview.test.tsx
++++ b/src/components/Preview.test.tsx
+@@ -161,4 +161,60 @@ describe("Preview 2.2 — selector boundary + live re-parse", () => {
+     fireEvent.click(screen.getByTestId("preview-overlay"));
+     expect(onClose).toHaveBeenCalled();
+   });
++
++  it("sanitizes onerror payload in rendered Cleaned tab", async () => {
++    mockPreviewChapter.mockResolvedValue({
++      id: "1",
++      result: {
++        url: "https://www.novelphoenix.com/novel/123/chapter/42",
++        originalHtml: "<html>raw</html>",
++        originalText: "raw",
++        html: '<p>clean body</p><img src=x onerror="alert(1)">',
++        text: "clean body",
++        start: "div#chapter-content",
++        end: null,
++      },
++    });
++    render(<Preview open={true} onClose={vi.fn()} chapterUrl="https://www.novelphoenix.com/novel/123/chapter/42" chapterTitle="T" chapterIndex={1} />);
++    await vi.advanceTimersByTimeAsync(350);
++    const rendered = screen.getByTestId("preview-rendered");
++    const img = rendered.querySelector("img");
++    expect(img).not.toBeNull();
++    expect(img?.hasAttribute("onerror")).toBe(false);
++    // clean content still renders after sanitization
++    expect(rendered.textContent).toContain("clean body");
++  });
++
++  it("sanitizes onerror payload in rendered Original tab", async () => {
++    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
++    mockPreviewChapter.mockResolvedValue({
++      id: "1",
++      result: {
++        url: "https://www.novelphoenix.com/novel/123/chapter/42",
++        originalHtml: '<p>raw body</p><img src=x onerror="alert(1)" onclick="steal()">',
++        originalText: "raw body",
++        html: "<div>cleaned</div>",
++        text: "cleaned",
++        start: "div#chapter-content",
++        end: null,
++      },
++    });
++    render(<Preview open={true} onClose={vi.fn()} chapterUrl="https://www.novelphoenix.com/novel/123/chapter/42" chapterTitle="T" chapterIndex={1} />);
++    await vi.advanceTimersByTimeAsync(350);
++    await user.click(screen.getByTestId("preview-tab-original"));
++    const rendered = screen.getByTestId("preview-rendered");
++    const img = rendered.querySelector("img");
++    expect(img).not.toBeNull();
++    expect(img?.hasAttribute("onerror")).toBe(false);
++    expect(img?.hasAttribute("onclick")).toBe(false);
++    expect(rendered.textContent).toContain("raw body");
++  });
++
++  it("clean content still renders after sanitize in default Cleaned tab", async () => {
++    render(<Preview open={true} onClose={vi.fn()} chapterUrl="https://www.novelphoenix.com/novel/123/chapter/42" chapterTitle="T" chapterIndex={1} />);
++    await vi.advanceTimersByTimeAsync(350);
++    const rendered = screen.getByTestId("preview-rendered");
++    expect(rendered.textContent).toContain("cleaned");
++    expect(rendered.querySelector("div")).not.toBeNull();
++  });
+ });
+diff --git a/src/components/Preview.tsx b/src/components/Preview.tsx
+index dbf15bf..2fbc9b5 100644
+--- a/src/components/Preview.tsx
++++ b/src/components/Preview.tsx
+@@ -1,4 +1,5 @@
+ import { useEffect, useRef, useState } from "react";
++import DOMPurify from "dompurify";
+ import { previewChapter, getSelectors, saveSelectors, clearSelectors, isPreviewResult } from "@/lib/sidecar";
+ 
+ type PreviewProps = {
+@@ -421,9 +422,9 @@ export default function Preview({ open, onClose, chapterUrl, chapterTitle, chapt
+             <div className="border-b bg-muted/20 px-4 py-2 text-body-sm font-medium text-muted-foreground">Podgląd renderowany</div>
+             <div className="prose prose-sm max-w-none p-4 text-body" data-testid="preview-rendered">
+               {tab === "original" ? (
+-                <div dangerouslySetInnerHTML={{ __html: originalHtml.slice(0, 20000) }} />
++                <div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(originalHtml.slice(0, 20000)) }} />
+               ) : (
+-                <div dangerouslySetInnerHTML={{ __html: (removedCount > 0 ? filteredHtml : cleanedHtml).slice(0, 20000) }} />
++                <div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize((removedCount > 0 ? filteredHtml : cleanedHtml).slice(0, 20000)) }} />
+               )}
+             </div>
+           </div>

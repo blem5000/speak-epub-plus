@@ -1,0 +1,19 @@
+{
+  "project_root": "C:\\Users\\admin\\Documents\\programowanie\\speak epub",
+  "artifacts": [
+    "_bmad-output/planning-artifacts/epics.md",
+    "_bmad-output\\planning-artifacts\\architecture\\architecture-speak-epub-2026-08-27\\.memlog.md",
+    "_bmad-output\\planning-artifacts\\architecture\\architecture-speak-epub-2026-08-27\\ARCHITECTURE-SPINE.md",
+    "_bmad-output\\planning-artifacts\\architecture\\architecture-speak-epub-2026-08-27\\reconcile-addendum.md",
+    "_bmad-output\\planning-artifacts\\architecture\\architecture-speak-epub-2026-08-27\\reconcile-brief.md",
+    "_bmad-output\\planning-artifacts\\architecture\\architecture-speak-epub-2026-08-27\\reconcile-ux.md",
+    "_bmad-output/specs/spec-speak-epub/SPEC.md",
+    "_bmad-output\\planning-artifacts\\ux-designs\\ux-speak-epub-2026-08-27\\.memlog.md",
+    "_bmad-output\\planning-artifacts\\ux-designs\\ux-speak-epub-2026-08-27\\DESIGN.md",
+    "_bmad-output\\planning-artifacts\\ux-designs\\ux-speak-epub-2026-08-27\\EXPERIENCE.md",
+    "_bmad-output\\planning-artifacts\\ux-designs\\ux-speak-epub-2026-08-27\\reconcile-addendum.md",
+    "_bmad-output\\planning-artifacts\\ux-designs\\ux-speak-epub-2026-08-27\\reconcile-brief.md",
+    "_bmad-output/implementation-artifacts/sprint-status.yaml"
+  ],
+  "artifact_count": 13
+}

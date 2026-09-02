@@ -1,0 +1,19 @@
+﻿<!doctype html><html lang="pl"><head><meta charset="utf-8"/><title>Queue / Progress</title><style>
+:root{--bg:#F8F9FA;--fg:#1A1D23;--muted:#F1F3F5;--border:#E5E7EB;--accent:#2B5CE6;--success:#0E9F6E;--warning:#E3A008}*{box-sizing:border-box;font-family:Inter,system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--fg);padding:24px}
+.shell{max-width:960px;margin:0 auto;background:#fff;border:1px solid var(--border);border-radius:12px;padding:20px}
+.track{height:6px;background:var(--muted);border-radius:9999px;overflow:hidden;display:flex;margin:12px 0}
+.seg{height:100%}.seg.done{background:var(--success)}.seg.active{background:var(--accent)}.seg.todo{background:var(--muted)}
+.row{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px}
+.pill{font-size:12px;padding:2px 8px;border-radius:9999px;font-weight:600}.pill.done{background:#E6F4EA;color:var(--success)}.pill.fetch{background:#EFF3FF;color:var(--accent)}.pill.warn{background:#FEF3C7;color:var(--warning)}
+.mono{font-family:JetBrains Mono,monospace;font-size:12px;color:#6B7280}
+.log{font-family:JetBrains Mono,monospace;font-size:12px;background:#0F1115;color:#9AA0AE;padding:12px;border-radius:8px;height:80px;overflow:auto}
+</style></head><body><div class="shell">
+<div style="display:flex;justify-content:space-between"><strong>Kolejka — 30 rozdz.</strong><span class="mono">elapsed 04:12 • polite 3–5s • safe off</span></div>
+<div class="track"><div class="seg done" style="width:40%"></div><div class="seg active" style="width:10%"></div><div class="seg todo" style="width:50%"></div></div>
+<div class="row"><span>001</span><span style="flex:1">Chapter 1: The Stranger</span><span class="pill done">done</span><span class="mono">_parts 3/3 ✔ FFmpeg merged</span></div>
+<div class="row" style="border-color:var(--accent)"><span>005</span><span style="flex:1">Chapter 5: Spectator</span><span class="pill fetch">fetching 2/3 ●</span><span class="mono">part 02/03 TTS</span></div>
+<div class="row" style="opacity:.8"><span>006</span><span style="flex:1">Chapter 6 ...</span><span class="pill todo" style="background:var(--muted)">queued</span></div>
+<div style="margin-top:12px" class="mono">Pominięto 0 istniejące • pobieram 1–30 • parallel 3 • chunk 3500 • retry 1/4 hidden</div>
+<div class="log">12:01 fetch 001 OK (2.1s)\n12:03 fetch 002 OK\n12:06 TTS part 001_1 mp3 OK\n12:07 ⚠️ 429 → zwiększam opóźnienie do 10s (safe) — retry 1/4\n12:10 fetch 005 part 02 OK</div>
+<div style="margin-top:16px;padding:12px;border:1px solid var(--border);border-radius:8px;background:#F8F9FA"><strong>Result preview (po zakończeniu):</strong><div class="mono">lord_of_mysteries_001_to_030.epub ✓ epubcheck • 2.4 MB — [Otwórz folder]</div><div class="mono">lord_of_mysteries_001_to_030.m4b • 11 markerów • 3h 12m — [Play]</div></div>
+</div></body></html>

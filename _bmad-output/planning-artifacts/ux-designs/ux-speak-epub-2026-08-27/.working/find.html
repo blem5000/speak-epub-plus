@@ -1,0 +1,23 @@
+﻿<!doctype html><html lang="pl"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Speak EPUB — Find</title><style>
+:root{--bg:#F8F9FA;--fg:#1A1D23;--muted:#F1F3F5;--border:#E5E7EB;--accent:#2B5CE6;--muted-fg:#6B7280}*{box-sizing:border-box;font-family:Inter,system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--fg);display:flex;justify-content:center;padding:32px}
+.shell{width:960px;background:#fff;border:1px solid var(--border);border-radius:12px;padding:24px}
+.h1{font-size:28px;font-weight:600;margin:0 0 8px}.sub{font-size:13px;color:var(--muted-fg);margin-bottom:24px}
+.input{height:44px;border:1px solid var(--border);border-radius:8px;padding:0 12px;display:flex;align-items:center;gap:8px}
+.input input{border:0;outline:0;flex:1;font-size:14px;background:transparent}
+.btn{height:36px;padding:0 16px;border-radius:8px;border:0;background:var(--fg);color:#fff;font-weight:600;cursor:pointer}
+.btn-accent{background:var(--accent)}
+.table{width:100%;border-collapse:collapse;margin-top:16px;font-size:14px}
+.table th{font-size:13px;color:var(--muted-fg);text-align:left;padding:8px;border-bottom:1px solid var(--border)}
+.table td{padding:10px 8px;border-bottom:1px solid var(--border)}
+.row-sel{border-left:2px solid var(--accent);background:#EFF3FF}
+.badge{font-size:12px;background:var(--muted);padding:2px 8px;border-radius:9999px}
+</style></head><body><div class="shell">
+<div style="display:flex;justify-content:space-between;align-items:center"><span style="font-weight:600">Speak EPUB</span><span style="font-size:18px">⚙️</span></div>
+<p class="h1">Wklej link do powieści lub wpisz tytuł</p><p class="sub">Paste novel URL or title — wyszukiwanie &lt;5s, polite. Przykład: Lord of Mysteries / https://novelphoenix.com/…</p>
+<div class="input"><span>🔍</span><input placeholder="https://… lub tytuł" value="Lord of Mysteries"/><button class="btn btn-accent">Szukaj</button></div>
+<table class="table"><thead><tr><th>site</th><th>title match</th><th>chapters</th><th></th></tr></thead><tbody>
+<tr class="row-sel"><td>NovelPhoenix</td><td>Lord of Mysteries</td><td><span class="badge">142</span></td><td><button class="btn btn-accent" style="height:28px">Wybierz</button></td></tr>
+<tr><td>OtherSite</td><td>Lord of Mysteries</td><td><span class="badge">138</span></td><td><button class="btn" style="background:#fff;color:var(--fg);border:1px solid var(--border);height:28px">Wybierz</button></td></tr>
+</tbody></table>
+<p class="sub" style="margin-top:16px">→ wybierz źródło → lista rozdziałów z zakresem od–do + checkboxes</p>
+</div></body></html>

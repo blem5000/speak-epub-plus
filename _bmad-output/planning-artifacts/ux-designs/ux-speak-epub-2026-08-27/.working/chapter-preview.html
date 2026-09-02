@@ -1,0 +1,25 @@
+﻿<!doctype html><html lang="pl"><head><meta charset="utf-8"/><title>Chapter List + Preview</title><style>
+:root{--bg:#F8F9FA;--fg:#1A1D23;--muted:#F1F3F5;--border:#E5E7EB;--accent:#2B5CE6;--muted-fg:#6B7280}*{box-sizing:border-box;font-family:Inter,system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--fg);padding:24px}
+.shell{max-width:1120px;margin:0 auto;background:#fff;border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.range{display:flex;gap:8px;align-items:center;padding:12px 20px;border-bottom:1px solid var(--border);background:#FCFCFD}
+.range input{width:72px;height:32px;border:1px solid var(--border);border-radius:8px;padding:0 8px;text-align:center}
+.split{display:flex;height:420px}.left{width:40%;border-right:1px solid var(--border);overflow:auto}.right{width:60%;padding:16px;overflow:auto}
+.row{display:flex;gap:8px;padding:8px 12px;border-bottom:1px solid #F1F3F5;font-size:14px;align-items:center}.row:hover{background:var(--muted)}.row.sel{background:rgba(43,92,230,0.07);border-left:2px solid var(--accent)}
+.mono{font-family:JetBrains Mono,monospace;font-size:12px;color:var(--muted-fg)}
+.tabs{display:flex;gap:8px;margin-bottom:12px}.tab{padding:6px 12px;border-radius:8px;font-size:13px;border:1px solid var(--border);background:var(--muted)}.tab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.chip{display:inline-block;font-size:12px;background:var(--muted);padding:2px 8px;border-radius:8px;margin:2px}
+</style></head><body><div class="shell">
+<div class="header"><div><strong>Lord of Mysteries</strong><span class="mono"> — NovelPhoenix • 142 rozdz. • Cover ✓</span></div><span class="mono">142 total</span></div>
+<div class="range"><span style="font-weight:600;font-size:14px">Zakres:</span><input value="1"/><span>—</span><input value="30"/><button style="height:32px;padding:0 12px;border-radius:8px;border:0;background:var(--fg);color:#fff;font-weight:600">Zaznacz zakres</button><span style="margin-left:auto;font-size:13px;color:var(--muted-fg)">Wybrano 30 z 142</span></div>
+<div class="split"><div class="left">
+<div class="row sel"><input type="checkbox" checked/><span class="mono">001</span> Chapter 1: The Stranger</div>
+<div class="row sel"><input type="checkbox" checked/><span class="mono">002</span> Chapter 2: The Fool</div>
+<div class="row sel"><input type="checkbox" checked/><span class="mono">005</span> Chapter 5: Spectator 👁</div>
+<div class="row"><input type="checkbox"/><span class="mono">031</span> Chapter 31 ...</div>
+<div class="row" style="color:var(--muted-fg);font-size:13px;padding:12px">… 30 zaznaczonych, przewiń aby zobaczyć resztę …</div>
+</div><div class="right">
+<div class="tabs"><span class="tab">Oryginał</span><span class="tab active">Oczyszczone</span><span class="mono" style="margin-left:auto">start: article .chapter-content</span></div>
+<div style="font-size:14px;line-height:1.6"><p>Klein woke up...</p><p style="color:var(--muted-fg);text-decoration:line-through">Subscribe to support the author — patreon.com/...</p><p><span class="chip">plain: "Subscribe" ✕</span> <span class="chip">regex: subscribe.*patreon ✕</span> — usunięto 2 linie</p><div style="display:flex;gap:8px;margin-top:12px"><input placeholder="start selector" value="div.chapter-content" style="flex:1;height:28px;border:1px solid var(--border);border-radius:8px;padding:0 8px;font-family:monospace"/><input placeholder="end selector" value="" style="flex:1;height:28px;border:1px solid var(--border);border-radius:8px;padding:0 8px;font-family:monospace"/><button style="height:28px;padding:0 10px;border-radius:8px;border:1px solid var(--border)">Reset do adaptera</button></div></div>
+</div></div>
+</div></body></html>

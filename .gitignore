@@ -30,8 +30,8 @@ Thumbs.db
 ehthumbs.db
 
 # BMad / internal tooling - not part of distributed app
+# (_bmad-output/ is versioned: planning + implementation artifacts are repo docs)
 _bmad/
-_bmad-output/
 .agents/
 .opencode/
 AGENTS.md

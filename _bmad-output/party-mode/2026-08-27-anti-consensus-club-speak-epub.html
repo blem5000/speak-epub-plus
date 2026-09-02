@@ -1,0 +1,46 @@
+﻿<!doctype html><html lang="pl"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Party Keepsake — Anti-Consensus Club × Speak EPUB — 2026-08-27</title><style>
+:root{--bg:#0F1115;--card:#1A1D23;--muted:#9AA0AE;--accent:#6B8AFF;--amber:#E3A008;--success:#0E9F6E;--border:#2A2E37}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(1200px 600px at 20% -10%, #1E2A5A 0%, transparent 60%), radial-gradient(900px 500px at 90% 0%, #2A1A3A 0%, transparent 55%), var(--bg);color:#E6E8EB;font-family:Inter,system-ui,sans-serif;line-height:1.5}
+.wrap{max-width:960px;margin:32px auto;padding:24px}
+.hero{background:linear-gradient(135deg, #1A1D23 0%, #252A36 100%);border:1px solid var(--border);border-radius:16px;padding:28px 24px;position:relative;overflow:hidden}
+.hero h1{margin:0 0 6px;font-size:28px;letter-spacing:-0.02em}
+.hero p{margin:0;color:var(--muted);font-size:14px}
+.badges{margin-top:14px;display:flex;gap:8px;flex-wrap:wrap}.badge{font-size:12px;padding:6px 10px;border-radius:9999px;background:#252A36;border:1px solid var(--border)}
+.stage{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:20px 0}
+.persona{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:14px;text-align:center;transition:transform .2s}
+.persona:hover{transform:translateY(-3px) rotate(.4deg)}
+.persona .icon{font-size:28px}.persona .name{font-weight:700;margin:6px 0 2px}.persona .role{font-size:12px;color:var(--muted)}
+.timeline{margin-top:18px;background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden}
+.entry{padding:16px 18px;border-bottom:1px solid var(--border);display:flex;gap:14px}
+.entry:last-child{border:0}.entry .icon{font-size:22px;flex-shrink:0;margin-top:2px}
+.bubble{flex:1}.who{font-weight:700;font-size:13px}.who span{color:var(--muted);font-weight:400}
+.text{margin:6px 0 0;font-size:14px;color:#D6D9DF}
+.text b{color:#fff}
+.outcome{background:linear-gradient(135deg, #0E2A1A 0%, #1A2E22 100%);border:1px solid #1F3D2A;border-radius:14px;padding:18px;margin-top:18px}
+.outcome h3{margin:0 0 8px;color:var(--success)} .mono{font-family:JetBrains Mono,monospace;font-size:12px;color:var(--muted)}
+svg.spark{position:absolute;right:12px;top:12px;opacity:.7;animation:float 4s ease-in-out infinite}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+</style></head><body><div class="wrap">
+<div class="hero">
+<svg class="spark" width="80" height="80" viewBox="0 0 80 80" fill="none"><circle cx="40" cy="40" r="18" stroke="#6B8AFF" stroke-opacity=".4" stroke-width="1.5"/><circle cx="40" cy="40" r="6" fill="#6B8AFF"><animate attributeName="r" values="6;8;6" dur="2.5s" repeatCount="indefinite"/></circle><g stroke="#E3A008" stroke-width="1.2" stroke-linecap="round" opacity=".7"><line x1="40" y1="8" x2="40" y2="16"/><line x1="40" y1="64" x2="40" y2="72"/><line x1="8" y1="40" x2="16" y2="40"/><line x1="64" y1="40" x2="72" y2="40"/><line x1="17" y1="17" x2="23" y2="23"/><line x1="57" y1="57" x2="63" y2="63"/></g></svg>
+<h1>Anti-Consensus Club × Speak EPUB</h1><p>2026-08-27 · _bmad-output/specs/spec-speak-epub + ARCHITECTURE-SPINE.md · 3 ASSUMPTION na ruszcie</p>
+<div class="badges"><span class="badge">📏 Level — evidence</span><span class="badge">🃏 Wildcard — options</span><span class="badge">🪵 Splinter — hidden tradeoffs</span><span class="badge">🛑 Killjoy — cut the loop</span></div>
+</div>
+<div class="stage">
+<div class="persona"><div class="icon">🃏</div><div class="name">Wildcard</div><div class="role">Option Generator<br/>„a co jeśli odwrócimy?”</div></div>
+<div class="persona"><div class="icon">📏</div><div class="name">Level</div><div class="role">Claim Checker<br/>„na jakich dowodach?”</div></div>
+<div class="persona"><div class="icon">🪵</div><div class="name">Splinter</div><div class="role">Consensus Challenger<br/>„złamał ołówek”</div></div>
+<div class="persona"><div class="icon">🛑</div><div class="name">Killjoy</div><div class="role">Loop Stopper<br/>„koniec pętli”</div></div>
+</div>
+<div class="timeline">
+<div class="entry"><div class="icon">🃏</div><div class="bubble"><div class="who">Wildcard <span>— tryb session</span></div><div class="text">„Jesteśmy w <b>session</b>, jedna głowa za czterema gębami — za łatwo się zgodzimy. Chcesz <b>--mode subagent</b>?” · Rzuca alternatywy A1: EN vs PL vs auto-detect + i18n hedge, A2: stdin vs HTTP localhost vs file-watch, A3: React vs Svelte vs CustomTkinter.</div></div></div>
+<div class="entry"><div class="icon">📏</div><div class="bubble"><div class="who">Level <span>— dowody</span></div><div class="text">A1: EN primary — <b>pewność niska</b>, brak decyzji w briefie, tylko UX fast path. A2: stdin — <b>średnia</b>, Tauri 2.11.5 verified, ale brak spike shell+venv. A3: starter React — core high, pluginy low. „Co zmieniłoby odpowiedź? Jedno zdanie od Ciebie / 10-min spike / <code>cargo search</code>.”</div></div></div>
+<div class="entry"><div class="icon">🪵</div><div class="bubble"><div class="who">Splinter <span>— ukryte</span></div><div class="text">„Łatwy konsensus: EN bo wszyscy czytają EN — bzdura. Ty jesteś PL, maintainer PL, 70% tytułów EN ale testerzy PL zgłoszą bugi selectorów.” + „stdin najprostszy — odrzuciliście weak objection o crashu i health-check HTTP.” + ukryte A2b: <b>Scripts vs bin venv path</b>.</div></div></div>
+<div class="entry"><div class="icon">🛑</div><div class="bubble"><div class="who">Killjoy <span>— priorytet</span></div><div class="text">„Kręcimy się — które blokuje budowę?” A1 i A2 blokują AD-1..AD-10, A3 to wieczór. Pyta wprost: <b>A1+A2 teraz, A3 później?</b></div></div></div>
+<div class="entry"><div class="icon">👤</div><div class="bubble"><div class="who">Ty <span>— decyzja</span></div><div class="text"><b>„Język i transport teraz, starter później.”</b></div></div></div>
+<div class="entry"><div class="icon">🃏</div><div class="bubble"><div class="who">Wildcard → 📏 Level → 🪵 Splinter</div><div class="text">Wildcard: hedge i18n za 1h. Level: dopytuje EN vs auto-detect, stdin vs HTTP. Splinter: dorzuca venv per-OS do AD-4. Killjoy: „Daj jedno zdanie.”</div></div></div>
+<div class="entry"><div class="icon">👤</div><div class="bubble"><div class="who">Ty <span>— final</span></div><div class="text"><b>„język auto-detect system locale, reszta zgadzam się: stdin + spike 10 min (shell + venv/bin per OS) i fallback HTTP, core/config.py wykrywa OS”</b></div></div></div>
+</div>
+<div class="outcome"><h3>Outcome — adopted 2026-08-27</h3><div class="text"><b>SPEC.md Assumptions:</b> EN-primary → <b>auto-detect + i18n keys, en.json fallback, pl.json</b> · Sidecar <b>stdin primary + spike + HTTP fallback</b> + <b>cacheKey sha1(url) owned by Core</b> + <b>core/config.py OS-aware venv path</b> · Starter deferred to impl pin.<br/><b>ARCHITECTURE-SPINE.md AD-4:</b> <b>[ASSUMPTION] → [ADOPTED with spike]</b>.<br/><span class="mono">memlog: _bmad-output/party-mode/memories/anti-consensus-club/.memlog.md (5 entries) · SPEC: _bmad-output/specs/spec-speak-epub/SPEC.md · Arch: _bmad-output/planning-artifacts/architecture/architecture-speak-epub-2026-08-27/ARCHITECTURE-SPINE.md</span></div></div>
+<p class="mono" style="text-align:center;margin-top:16px">Keepsake wygenerowany party-mode · session · memory on — Ty + Wildcard/Level/Splinter/Killjoy</p>
+</div></body></html>
