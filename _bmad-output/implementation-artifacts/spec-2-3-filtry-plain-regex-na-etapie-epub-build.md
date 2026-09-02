@@ -4,7 +4,6 @@ type: 'feature'
 created: '2026-08-28'
 status: 'done'
 review_loop_iteration: 0
-review_loop_iteration: 0
 context:
   - _bmad-output/planning-artifacts/architecture/architecture-speak-epub-2026-08-27/ARCHITECTURE-SPINE.md
   - _bmad-output/implementation-artifacts/epic-2-context.md
