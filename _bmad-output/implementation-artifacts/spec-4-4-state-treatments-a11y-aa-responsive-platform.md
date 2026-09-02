@@ -35,7 +35,7 @@ deferred:
 
 **Problem:** After discovery, fetch, EPUB, TTS and filters lands, the app still lacks polished state surfaces, WCAG 2.2 AA guarantees and responsive/platform hardening — cold launch has no announced focus, 429/ban/empty/FFmpeg-missing states are muted, queue focus/aria is partial, and platform traits (drag region, open-folder, reduced-motion, narrow preview) are not explicit.
 
-**Approach:** Add discrete state treatments, a11y AA and responsive/platform polish on top of existing 4.1/4.2/4.3 without rewriting fetch/clean/TTS: cold focus via `autoFocus`, skeleton/empty/429/ban/FFmpeg warnings with `role`/`aria-live`, strengthened focus rings + keyboard roving + Esc traps, `prefers-reduced-motion`, responsive containers (`max 960` / preview `1120` / single-col `900-1199`), Tauri `data-tauri-drag-region` and window `minWidth 900` already, native opener and opt-in notification hook.
+**Approach:** Add discrete state treatments, a11y AA and responsive/platform polish on top of existing 4.1/4.2/4.3 without rewriting fetch/clean/TTS: cold focus via `autoFocus`, skeleton/empty/429/ban/FFmpeg warnings with `role`/`aria-live`, strengthened focus rings + keyboard roving + Esc traps, `prefers-reduced-motion`, responsive containers (`max 960` / preview `lg 1024` / single-col `900-1023`), Tauri `data-tauri-drag-region` and window `minWidth 900` already, native opener and opt-in notification hook.
 
 ## Boundaries & Constraints
 
@@ -58,7 +58,7 @@ deferred:
 | Empty preview | Selector isolates 0 chars | `preview-empty` banner `Nie wyizolowano — spróbuj poprawić selektor` `role=alert` | No error |
 | FFmpeg missing | `ffmpeg -version` not found / `which` null | Result warning `FFmpeg nie znaleziono — części pozostaną niescalone` with path hint `ffmpeg -version`, keep `_parts/*.mp3` | No crash, fallback copy |
 | Focus AA | Tab through Find→table→CTA→chapters→filters | Each `focus-visible:ring-2 ring-ring` 2px, contrast AA, roving `tabIndex 0/-1` in Results/Chapter tables, arrows/home/end/space work, Esc closes topmost modal with trap, `prefers-reduced-motion` disables pulse/smooth | No error |
-| Responsive | width `960` vs `1120` preview, narrow `900-1199`, min `900` | Container `max-w-[960px] centered`, preview dialog `w-[1120px] max-w-[95vw]` → single-col stacked under `1024`? computed, window `tauri.conf minWidth 900` blocks resize, `data-tauri-drag-region` on header | No error |
+| Responsive | width `960` vs `1024` preview, narrow `900-1023`, min `900` | Container `max-w-[960px] centered`, preview dialog widened at Tailwind `lg 1024` `max-w-[95vw]` → single-col stacked under `1024`, window `tauri.conf minWidth 900` blocks resize, `data-tauri-drag-region` on header | No error |
 | Offline | After fetch cached, offline build | EPUB build + preview + queue work offline, no network call | CACHE_MISS only if missing chapter |
 
 </intent-contract>
@@ -94,7 +94,7 @@ deferred:
 **Acceptance Criteria:**
 - Given Find cold launch when otwieram app then focus w input, cold skeleton rows gdy searching, no results display-sm + Wklej URL CTA, chapter list loading skeleton 6 rows, 429 toast warning, ban error row + resume hint, empty preview `Nie wyizolowano`, FFmpeg missing warning z path hint
 - Given WCAG AA when Tab roving po tabelach then focus ring `ring` 2px AA, aria-live na queue, screen reader `Wyszukiwanie / Lista 142 / Wybrano 6 / Kolejka 5/10`, Esc zamyka modal z focus trap, respects `prefers-reduced-motion`, status pills text+color+icon
-- Given breakpoints when width 960 vs 1120 preview then centered 960, preview widened 1120, 900-1199 single-col Preview, window min 900, Tauri drag region + native open-folder via opener + opt-in native notifications, no auto-update
+- Given breakpoints when width 960 vs 1024 preview then centered 960, preview widened 1024 (Tailwind `lg`, reconciled 09-02-2026 per triage D5 — custom 1120px dropped), 900-1023 single-col Preview, window min 900, Tauri drag region + native open-folder via opener + opt-in native notifications, no auto-update
 
 ## Spec Change Log
 
@@ -170,3 +170,6 @@ Verification performed:
 Residual risks:
 - Dialog inert background lock not full — deferred low, focus trap loops but no `inert` attr
 - Notification opt-in not wired — deferred low, Settings form lacks notification toggle
+
+Spec change (09-02-2026, triage D5 / epic-4 retro item-32): responsive preview breakpoint reconciled from custom `1120px` to Tailwind default `lg` (1024px); single-col range narrowed to `900-1023`. No code change needed — App.tsx already breaks at lg=1024.
+

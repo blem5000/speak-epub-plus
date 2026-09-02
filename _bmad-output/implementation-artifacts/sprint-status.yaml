@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 08-27-2026 07:30
-last_updated: 08-31-2026 20:12
+last_updated: 09-02-2026
 project: speak epub
 project_key: NOKEY
 tracking_system: file-system
@@ -68,14 +68,18 @@ action_items:
     action: "Close virtualized windowing with react-window/@tanstack/virtual replacing
       cap 100 + Show all"
     owner: "GUI"
-    status: open
+    status: done
+    resolution: "D1 (09-02-2026): closed — cap 100 + Show all acceptable for <1k lists,
+      deferred 3x; revisit only if list performance becomes a real problem."
     ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-1-retro-08-28-2026.md"
   - id: "epic-1-retro-item-2-wire-_chapter_cache-ttl-invalidation-vs"
     epic: 1
     action: "Wire _CHAPTER_CACHE TTL/invalidation vs Never:cache keep or document
       as canonical"
     owner: "Core"
-    status: open
+    status: done
+    resolution: "D2 (09-02-2026): _CHAPTER_CACHE documented as canonical — small in-memory
+      cache, query-stripped key, per-run lifetime; TTL judged over-engineering."
     ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-1-retro-08-28-2026.md"
   - id: "epic-1-retro-item-3-add-cross-verification-venv-path-rust-vs"
     epic: 1
@@ -142,7 +146,9 @@ action_items:
     ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
   - id: "epic-2-retro-item-12-remove-or-feature-flag-the-lord-mock-sea"
     epic: 2
-    action: "Remove or feature-flag the lord mock search fallback in core/config.py:213-236"
+    action: "Feature-flag the lord mock search fallback in core/config.py:213-236 behind
+      env SPEAK_LORD_MOCK=1 (decided 09-02-2026 per triage D3; production path stays
+      mock-free, offline/demo affordance preserved)"
     owner: "Core"
     status: open
     ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
@@ -172,7 +178,10 @@ action_items:
     action: "Spec reconciliation (human applies): cover fetch in core/epub.py:584-586
       bypasses ScraperPort contradicting spec-2-3 Never bypass port for cover/metadata"
     owner: "Architect"
-    status: open
+    status: done
+    resolution: "D4 (09-02-2026): spec-2-3 reconciled — cover fetch kept as direct
+      requests call with UA, documented in spec-2-3 as an explicit exception (single-URL
+      demo fetch; port-surface cost not justified)."
     ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
   - id: "epic-2-retro-item-17-add-cross-story-pipeline-tests-fetch-sel"
     epic: 2
@@ -283,7 +292,9 @@ action_items:
     action: "Implement or spec-reconcile the missing 1120px preview breakpoint (spec
       4-4 vs App.tsx:385, lg=1024 only)"
     owner: "GUI"
-    status: open
+    status: done
+    resolution: "D5 (09-02-2026): spec-4-4 reconciled to Tailwind default lg=1024;
+      custom 1120px breakpoint removed from spec (no code change needed)."
     ref: "_bmad-output/implementation-artifacts/epic-4-retro-08-31-2026.md"
   - id: "epic-4-retro-item-33-restore-focus-to-settings-dialog-trigger"
     epic: 4
