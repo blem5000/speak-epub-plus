@@ -50,6 +50,7 @@ dist-ssr/
 *.local
 /src-tauri/target/
 /src-tauri/gen/
+/src-tauri/sidecar-runtime/
 
 # Store
 store.json

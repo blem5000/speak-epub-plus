@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tauri::{Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -33,12 +33,13 @@ async fn python_sidecar_call(
     app: tauri::AppHandle,
     payload: RpcRequest,
 ) -> Result<RpcResponse, String> {
-    // Resolve venv python via core/config.py logic — mirror OS detection here as fallback
-    let venv_python = resolve_venv_python();
+    // Resolve the Python backend: prefer the bundled runtime shipped with the
+    // installer (<resource>/sidecar-runtime); fall back to the dev-checkout venv.
+    let (venv_python, cwd) = resolve_sidecar_entry(&app);
 
     // Attempt to spawn sidecar as JSON-RPC over stdin/stdout
     // For spike we implement a minimal echo: if spawn fails, return error for JS fallback
-    match spawn_and_call(&venv_python, &payload, &app).await {
+    match spawn_and_call(&venv_python, cwd.as_deref(), &payload, &app).await {
         Ok(resp) => {
             // Also emit via event bus for AD-6 compliance
             let _ = app.emit("python_sidecar_response", &resp);
@@ -58,22 +59,33 @@ async fn emit_event(app: tauri::AppHandle, event: String, payload: serde_json::V
     Ok(())
 }
 
-fn resolve_venv_python() -> PathBuf {
-    // Mirror core/config.py:get_venv_python() — OS-aware
-    // Speak-EPUB is sibling to src-tauri? Use current exe parent search
-    // Prefer Speak-EPUB-1.0.0/venv/Scripts/python.exe on Windows else venv/bin/python
+/// Resolve the Python backend program.
+/// Returns the executable path plus, for the bundled runtime, the working
+/// directory that exposes the `core`/`adapters` packages (so the inline
+/// `from core.config import handle_rpc` sidecar code can import them).
+fn resolve_sidecar_entry(app: &tauri::AppHandle) -> (PathBuf, Option<PathBuf>) {
+    // 1) Bundled self-contained runtime (installed app / release build).
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let python = res_dir.join("sidecar-runtime/python/python.exe");
+        if python.is_file() {
+            return (python, Some(res_dir.join("sidecar-runtime/code")));
+        }
+    }
+
+    // 2) Dev checkout — keep the legacy relative path (mirrors core/config.py:get_venv_python).
     #[cfg(target_os = "windows")]
     {
-        PathBuf::from("Speak-EPUB-1.0.0/venv/Scripts/python.exe")
+        (PathBuf::from("Speak-EPUB-1.0.0/venv/Scripts/python.exe"), None)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        PathBuf::from("Speak-EPUB-1.0.0/venv/bin/python")
+        (PathBuf::from("Speak-EPUB-1.0.0/venv/bin/python"), None)
     }
 }
 
 async fn spawn_and_call(
-    venv_python: &PathBuf,
+    venv_python: &Path,
+    cwd: Option<&Path>,
     req: &RpcRequest,
     app: &tauri::AppHandle,
 ) -> Result<RpcResponse, String> {
@@ -97,8 +109,8 @@ async fn spawn_and_call(
 
     // For other methods, attempt actual spawn with event streaming
     // Inline python reads one JSON line, calls handle_rpc with emit hook that prints {"event", "payload"} lines before final {"id", "result/error"}
-    let mut child = tokio::process::Command::new(venv_python)
-        .arg("-c")
+    let mut cmd = tokio::process::Command::new(venv_python);
+    cmd.arg("-c")
         .arg(
             r#"
 import sys, json, importlib
@@ -135,8 +147,11 @@ except Exception as e:
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
+        .kill_on_drop(true);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
 
     if let Some(mut stdin) = child.stdin.take() {
         let line = serde_json::to_string(req).map_err(|e| e.to_string())? + "\n";

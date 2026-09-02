@@ -30,6 +30,36 @@ jobs:
       - name: Install frontend dependencies
         run: npm install --no-audit --no-fund
 
+      - name: Prepare bundled Python sidecar runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runtime = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/sidecar-runtime'
+          New-Item -ItemType Directory -Force -Path $runtime | Out-Null
+
+          # Resolve the latest self-contained CPython 3.11 build (includes pip).
+          $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest' -Headers @{ 'User-Agent' = 'speak-epub-release' }
+          $asset = $release.assets | Where-Object { $_.name -match '^cpython-3\.11\..*x86_64-pc-windows-msvc-install_only\.tar\.gz$' } | Select-Object -First 1
+          if (-not $asset) { throw 'No matching python-build-standalone asset found' }
+          Write-Host "Downloading $($asset.name)"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "$env:TEMP\python.tar.gz" -UseBasicParsing
+          tar -xzf "$env:TEMP\python.tar.gz" -C $runtime
+          $py = Join-Path $runtime 'python/python.exe'
+          if (-not (Test-Path $py)) { throw 'Embedded python not found after extraction' }
+          & $py -m pip install --disable-pip-version-check --quiet --upgrade pip
+          & $py -m pip install --disable-pip-version-check --quiet -r 'Speak-EPUB-1.0.0/requirements.txt'
+
+          # Copy the Python core so `from core.config import handle_rpc` resolves from cwd.
+          $code = Join-Path $runtime 'code'
+          New-Item -ItemType Directory -Force -Path $code | Out-Null
+          Copy-Item 'Speak-EPUB-1.0.0/core' $code -Recurse
+          Copy-Item 'Speak-EPUB-1.0.0/adapters' $code -Recurse
+          Copy-Item 'Speak-EPUB-1.0.0/speak.py' $code
+
+          # Sanity check: ping through handle_rpc with the bundled runtime.
+          $ping = & $py -c "import sys; sys.path.insert(0, r'$code'); from core.config import handle_rpc; print(handle_rpc({'id':'1','method':'ping'}))"
+          Write-Host "Sidecar ping: $ping"
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v1
         env:
@@ -49,14 +79,11 @@ jobs:
             - **`speak-epub.msi`** — MSI installer
             - Source code archive (auto-added by GitHub)
 
-            ### Important — how this build runs the Python sidecar
-            The GUI talks to the Python core (`Speak-EPUB-1.0.0`, `core/config.py`) over JSON-RPC and locates it at the relative path
-            `Speak-EPUB-1.0.0/venv/Scripts/python.exe` (see `src-tauri/src/lib.rs:resolve_venv_python`). It works out of the box when run
-            from a project checkout where that folder exists, or with a sidecar on `http://localhost:17381` (see `docs/sidecar-fallback.md`).
-
-            For a zero-setup Windows experience use the **CLI launcher** instead — double-click `Run-SpeakEPUB.cmd` from a checkout
-            (auto-creates `venv`, installs requirements, and can install FFmpeg via winget for M4B/M4A).
+            ### Important — fully self-contained
+            This installer bundles the Python backend (embedded CPython 3.11 + all Python dependencies + the
+            `core`/`adapters` code) as app resources, so the desktop app runs on its own without requiring Python,
+            Node.js, or a project checkout.
 
             ### Requirements for full functionality
-            - FFmpeg on PATH for M4B/M4A merging (`winget install ffmpeg`)
+            - **FFmpeg on PATH** for M4B/M4A merging (`winget install ffmpeg`)
             - Internet access for Edge TTS and novel-site fetching
