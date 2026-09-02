@@ -1,0 +1,62 @@
+name: release
+
+# Builds the Windows desktop app on a tag push (e.g. v0.1.0) and publishes
+# the exe + installers as a GitHub Release.
+# GitHub-hosted Windows runners include the MSVC toolchain, so `link.exe`
+# is available here even when the developer machine lacks VS Build Tools.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Setup Rust for Tauri
+        uses: tauri-apps/setup-tauri@v0
+
+      - name: Build and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Speak EPUB ${{ github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
+          releaseBody: |
+            ## Speak EPUB ${{ github.ref_name }}
+
+            Desktop app for Windows (Tauri + React GUI driving the Python core: EPUB build, Edge TTS, M4B with chapter markers).
+
+            ### Assets
+            - **`speak-epub-setup.exe`** — NSIS installer
+            - **`speak-epub.msi`** — MSI installer (Enterprise MSI, 1.10.0+)
+            - Source code archive (auto-added by GitHub)
+
+            ### Important — how this build runs the Python sidecar
+            The GUI talks to the Python core (`Speak-EPUB-1.0.0`, `core/config.py`) over JSON-RPC and locates it at the relative path
+            `Speak-EPUB-1.0.0/venv/Scripts/python.exe` (see `src-tauri/src/lib.rs:resolve_venv_python`). It works out of the box when run
+            from a project checkout where that folder exists, or with a sidecar on `http://localhost:17381` (see `docs/sidecar-fallback.md`).
+
+            For a zero-setup Windows experience use the **CLI launcher** instead — double-click `Run-SpeakEPUB.cmd` from a checkout
+            (auto-creates `venv`, installs requirements, and can install FFmpeg via winget for M4B/M4A).
+
+            ### Requirements for full functionality
+            - FFmpeg on PATH for M4B/M4A merging (`winget install ffmpeg`)
+            - Internet access for Edge TTS and novel-site fetching
