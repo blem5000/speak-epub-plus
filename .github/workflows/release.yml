@@ -24,14 +24,14 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install frontend dependencies
         run: npm install --no-audit --no-fund
 
-      - name: Setup Rust for Tauri
-        uses: tauri-apps/setup-tauri@v0
-
       - name: Build and publish release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -46,7 +46,7 @@ jobs:
 
             ### Assets
             - **`speak-epub-setup.exe`** — NSIS installer
-            - **`speak-epub.msi`** — MSI installer (Enterprise MSI, 1.10.0+)
+            - **`speak-epub.msi`** — MSI installer
             - Source code archive (auto-added by GitHub)
 
             ### Important — how this build runs the Python sidecar
