@@ -115,6 +115,11 @@ async fn spawn_and_call(
             r#"
 import sys, json, importlib
 try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+try:
     line = sys.stdin.readline()
     if not line:
         print(json.dumps({"id":"0","error":{"code":"EMPTY","message":"no input"}}))
@@ -148,6 +153,10 @@ except Exception as e:
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Windows consoles default to a legacy codepage (cp1252); force UTF-8 so
+    // non-ASCII chapter text never dies with "'charmap' codec can't encode".
+    cmd.env("PYTHONUTF8", "1");
+    cmd.env("PYTHONIOENCODING", "utf-8");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }

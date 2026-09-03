@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from typing import List
 from urllib.parse import quote, urljoin
 
@@ -119,9 +120,35 @@ class NovelPhoenixAdapter(ScraperPort):
         return results
 
     # --------------------------------------------------------------- listChapters
+    # Chapter-index pagination cap so a misbehaving site cannot spin forever.
+    _MAX_INDEX_PAGES = 200
+    # Link captions that point at a chapter but are not chapter titles.
+    _NOISE_TITLE_RE = re.compile(
+        r"^(next|prev|previous|cover|first|last|read now|read first|read latest)$", re.I
+    )
+    _CHAPTER_NUM_HREF_RE = re.compile(r"/chapter-(\d+)(?:[/?#].*)?$")
+    _CHAPTER_NUM_SLASH_RE = re.compile(r"/chapter/(\d+)(?:[/?#].*)?$")
+    _NOVEL_FROM_CHAPTER_URL_RE = re.compile(
+        r"^(?P<novel>https?://[^/]+/novel/[^/?#]+?)/chapter-\d+(?:[/?#].*)?$", re.I
+    )
+
+    @staticmethod
+    def _chapter_num_of(u: str) -> int:
+        m = NovelPhoenixAdapter._CHAPTER_NUM_HREF_RE.search(u) or NovelPhoenixAdapter._CHAPTER_NUM_SLASH_RE.search(u)
+        return int(m.group(1)) if m else 10**9
+
+    @classmethod
+    def _normalize_novel_url(cls, url: str) -> str:
+        """Accept a pasted chapter URL (…/novel/<slug>/chapter-57) and return the novel URL."""
+        u = url.strip().rstrip("/")
+        m = cls._NOVEL_FROM_CHAPTER_URL_RE.match(u)
+        return m.group("novel") if m else u
+
     def listChapters(self, url: str) -> List[ChapterInfo]:
         if not isinstance(url, str) or not url.strip():
             raise ValueError("url must be non-empty")
+        # Pasted chapter links resolve to the whole novel's chapter list.
+        url = self._normalize_novel_url(url)
         # Sequential fetch only; use _get with retries
         try:
             resp = _get(url, timeout=12, retries=2)
@@ -152,46 +179,120 @@ class NovelPhoenixAdapter(ScraperPort):
         with self._lock:
             self._last_cover_url = cover_url
 
-        # chapter anchors: ul.chapter-list li a  OR  a[href*=/chapter/] dedupe/normalize
-        anchors: List = []
-        chap_list = soup.select("ul.chapter-list li a[href]")
-        if chap_list:
-            anchors = list(chap_list)
-            # also consider fallback anchors not in list? spec says dedupe, so include both
-            # Add fallback anchors that are not already in chap_list
-            fallback = soup.select("a[href*='/chapter/']")
-            # deduplicate by href for this merge step (preserve order)
-            existing_hrefs = {a.get("href") for a in anchors}
-            for a in fallback:
-                if a.get("href") not in existing_hrefs:
-                    anchors.append(a)
-        else:
-            anchors = soup.select("a[href*='/chapter/']")
-            # broader fallback if site uses different pattern
-            if not anchors:
-                anchors = soup.select("a[href*='chapter']")
-
         seen: set[str] = set()
-        collected: List[tuple[str, str]] = []
-        for a in anchors:
-            href = a.get("href")
-            if not href:
-                continue
-            if href.strip().lower().startswith(("javascript:", "mailto:", "data:")):
-                continue
-            abs_url = urljoin(url, href)
-            # normalize for dedupe: strip fragment, strip query for test stability, rstrip slash
-            normalized = abs_url.split("#")[0].split("?")[0].rstrip("/")
-            if normalized in seen:
-                continue
-            title = a.get_text(strip=True)
-            # skip len<2 or ^(next|prev|cover|previous)$ (case-insensitive)
-            if len(title) < 2:
-                continue
-            if re.match(r"^(next|prev|cover|previous)$", title, re.I):
-                continue
-            seen.add(normalized)
-            collected.append((normalized, title))
+        collected: List[tuple[str, str]] = []  # (absolute chapter url, title)
+
+        def _harvest(soup_obj: BeautifulSoup) -> int:
+            """Collect /chapter-N links (index pages list the latest chapter first)."""
+            added = 0
+            for a in soup_obj.select("a[href]"):
+                href = (a.get("href") or "").strip()
+                if not href or href.lower().startswith(("javascript:", "mailto:", "data:")):
+                    continue
+                m = self._CHAPTER_NUM_HREF_RE.search(href) or self._CHAPTER_NUM_SLASH_RE.search(href)
+                if not m:
+                    continue
+                title = (a.get("title") or "").strip()
+                if not title:
+                    title = a.get_text(strip=True)
+                if self._NOISE_TITLE_RE.match(title or ""):
+                    continue
+                if not title or len(title) < 2:
+                    title = f"Chapter {int(m.group(1))}"
+                abs_url = urljoin(url, href.split("#")[0]).split("?")[0].rstrip("/")
+                if abs_url in seen:
+                    continue
+                seen.add(abs_url)
+                collected.append((abs_url, title))
+                added += 1
+            return added
+
+        # Preferred path: dedicated paginated chapter index (e.g. <novel>/chapters?page=N).
+        index_url: str | None = None
+        if re.search(r"/chapters(?:[/?#].*)?$", url, re.I):
+            index_url = url
+        else:
+            link = soup.select_one("a[href*='/chapters']")
+            if link is not None:
+                href = (link.get("href") or "").strip()
+                if href and not href.lower().startswith(("javascript:", "mailto:", "data:")):
+                    candidate = urljoin(url, href).split("#")[0]
+                    if re.search(r"/chapters(?:[/?#].*)?$", candidate, re.I):
+                        index_url = candidate
+
+        if index_url is not None:
+            page_url: str | None = index_url
+            page_num = 1
+            max_page = 1
+            while page_url is not None and page_num <= self._MAX_INDEX_PAGES:
+                try:
+                    page_resp = _get(page_url, timeout=12, retries=2)
+                except Exception as e:
+                    # a partially harvested index is still useful; fail only with nothing
+                    if page_num == 1:
+                        raise AdapterError(f"LIST_FAILED: {e}", code="LIST_FAILED") from e
+                    break
+                page_soup = BeautifulSoup(page_resp.text or "", "lxml")
+                _harvest(page_soup)
+                next_url: str | None = None
+                for a in page_soup.select("a[href*='page=']"):
+                    href = (a.get("href") or "").split("#")[0]
+                    m = re.search(r"[?&]page=(\d+)", href)
+                    if not m:
+                        continue
+                    n = int(m.group(1))
+                    if n > max_page:
+                        max_page = n
+                    if n == page_num + 1 and next_url is None:
+                        next_url = urljoin(page_url, href)
+                if next_url is None or page_num >= max_page:
+                    break
+                time.sleep(0.3)  # light politeness between index pages
+                page_url = next_url
+                page_num += 1
+
+            # Spine order = chapter number (page 1 lists the latest chapter first).
+            collected.sort(key=lambda t: self._chapter_num_of(t[0]))
+
+        else:
+            # Legacy single-page parse: ul.chapter-list li a OR a[href*=/chapter/]
+            anchors: List = []
+            chap_list = soup.select("ul.chapter-list li a[href]")
+            if chap_list:
+                anchors = list(chap_list)
+                # also consider fallback anchors not in list? spec says dedupe, so include both
+                # Add fallback anchors that are not already in chap_list
+                fallback = soup.select("a[href*='/chapter/']")
+                # deduplicate by href for this merge step (preserve order)
+                existing_hrefs = {a.get("href") for a in anchors}
+                for a in fallback:
+                    if a.get("href") not in existing_hrefs:
+                        anchors.append(a)
+            else:
+                anchors = soup.select("a[href*='/chapter/']")
+                # broader fallback if site uses different pattern
+                if not anchors:
+                    anchors = soup.select("a[href*='chapter']")
+
+            for a in anchors:
+                href = a.get("href")
+                if not href:
+                    continue
+                if href.strip().lower().startswith(("javascript:", "mailto:", "data:")):
+                    continue
+                abs_url = urljoin(url, href)
+                # normalize for dedupe: strip fragment, strip query for test stability, rstrip slash
+                normalized = abs_url.split("#")[0].split("?")[0].rstrip("/")
+                if normalized in seen:
+                    continue
+                title = a.get_text(strip=True)
+                # skip len<2 or generic CTA captions (case-insensitive)
+                if len(title) < 2:
+                    continue
+                if self._NOISE_TITLE_RE.match(title):
+                    continue
+                seen.add(normalized)
+                collected.append((normalized, title))
 
         if not collected:
             return []

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { t, getLocale, setLocale } from "./i18n";
-import { buildEpub, callSidecar, getStore, isEpubResult, type EpubResult } from "./lib/sidecar";
+import { buildEpub, callSidecar, isEpubResult, type EpubResult } from "./lib/sidecar";
 import FindInput from "./components/FindInput";
 import ResultsTable from "./components/ResultsTable";
 import ChapterList from "./components/ChapterList";
@@ -18,8 +18,6 @@ import { useFetcher } from "./hooks/useFetcher";
 
 export default function App(): JSX.Element {
   const [locale, setLocaleState] = useState(getLocale());
-  const [rpcStatus, setRpcStatus] = useState<string>("idle");
-  const [storePreview, setStorePreview] = useState<string>("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [filtersWindowOpen, setFiltersWindowOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -79,30 +77,6 @@ export default function App(): JSX.Element {
     }, 300);
     return () => window.clearTimeout(id);
   }, [selected, from, to, selectedUrl]);
-
-  useEffect(() => {
-    // Demo sidecar round-trip on mount (AD-4 spike)
-    callSidecar("hello", { from: "gui" })
-      .then((res) => {
-        setRpcStatus(JSON.stringify(res));
-      })
-      .catch((e) => setRpcStatus(`sidecar failed: ${(e as Error).message}`));
-
-    // Load store.json preview via core/config.py mirror (AD-10) — real getStore
-    getStore()
-      .then((res) => {
-        if (res.result && typeof res.result === "object") {
-          try {
-            setStorePreview(JSON.stringify(res.result));
-          } catch {
-            setStorePreview(String(res.result));
-          }
-        } else {
-          setStorePreview('{"voice":"pl-PL-ZofiaNeural","parallel":3}');
-        }
-      })
-      .catch(() => setStorePreview('{"voice":"pl-PL-ZofiaNeural","parallel":3}'));
-  }, []);
 
   // focus CTA when no-results appears for a11y — guard error to avoid focus jump on toast
   useEffect(() => {
@@ -483,60 +457,6 @@ export default function App(): JSX.Element {
         })()}
         <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
         <FiltersWindow open={filtersWindowOpen} onClose={() => setFiltersWindowOpen(false)} />
-
-        {/* Token demo card — keep per spec */}
-        <section className="rounded-lg border bg-card p-6 shadow-sm">
-          <h2 className="text-heading font-semibold">{t("tokens.title")}</h2>
-          <p className="text-body-sm text-muted-foreground">{t("tokens.hint")}</p>
-
-          <div className="mt-4 grid gap-4">
-            {/* Input demo — keep token demo */}
-            <input
-              placeholder={t("find.placeholder")}
-              className="h-11 rounded-md border border-input bg-card px-4 text-body placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-              readOnly
-              aria-hidden="true"
-              tabIndex={-1}
-            />
-
-            {/* Button accent demo */}
-            <div className="flex gap-2">
-              <button className="rounded-md bg-accent px-4 py-2 text-body font-medium text-accent-foreground hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ring">
-                {t("find.cta")}
-              </button>
-              <button className="rounded-md bg-primary px-4 py-2 text-body font-medium text-primary-foreground">
-                {t("tokens.buildEpub")}
-              </button>
-            </div>
-
-            {/* Pill / progress demo */}
-            <div className="rounded-full bg-muted px-3 py-1 text-body-sm w-fit">
-              {t("chapterList.selected", { count: 6, total: 142 })}
-            </div>
-            <div className="h-1.5 w-full rounded-full bg-muted">
-              <div className="h-full rounded-full bg-accent" style={{ width: "42%" }} />
-            </div>
-
-            {/* Mono sample */}
-            <pre className="mono rounded-md border bg-muted p-3 text-mono">
-              {t("tokens.monoSample")}
-              {"\n"}
-              {t("tokens.monoSample2")}
-            </pre>
-
-            {/* RPC / store preview */}
-            <div className="rounded-md border bg-muted p-3 text-body-sm">
-              <div>
-                <span className="font-semibold">{t("tokens.rpcLabel")}</span> {rpcStatus}
-              </div>
-              <div className="mono mt-1 text-mono">
-                {t("tokens.storePreview")} {storePreview}
-              </div>
-            </div>
-
-            <p className="text-body-sm text-muted-foreground">{t("tokens.windowNote")}</p>
-          </div>
-        </section>
 
         {/* Find surface — FindInput + ResultsTable per spec 1.3 */}
         <section className="mt-6 rounded-lg border bg-card p-6 shadow-sm">

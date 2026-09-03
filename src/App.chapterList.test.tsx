@@ -66,7 +66,6 @@ describe("App chapter-list integration", () => {
   it("selection persisted via getSelection / setSelection", async () => {
     // getSelection on mount should be called
     render(<App />);
-    await waitFor(() => expect(mockCallSidecar).toHaveBeenCalledWith("hello", expect.anything()));
     // getSelection is called on mount for selection persist
     // Since App now calls getSelection, verify it was invoked
     await waitFor(() => {

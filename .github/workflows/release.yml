@@ -75,8 +75,9 @@ jobs:
             Desktop app for Windows (Tauri + React GUI driving the Python core: EPUB build, Edge TTS, M4B with chapter markers).
 
             ### Assets
-            - **`speak-epub-setup.exe`** — NSIS installer
-            - **`speak-epub.msi`** — MSI installer
+            - **`Speak.EPUB_<version>_x64-setup.exe`** — NSIS installer
+            - **`Speak.EPUB_<version>_x64_en-US.msi`** — MSI installer
+            - **`Speak-EPUB-<version>-x64-portable.zip`** — portable build: unzip anywhere and run `speak-epub.exe`
             - Source code archive (auto-added by GitHub)
 
             ### Important — fully self-contained
@@ -87,3 +88,28 @@ jobs:
             ### Requirements for full functionality
             - **FFmpeg on PATH** for M4B/M4A merging (`winget install ffmpeg`)
             - Internet access for Edge TTS and novel-site fetching
+
+      - name: Build portable zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rel = 'src-tauri/target/release'
+          if (-not (Test-Path "$rel/speak-epub.exe")) { throw 'speak-epub.exe not found in target/release' }
+          $portable = 'portable/Speak-EPUB'
+          New-Item -ItemType Directory -Force -Path $portable | Out-Null
+          Copy-Item "$rel/speak-epub.exe" $portable
+          if (Test-Path "$rel/sidecar-runtime") {
+            Copy-Item "$rel/sidecar-runtime" $portable -Recurse
+          } elseif (Test-Path 'src-tauri/sidecar-runtime') {
+            Copy-Item 'src-tauri/sidecar-runtime' $portable -Recurse
+          } else {
+            throw 'sidecar-runtime not found for portable build'
+          }
+          $zip = "portable/Speak-EPUB-$($env:GITHUB_REF_NAME)-x64-portable.zip"
+          Compress-Archive -Path "$portable/*" -DestinationPath $zip -Force
+          Write-Host "Portable zip created: $zip"
+
+      - name: Upload portable zip to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ github.ref_name }} "portable/Speak-EPUB-$($env:GITHUB_REF_NAME)-x64-portable.zip" --clobber --repo ${{ github.repository }}

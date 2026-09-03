@@ -26,6 +26,11 @@ $EpubArg = $EpubPath
 
 $ErrorActionPreference = "Stop"
 
+# Force UTF-8 for the Python sidecar IO (Windows consoles default to cp1252,
+# which dies on non-ASCII chapter text with "'charmap' codec can't encode").
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
+
 function Write-Info($Message) {
     Write-Host $Message -ForegroundColor Cyan
 }
