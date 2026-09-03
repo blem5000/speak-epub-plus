@@ -8,6 +8,7 @@ import Preview from "./components/Preview";
 import Filters from "./components/Filters";
 import FiltersWindow from "./components/FiltersWindow";
 import Result from "./components/Result";
+import Audiobook from "./components/Audiobook";
 import Queue from "./components/Queue";
 import ThrottleBadge from "./components/ThrottleBadge";
 import ProgressTrack from "./components/ProgressTrack";
@@ -15,6 +16,8 @@ import Settings from "./components/Settings";
 import { useChapterList } from "./hooks/useChapterList";
 import { useDebouncedSearch } from "./hooks/useDebouncedSearch";
 import { useFetcher } from "./hooks/useFetcher";
+import { useGlobalKeys } from "./hooks/useGlobalKeys";
+import { selectedUrlsForFetch as urlsForFetch } from "./lib/selection";
 
 export default function App(): JSX.Element {
   const [locale, setLocaleState] = useState(getLocale());
@@ -180,6 +183,23 @@ export default function App(): JSX.Element {
   const handlePreview = (idx: number): void => {
     setPreviewIdx(idx);
   };
+  // Global keys: Esc closes topmost dialog first, else the app (see useGlobalKeys).
+  const closeTopModal = useCallback((): boolean => {
+    if (previewIdx != null) {
+      setPreviewIdx(null);
+      return true;
+    }
+    if (filtersWindowOpen) {
+      setFiltersWindowOpen(false);
+      return true;
+    }
+    if (settingsOpen) {
+      setSettingsOpen(false);
+      return true;
+    }
+    return false;
+  }, [previewIdx, filtersWindowOpen, settingsOpen]);
+  useGlobalKeys(closeTopModal);
   const previewChapter = previewIdx != null ? chapterList.find((c) => c.index === previewIdx) ?? null : null;
 
   const hasSelectedUrl = !!(selectedUrl && selectedUrl.trim());
@@ -203,6 +223,7 @@ export default function App(): JSX.Element {
     abort: abortFetcher,
     appendLogs,
     setStatuses,
+    setPartStatuses,
   } = useFetcher();
   const N = chapterList.length;
 
@@ -211,6 +232,8 @@ export default function App(): JSX.Element {
   const [epubBuilding, setEpubBuilding] = useState(false);
   const [epubError, setEpubError] = useState<string | null>(null);
   const [epubMissing, setEpubMissing] = useState<string[] | null>(null);
+  // Audiobook build (Step 7) — shares the fetcher event bus for part progress
+  const [audioBuilding, setAudioBuilding] = useState(false);
   const logPaneRef = useRef<HTMLDivElement>(null);
 
   // auto-scroll log pane when logs change (reuse queue logic) — preserve for Result pane, Queue handles its own
@@ -220,21 +243,12 @@ export default function App(): JSX.Element {
     }
   }, [logs]);
   const selectedUrlsForFetch = (() => {
-    if (selected.size > 0) {
-      return chapterList.filter((ch) => selected.has(ch.index)).map((ch) => ch.url);
-    }
-    if (N > 0) {
-      // fallback to from–to range
-      const a = Math.max(1, Math.min(from, N));
-      const b = Math.max(1, Math.min(to, N));
-      const lo = Math.min(a, b);
-      const hi = Math.max(a, b);
-      return chapterList.filter((ch) => ch.index >= lo && ch.index <= hi).map((ch) => ch.url);
-    }
-    return [];
+    // Shared helper (positional from–to, see lib/selection): checkbox
+    // selection wins, else the range — never silently empty for sparse lists.
+    return urlsForFetch(chapterList, selected, from, to);
   })();
   const handleStartFetch = (): void => {
-    if (!hasSelectedUrl || chapterLoading || N === 0 || fetching) return;
+    if (!hasSelectedUrl || chapterLoading || N === 0 || fetching || audioBuilding) return;
     const urls = selectedUrlsForFetch;
     if (urls.length === 0) return;
     void startFetcher({ urls, novelUrl: selectedUrl ?? undefined, from, to });
@@ -661,7 +675,7 @@ export default function App(): JSX.Element {
                 type="button"
                 data-testid="fetch-start"
                 onClick={handleStartFetch}
-                disabled={chapterLoading || N === 0 || fetching}
+                disabled={chapterLoading || N === 0 || fetching || audioBuilding}
                 className="rounded-md bg-accent px-4 py-2 text-body font-medium text-accent-foreground hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 {fetching ? "Pobieranie…" : `Start (${selectedUrlsForFetch.length})`}
@@ -709,6 +723,22 @@ export default function App(): JSX.Element {
             onBuild={() => void handleBuildEpub()}
             from={from}
             to={to}
+          />
+        </div>
+
+        {/* Audiobook — Step 7: MP3/M4B/M4A from the same fetched cache */}
+        <div className="mt-6">
+          <Audiobook
+            novelUrl={selectedUrl}
+            from={from}
+            to={to}
+            title={buildTitle}
+            urls={selectedUrlsForFetch}
+            canStart={!!(hasSelectedUrl && !chapterLoading && N > 0)}
+            fetching={fetching || epubBuilding}
+            progress={progress}
+            onClearParts={() => setPartStatuses({})}
+            onBuildingChange={setAudioBuilding}
           />
         </div>
 

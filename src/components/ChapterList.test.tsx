@@ -127,6 +127,35 @@ describe("ChapterList 1.4 - selection helpers", () => {
     expect(checked.length).toBe(142);
   });
 
+  it("type 50 without blur + click selects typed range (no stale props)", async () => {
+    render(<Harness initialFrom={1} initialTo={30} />);
+    const fromInput = screen.getByTestId("range-from") as HTMLInputElement;
+    // type without blurring — the Select button must use field values, not props
+    fireEvent.change(fromInput, { target: { value: "50" } });
+    fireEvent.click(screen.getByTestId("range-select"));
+    await waitFor(() => {
+      expect(screen.getByTestId("selected-label").textContent).toMatch(/21/);
+    });
+    const checks = screen.getAllByRole("checkbox") as HTMLInputElement[];
+    const checked = checks.filter((c) => c.checked);
+    // committed 50..30 → swap → 30..50 = 21 chapters
+    expect(checked.length).toBe(21);
+  });
+
+  it("type + Enter selects typed range without blur", async () => {
+    render(<Harness initialFrom={1} initialTo={30} />);
+    const toInput = screen.getByTestId("range-to") as HTMLInputElement;
+    fireEvent.change(toInput, { target: { value: "10" } });
+    fireEvent.keyDown(toInput, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(screen.getByTestId("selected-label").textContent).toMatch(/10/);
+    });
+    const checks = screen.getAllByRole("checkbox") as HTMLInputElement[];
+    const checked = checks.filter((c) => c.checked);
+    // committed 1..10 = 10 chapters (not stale 1..30)
+    expect(checked.length).toBe(10);
+  });
+
   it("Shift 10→40 bulk select adds range", async () => {
     const initialSel = new Set<number>();
     for (let i = 1; i <= 30; i++) initialSel.add(i);

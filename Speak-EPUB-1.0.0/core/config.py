@@ -291,6 +291,74 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {host_no_port}"}}
         except Exception as e:
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+        # Single-chapter shortcut: a pasted chapter URL (.../chapter-57 or
+        # .../chapter/57) returns a one-row list instead of the whole novel
+        # index. Title comes from a real fetchChapter (fast, single request).
+        m_chapter = re.search(r"/chapter[-/](\d+)(?:[/?#].*)?$", url, re.I)
+        if m_chapter:
+            try:
+                ch_num = int(m_chapter.group(1))
+            except (TypeError, ValueError):
+                ch_num = 0
+            if ch_num < 1:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "chapter number must be >= 1"}}
+            try:
+                import importlib as _il_ch
+
+                _mod_ch = _il_ch.import_module("adapters.novelphoenix")
+                ChapterAdapter = getattr(_mod_ch, "NovelPhoenixAdapter")
+            except Exception as e:
+                return {"id": rid, "error": {"code": "IMPORT_FAILED", "message": str(e)}}
+            # cache hit before network (chapter URL has its own normalized key)
+            ch_cache_key = _normalize_cache_key(url)
+            if ch_cache_key in _CHAPTER_CACHE:
+                cached_ch = _CHAPTER_CACHE[ch_cache_key]
+                if isinstance(cached_ch, list):
+                    return {"id": rid, "result": [dict(item) if isinstance(item, dict) else item for item in cached_ch]}
+            try:
+                chapter_adapter = ChapterAdapter()
+                # Via fetch_one (not adapter.fetchChapter directly) so the raw
+                # HTML lands in the fetch cache — otherwise a later buildEpub
+                # for this chapter fails with CACHE_MISS (offline gate).
+                _fetch_mod = _il_ch.import_module("core.fetch")
+                fetch_one_fn = getattr(_fetch_mod, "fetch_one")
+                cc = fetch_one_fn(url, chapter_adapter)
+                if cc is None or not hasattr(cc, "html"):
+                    return {"id": rid, "error": {"code": "LIST_FAILED", "message": "adapter returned non-list"}}
+                ch_title = getattr(cc, "title", "") or ""
+                if not isinstance(ch_title, str) or not ch_title.strip():
+                    ch_title = f"Chapter {ch_num}"
+                # page cover: prefer fetch_one result (works on cache hits too),
+                # fallback to the adapter attr (fresh fetches capture og:image)
+                ch_cover = None
+                try:
+                    ch_cover = getattr(cc, "cover_url", None)
+                    if not isinstance(ch_cover, str) or not ch_cover.strip():
+                        ch_cover = getattr(chapter_adapter, "_last_cover_url", None) or getattr(
+                            chapter_adapter, "last_cover_url", None
+                        )
+                    if not isinstance(ch_cover, str) or not ch_cover.strip():
+                        ch_cover = None
+                except Exception:
+                    ch_cover = None
+                single = [{"index": ch_num, "title": ch_title.strip(), "url": url, "cover_url": ch_cover}]
+                if len(_CHAPTER_CACHE) >= 20:
+                    try:
+                        _CHAPTER_CACHE.pop(next(iter(_CHAPTER_CACHE)))
+                    except Exception:
+                        pass
+                _CHAPTER_CACHE[ch_cache_key] = [dict(item) for item in single]
+                return {"id": rid, "result": [dict(item) for item in single]}
+            except ValueError as e:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+            except Exception as e:
+                code = getattr(e, "code", None)
+                if code in ("LIST_FAILED", "FETCH_FAILED") or "LIST_FAILED" in str(e) or "FETCH_FAILED" in str(e):
+                    return {"id": rid, "error": {"code": "LIST_FAILED", "message": str(e)}}
+                msg = str(e)
+                if re.search(r"\b(4\d\d|5\d\d)\b", msg) or "timeout" in msg.lower() or "5xx" in msg.lower():
+                    return {"id": rid, "error": {"code": "LIST_FAILED", "message": msg}}
+                return {"id": rid, "error": {"code": "EXCEPTION", "message": msg}}
         # Dynamic import NovelPhoenixAdapter (importlinter exception documented in module docstring)
         try:
             import importlib
@@ -1962,6 +2030,193 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             return {"id": rid, "result": {"exists": True, "path": str(latest), "size": size, "epubcheck_ok": ok, "messages": msgs}}
         except Exception as e:
             return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+    if method in ("buildAudio", "build_audio", "buildAudiobook"):
+        import re as _re_audio
+        from urllib.parse import urlparse as _up_audio
+
+        params = request.get("params") or {}
+        if not isinstance(params, dict):
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "params must be object"}}
+        novelUrl = params.get("novelUrl", params.get("novel_url", params.get("url", params.get("novel"))))
+        from_p = params.get("from", params.get("from_idx", params.get("fromIdx")))
+        to_p = params.get("to", params.get("to_idx", params.get("toIdx", params.get("end"))))
+        title_p = params.get("title")
+        outputDir_p = params.get("outputDir", params.get("output_dir", params.get("output")))
+        urls_p = params.get("urls", params.get("chapterUrls", params.get("chapter_urls")))
+        voice_p = params.get("voice", params.get("voiceName"))
+        parallel_p = params.get("parallel")
+        retries_p = params.get("retries")
+        chunk_p = params.get("chunkSize", params.get("chunk_size", params.get("chunk-size")))
+        format_p = params.get("format", params.get("ext", params.get("audioFormat")))
+        keep_parts_p = params.get("keepParts", params.get("keep_parts", False))
+
+        if isinstance(novelUrl, str):
+            novelUrl = novelUrl.strip()
+        if not isinstance(novelUrl, str) or not novelUrl:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must be non-empty"}}
+        if not _re_audio.match(r"^https?://", novelUrl, _re_audio.I):
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must be http(s)"}}
+        try:
+            parsed_audio = _up_audio(novelUrl)
+            host_audio = (parsed_audio.hostname or "").lower().rstrip(".")
+            if not host_audio:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must contain host"}}
+            if not (host_audio == "novelphoenix.com" or host_audio == "www.novelphoenix.com" or host_audio.endswith(".novelphoenix.com")):
+                return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {host_audio}"}}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+
+        if isinstance(outputDir_p, str):
+            outputDir_p = outputDir_p.strip() or None
+            if isinstance(outputDir_p, str) and outputDir_p and (".." in outputDir_p or "\0" in outputDir_p):
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "outputDir invalid"}}
+        elif outputDir_p is not None:
+            try:
+                outputDir_p = str(outputDir_p)
+            except Exception:
+                outputDir_p = None
+
+        # store-backed TTS defaults (Settings owns voice/parallel/chunk/retries)
+        try:
+            store_audio = load_store()
+        except Exception:
+            store_audio = {}
+        if not isinstance(voice_p, str) or not voice_p.strip():
+            try:
+                voice_p = str(store_audio.get("voice", "en-US-AndrewNeural"))
+            except Exception:
+                voice_p = "en-US-AndrewNeural"
+        if parallel_p is None:
+            parallel_p = store_audio.get("parallel", 3) if isinstance(store_audio, dict) else 3
+        if retries_p is None:
+            retries_p = store_audio.get("retries", 5) if isinstance(store_audio, dict) else 5
+        if chunk_p is None:
+            try:
+                chunk_p = (store_audio.get("chunk-size", 3500) if isinstance(store_audio, dict) else 3500)
+            except Exception:
+                chunk_p = 3500
+        try:
+            keep_parts_bool = bool(keep_parts_p) if not isinstance(keep_parts_p, str) else keep_parts_p.strip().lower() in ("1", "true", "yes")
+        except Exception:
+            keep_parts_bool = False
+
+        # normalize urls (same shape as buildEpub)
+        desired_urls_norm: List[str] | None = None
+        if isinstance(urls_p, (list, tuple)) and len(urls_p) > 0:
+            cleaned_urls: List[str] = []
+            for u in urls_p:  # type: ignore[union-attr]
+                if isinstance(u, str) and u.strip():
+                    cleaned_urls.append(u.strip())
+                elif isinstance(u, dict):
+                    uu = u.get("url") or u.get("link") or u.get("href")
+                    if isinstance(uu, str) and uu.strip():
+                        cleaned_urls.append(uu.strip())
+            try:
+                cleaned_urls = list(dict.fromkeys(cleaned_urls))
+            except Exception:
+                pass
+            if not cleaned_urls:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "urls empty after trim/dedup"}}
+            if len(cleaned_urls) > 1000:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "too many urls (max 1000)"}}
+            for u in cleaned_urls:
+                if not _re_audio.match(r"^https?://", u, _re_audio.I):
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"url must be http(s) {u}"}}
+            desired_urls_norm = cleaned_urls
+
+        # CACHE_MISS pre-check for explicit urls (fail fast with missing list)
+        if desired_urls_norm is not None:
+            try:
+                import importlib as _il_fetch_audio
+
+                _fmod_audio = _il_fetch_audio.import_module("core.fetch")
+                read_cache_audio = getattr(_fmod_audio, "read_cache")
+            except Exception as e:
+                return {"id": rid, "error": {"code": "IMPORT_FAILED", "message": str(e)}}
+            missing_audio: List[str] = []
+            for u in desired_urls_norm:
+                try:
+                    rc_audio = read_cache_audio(u)
+                except Exception:
+                    rc_audio = None
+                if rc_audio is None:
+                    missing_audio.append(u)
+            if missing_audio:
+                return {"id": rid, "error": {"code": "CACHE_MISS", "message": f"cache miss {len(missing_audio)}", "missing": missing_audio}}
+
+        try:
+            import importlib as _il_audio
+
+            _audio_mod = _il_audio.import_module("core.audio")
+            build_audio_fn = getattr(_audio_mod, "build_audio")
+        except Exception as e:
+            return {"id": rid, "error": {"code": "IMPORT_FAILED", "message": str(e)}}
+
+        def _emit_audio_part(payload: dict) -> None:
+            if emit_fn:
+                try:
+                    emit_fn("partStatus", payload)
+                except Exception:
+                    pass
+
+        def _emit_audio_log(line: str) -> None:
+            if emit_fn:
+                try:
+                    emit_fn("logLine", {"line": line})
+                except Exception:
+                    pass
+
+        def _emit_audio_progress(done: int, total: int) -> None:
+            if emit_fn:
+                try:
+                    emit_fn("logLine", {"line": f"progress: {done}/{total} TTS part job(s) complete"})
+                except Exception:
+                    pass
+
+        try:
+            result_audio = build_audio_fn(
+                novel_url=novelUrl,
+                from_idx=from_p,
+                to_idx=to_p,
+                title=title_p if isinstance(title_p, str) else None,
+                output_dir=outputDir_p or "output",
+                filters=None,
+                chapter_urls=desired_urls_norm,
+                voice=voice_p,
+                parallel=parallel_p,
+                retries=retries_p,
+                chunk_size=chunk_p,
+                audio_format=format_p or "m4b",
+                keep_parts=keep_parts_bool,
+                keep_mp3=None,
+                on_part_status=_emit_audio_part,
+                on_log=_emit_audio_log,
+                on_progress=_emit_audio_progress,
+            )
+            if emit_fn:
+                try:
+                    emit_fn("done", {"result": "ok"})
+                except Exception:
+                    pass
+            return {"id": rid, "result": result_audio}
+        except Exception as e:
+            code = getattr(e, "code", None)
+            if code == "CACHE_MISS":
+                missing_attr = getattr(e, "missing", None)
+                return {"id": rid, "error": {"code": "CACHE_MISS", "message": str(e), "missing": missing_attr if isinstance(missing_attr, list) else []}}
+            if isinstance(e, ValueError):
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+            if code == "LIST_FAILED":
+                return {"id": rid, "error": {"code": "LIST_FAILED", "message": str(e)}}
+            msg_audio = str(e)
+            if emit_fn:
+                try:
+                    emit_fn("logLine", {"line": f"error {msg_audio}"})
+                    emit_fn("done", {"error": msg_audio})
+                except Exception:
+                    pass
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": msg_audio}}
 
     if method in ("getStore", "get_store", "getConfig"):
         try:

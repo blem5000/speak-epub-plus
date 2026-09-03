@@ -72,15 +72,30 @@ fn resolve_sidecar_entry(app: &tauri::AppHandle) -> (PathBuf, Option<PathBuf>) {
         }
     }
 
-    // 2) Dev checkout — keep the legacy relative path (mirrors core/config.py:get_venv_python).
+    // 2) Dev checkout — resolve the repo venv no matter where the exe is
+    //    launched from (repo root, src-tauri/target/release, ...).
+    //    The venv ships speak-epub.pth, so `from core.config import ...`
+    //    resolves from any cwd once the right interpreter is found.
+    //    (Mirrors core/config.py:get_venv_python, made cwd-robust: a bare
+    //    relative path fails with "file not found" → SIDECAR_FAILED when the
+    //    exe is double-clicked outside the repo root.)
     #[cfg(target_os = "windows")]
-    {
-        (PathBuf::from("Speak-EPUB-1.0.0/venv/Scripts/python.exe"), None)
-    }
+    const DEV_VENV_REL: &str = "Speak-EPUB-1.0.0/venv/Scripts/python.exe";
     #[cfg(not(target_os = "windows"))]
-    {
-        (PathBuf::from("Speak-EPUB-1.0.0/venv/bin/python"), None)
+    const DEV_VENV_REL: &str = "Speak-EPUB-1.0.0/venv/bin/python";
+    let rel = PathBuf::from(DEV_VENV_REL);
+    if rel.is_file() {
+        return (rel, None);
     }
+    if let Ok(exe) = std::env::current_exe() {
+        for anc in exe.ancestors() {
+            let cand = anc.join(&rel);
+            if cand.is_file() {
+                return (cand, None);
+            }
+        }
+    }
+    (rel, None)
 }
 
 async fn spawn_and_call(
@@ -157,6 +172,13 @@ except Exception as e:
     // non-ASCII chapter text never dies with "'charmap' codec can't encode".
     cmd.env("PYTHONUTF8", "1");
     cmd.env("PYTHONIOENCODING", "utf-8");
+    // Never flash a console window: the sidecar spawns on every Find/fetch/
+    // EPUB/TTS call, and a popup per call is unacceptable in a GUI app.
+    // (tokio's Command provides creation_flags inherently on Windows.)
+    #[cfg(target_os = "windows")]
+    {
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -188,7 +210,16 @@ except Exception as e:
         if trimmed.is_empty() {
             continue;
         }
-        let val: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| e.to_string())?;
+        let val: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => {
+                // The Python pipeline also writes human-readable progress
+                // prints to stdout (TTS/fetch logs). A non-JSON line must
+                // never kill the call — ignore it and keep streaming.
+                eprintln!("sidecar noise ignored: {trimmed}");
+                continue;
+            }
+        };
         if val.get("event").is_some() {
             // forward event via app.emit
             if let Some(event) = val.get("event").and_then(|v| v.as_str()) {

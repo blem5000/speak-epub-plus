@@ -107,6 +107,19 @@ class TestCacheKey:
         read = read_cache(url, cache_dir=tmp_path)
         assert read == html
 
+    def test_read_write_cover_roundtrip(self, tmp_path):
+        from core.fetch import read_cover, write_cover, get_cover_path
+        url = "https://www.novelphoenix.com/novel/123/chapter/1"
+        assert read_cover(url, cache_dir=tmp_path) is None
+        write_cover(url, "https://www.novelphoenix.com/covers/1.jpg", cache_dir=tmp_path)
+        assert (tmp_path / cache_key(url) / "cover.txt").is_file()
+        assert read_cover(url, cache_dir=tmp_path) == "https://www.novelphoenix.com/covers/1.jpg"
+        # junk rejected, never raises
+        write_cover(url, "not a url", cache_dir=tmp_path)
+        assert read_cover(url, cache_dir=tmp_path) == "https://www.novelphoenix.com/covers/1.jpg"
+        write_cover(url, None, cache_dir=tmp_path)
+        assert get_cover_path(url, cache_dir=tmp_path).is_file()
+
     def test_polite_delay_range(self):
         # polite should be 3-5 + 0.2-0.6 => 3.2..5.6
         with patch("core.fetch.random.uniform") as mu:
@@ -222,6 +235,25 @@ class TestFetchOne:
         assert cc.html == "<div>new html</div>"
         assert read_cache(url, tmp_path) == "<div>new html</div>"
         adapter.fetchChapter.assert_called_once_with(url)
+
+    def test_fetch_one_miss_persists_cover_and_hit_returns_it(self, tmp_path):
+        from core.fetch import read_cover
+        url = "https://www.novelphoenix.com/novel/123/chapter/5"
+        adapter = Mock()
+        cc_fresh = _chapter_content(url, html="<div>fresh</div>", text="fresh")
+        object.__setattr__(cc_fresh, "cover_url", "https://www.novelphoenix.com/covers/5.jpg")
+        adapter.fetchChapter = Mock(return_value=cc_fresh)
+        adapter.getSelectors = Mock(return_value=Selectors(start="div", end=None))
+        with patch("core.fetch.time.sleep", return_value=None), patch("core.fetch.random.uniform", return_value=0.3):
+            cc = fetch_one(url, adapter, cache_dir=tmp_path)
+        assert cc.cover_url == "https://www.novelphoenix.com/covers/5.jpg"
+        assert read_cover(url, cache_dir=tmp_path) == "https://www.novelphoenix.com/covers/5.jpg"
+        # second call served from cache (no network) but keeps the cover
+        adapter.fetchChapter.reset_mock()
+        with patch("core.fetch.time.sleep", return_value=None), patch("core.fetch.random.uniform", return_value=0.3):
+            cc2 = fetch_one(url, adapter, cache_dir=tmp_path)
+        adapter.fetchChapter.assert_not_called()
+        assert cc2.cover_url == "https://www.novelphoenix.com/covers/5.jpg"
 
     def test_fetch_one_429_adaptive_safe(self, tmp_path):
         url = "https://www.novelphoenix.com/novel/123/chapter/42"

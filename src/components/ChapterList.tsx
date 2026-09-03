@@ -56,17 +56,15 @@ export default function ChapterList({
     }
   };
 
-  const handleSelectRange = (): void => {
+  const handleSelectRange = (rangeFrom: number, rangeTo: number): void => {
     if (N === 0) return;
-    // guard empty → no-op
-    if (from === undefined || to === undefined) return;
-    // non-numeric handled via rangeToSet returning empty
-    const set = rangeToSet(from, to, N);
+    // Use the explicitly committed field values (never stale parent props).
+    const set = rangeToSet(rangeFrom, rangeTo, N);
     if (set.size === 0) return;
     onSelectedChange(set);
     // update anchor to to after select? keep last range end
-    const clampedFrom = clamp(Number(from), 1, N);
-    const clampedTo = clamp(Number(to), 1, N);
+    const clampedFrom = clamp(Number(rangeFrom), 1, N);
+    const clampedTo = clamp(Number(rangeTo), 1, N);
     let a = clampedFrom;
     let b = clampedTo;
     if (a > b) [a, b] = [b, a];

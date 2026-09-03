@@ -83,6 +83,43 @@ def write_cache(url: str, html: str, cache_dir: Path | str | None = None) -> Pat
     tmp.replace(p)
     return p
 
+
+def get_cover_path(url: str, cache_dir: Path | str | None = None) -> Path:
+    """Return Path to _cache/<hash>/cover.txt for url (page cover, may be absent)."""
+    h = cache_key(url)
+    base = Path(cache_dir) if cache_dir is not None else CACHE_ROOT
+    return Path(base) / h / "cover.txt"
+
+
+def read_cover(url: str, cache_dir: Path | str | None = None) -> str | None:
+    """Read cached cover URL if present and sane, else None."""
+    p = get_cover_path(url, cache_dir)
+    if p.is_file():
+        try:
+            txt = p.read_text(encoding="utf-8").strip()
+            if txt and txt.lower().startswith(("http://", "https://")) and len(txt) <= 500:
+                return txt
+        except Exception:
+            pass
+    return None
+
+
+def write_cover(url: str, cover_url: str | None, cache_dir: Path | str | None = None) -> None:
+    """Persist cover URL next to raw.html (best-effort, never raises)."""
+    if not isinstance(cover_url, str) or not cover_url.strip():
+        return
+    cover_url = cover_url.strip()
+    if not cover_url.lower().startswith(("http://", "https://")) or len(cover_url) > 500:
+        return
+    try:
+        p = get_cover_path(url, cache_dir)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(cover_url, encoding="utf-8")
+        tmp.replace(p)
+    except Exception:
+        pass
+
 # ---------------------------------------------------------------------------
 # Politeness — delay tiers
 # ---------------------------------------------------------------------------
@@ -241,7 +278,8 @@ def fetch_one(
                 cleaned_html, cleaned_text = cached, ""
         except Exception:
             cleaned_html, cleaned_text = cached, ""
-        # title fallback (same as before)
+        # title fallback (same as before); cover comes from cover.txt —
+        # the cached fragment is cleaned html without <head>/og:image
         try:
             from bs4 import BeautifulSoup
 
@@ -250,6 +288,7 @@ def fetch_one(
             title = ttag.get_text(strip=True) if ttag else url
         except Exception:
             title = url
+        cover = None
         if not cleaned_text and on_log:
             try:
                 on_log(f"cache-hit isolation empty {url}")
@@ -257,7 +296,12 @@ def fetch_one(
                 pass
         from core.ports import ChapterContent
 
-        return ChapterContent(url=url, title=title or url, html=cleaned_html or cached, text=cleaned_text or "")
+        # cleaned cache has no <head>: recover the page cover persisted on miss
+        try:
+            cover_out = read_cover(url, cache_dir)
+        except Exception:
+            cover_out = None
+        return ChapterContent(url=url, title=title or url, html=cleaned_html or cached, text=cleaned_text or "", cover_url=cover_out)
 
     tier = "polite"
     # initial throttle emit polite
@@ -285,11 +329,13 @@ def fetch_one(
             if cc is None or not hasattr(cc, "html"):
                 raise ValueError("adapter returned non-list")
             # write cache raw.html (AD-2 raw never filtered); never cache a
-            # non-HTML repr — an empty html must not poison the cache
+            # non-HTML repr — an empty html must not poison the cache.
+            # Persist the page cover alongside so cache hits keep it.
             try:
                 html_to_cache = getattr(cc, "html", "") or ""
                 if html_to_cache:
                     write_cache(url, html_to_cache, cache_dir)
+                write_cover(url, getattr(cc, "cover_url", None), cache_dir)
             except Exception:
                 pass
             if on_status:
@@ -749,4 +795,4 @@ def fetch_many(
             pass
 
 # Compatibility aliases for import expectations
-__all__ = ["cache_key", "get_cache_path", "read_cache", "write_cache", "polite_delay", "_normalize_cache_key", "fetch_one", "fetch_many"]
+__all__ = ["cache_key", "get_cache_path", "read_cache", "write_cache", "get_cover_path", "read_cover", "write_cover", "polite_delay", "_normalize_cache_key", "fetch_one", "fetch_many"]

@@ -77,6 +77,9 @@ export function useChapterList(url: string | null): UseChapterListReturn {
     setLoading(true);
     setError(null);
 
+    // listChapters for a full novel index takes seconds (measured ~6s for
+    // 1215 chapters: index pagination + politeness delays) — 30s budget,
+    // well under the 60s Rust sidecar read timeout.
     let timeoutId: number | null = null;
     const timeoutPromise: Promise<never> =
       typeof window === "undefined"
@@ -85,7 +88,7 @@ export function useChapterList(url: string | null): UseChapterListReturn {
             timeoutId = window.setTimeout(() => {
               controller.abort();
               reject(new Error("timeout"));
-            }, 5000);
+            }, 30000);
           });
     // attach catch before race to avoid unhandled rejection if fetch wins early
     timeoutPromise.catch(() => {});

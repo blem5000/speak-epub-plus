@@ -140,6 +140,78 @@ class TestListChaptersRpc:
         assert res5["result"][0]["title"] == "Orig"
 
 
+    @patch("core.fetch.fetch_one")
+    @patch("adapters.novelphoenix.NovelPhoenixAdapter")
+    def test_chapter_dash_url_returns_single_chapter(self, MockAdapter, mock_fetch_one):
+        from core.ports import ChapterContent
+        mock_fetch_one.return_value = ChapterContent(
+            url="https://novelphoenix.com/novel/my-house-of-horrors/chapter-57",
+            title="My House of Horrors-Chapter 57",
+            html="<p>x</p>",
+            text="x",
+        )
+        res = handle_rpc({"id": "1", "method": "listChapters", "params": {"url": "https://novelphoenix.com/novel/my-house-of-horrors/chapter-57"}})
+        assert "result" in res, res
+        assert len(res["result"]) == 1
+        assert res["result"][0]["index"] == 57
+        assert res["result"][0]["title"] == "My House of Horrors-Chapter 57"
+        assert res["result"][0]["url"] == "https://novelphoenix.com/novel/my-house-of-horrors/chapter-57"
+        # full index must NOT be fetched for a chapter URL
+        MockAdapter.return_value.listChapters.assert_not_called()
+
+    @patch("core.fetch.fetch_one")
+    @patch("adapters.novelphoenix.NovelPhoenixAdapter")
+    def test_chapter_url_passes_cover(self, MockAdapter, mock_fetch_one):
+        from core.ports import ChapterContent
+        mock_fetch_one.return_value = ChapterContent(
+            url="https://novelphoenix.com/novel/x/chapter-3", title="T3", html="<p>x</p>", text="x"
+        )
+        MockAdapter.return_value._last_cover_url = "https://novelphoenix.com/covers/x.jpg"
+        res = handle_rpc({"id": "1", "method": "listChapters", "params": {"url": "https://novelphoenix.com/novel/x/chapter-3"}})
+        assert res["result"][0]["cover_url"] == "https://novelphoenix.com/covers/x.jpg"
+
+    @patch("core.fetch.fetch_one")
+    @patch("adapters.novelphoenix.NovelPhoenixAdapter")
+    def test_chapter_url_prefers_result_cover(self, MockAdapter, mock_fetch_one):
+        # cache-hit shape: cover travels on the ChapterContent itself
+        from core.ports import ChapterContent
+        mock_fetch_one.return_value = ChapterContent(
+            url="https://novelphoenix.com/novel/x/chapter-4",
+            title="T4",
+            html="<p>x</p>",
+            text="x",
+            cover_url="https://novelphoenix.com/covers/y.jpg",
+        )
+        MockAdapter.return_value._last_cover_url = None
+        res = handle_rpc({"id": "1", "method": "listChapters", "params": {"url": "https://novelphoenix.com/novel/x/chapter-4"}})
+        assert res["result"][0]["cover_url"] == "https://novelphoenix.com/covers/y.jpg"
+
+    @patch("core.fetch.fetch_one")
+    @patch("adapters.novelphoenix.NovelPhoenixAdapter")
+    def test_chapter_slash_variant_and_title_fallback(self, MockAdapter, mock_fetch_one):
+        from core.ports import ChapterContent
+        mock_fetch_one.return_value = ChapterContent(
+            url="https://www.novelphoenix.com/novel/123/chapter/7", title="", html="<p>x</p>", text="x"
+        )
+        res = handle_rpc({"id": "1", "method": "listChapters", "params": {"url": "https://www.novelphoenix.com/novel/123/chapter/7/"}})
+        assert "result" in res, res
+        assert len(res["result"]) == 1
+        assert res["result"][0]["index"] == 7
+        assert res["result"][0]["title"] == "Chapter 7"
+
+    @patch("core.fetch.fetch_one")
+    @patch("adapters.novelphoenix.NovelPhoenixAdapter")
+    def test_chapter_url_fetch_failure_maps_to_list_failed(self, MockAdapter, mock_fetch_one):
+        from core.ports import AdapterError
+        mock_fetch_one.side_effect = AdapterError("FETCH_FAILED: 404", code="FETCH_FAILED")
+        res = handle_rpc({"id": "1", "method": "listChapters", "params": {"url": "https://novelphoenix.com/novel/x/chapter-9"}})
+        assert res["error"]["code"] == "LIST_FAILED"
+
+    def test_chapter_zero_is_value_error(self):
+        res = handle_rpc({"id": "1", "method": "listChapters", "params": {"url": "https://novelphoenix.com/novel/x/chapter-0"}})
+        assert res["error"]["code"] == "VALUE_ERROR"
+
+
 class TestSelectionRpc:
     def test_get_set_selection_roundtrip(self, tmp_path, monkeypatch):
         # isolate store.json to tmp

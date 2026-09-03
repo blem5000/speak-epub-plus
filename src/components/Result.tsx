@@ -147,7 +147,16 @@ export default function Result({
       </div>
 
       {building ? (
-        <div className="mt-4 text-body-sm text-muted-foreground" data-testid="result-building">
+        <div
+          className="mt-4 flex items-center gap-2 text-body-sm text-muted-foreground"
+          data-testid="result-building"
+          role="status"
+          aria-live="polite"
+        >
+          <span
+            aria-hidden="true"
+            className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent"
+          />
           {t("result.building")}…
         </div>
       ) : null}

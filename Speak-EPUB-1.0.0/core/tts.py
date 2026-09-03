@@ -431,6 +431,18 @@ def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def subprocess_kwargs() -> dict:
+    """Extra subprocess kwargs shared by all ffmpeg/ffprobe calls.
+
+    On Windows, CREATE_NO_WINDOW so the GUI never flashes a console window
+    when merging chapters or probing durations (Rust side already spawns
+    the sidecar itself with CREATE_NO_WINDOW).
+    """
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
+
+
 def ffprobe_available() -> bool:
     return shutil.which("ffprobe") is not None
 
@@ -459,6 +471,7 @@ def concat_mp3_files(input_paths: List[str], output_path: str) -> None:
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            **subprocess_kwargs(),
         )
     finally:
         try:
@@ -487,6 +500,7 @@ def get_duration_ms(path: str) -> int:
             capture_output=True,
             text=True,
             timeout=15,
+            **subprocess_kwargs(),
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return 0
@@ -686,6 +700,7 @@ def build_m4b(output_dir: str, audio_entries: List[AudioEntry], book_title: str,
                 out_path,
             ],
             check=True,
+            **subprocess_kwargs(),
         )
     finally:
         try:
@@ -717,6 +732,7 @@ __all__ = [
     "run_part_jobs",
     "ffmpeg_available",
     "ffprobe_available",
+    "subprocess_kwargs",
     "concat_mp3_files",
     "get_duration_ms",
     "escape_ffmeta",

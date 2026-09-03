@@ -46,6 +46,7 @@ class ChapterContent:
     title: str
     html: str
     text: str
+    cover_url: Optional[str] = None
 
 
 class AdapterError(Exception):

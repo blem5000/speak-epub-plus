@@ -109,3 +109,28 @@ export function clampRange(from: unknown, to: unknown, total: number): [number, 
   if (a > b) [a, b] = [b, a];
   return [a, b];
 }
+
+/**
+ * URLs to fetch/build: explicit checkbox selection wins, otherwise the
+ * from–to range. The range counts 1-based POSITIONS in the loaded list, not
+ * chapter indices — a single-chapter list is [{index: 57}], so matching
+ * `ch.index >= from` would silently yield [] (Build EPUB dead click).
+ * Positional slice coincides with index matching for contiguous 1..N lists.
+ */
+export function selectedUrlsForFetch(
+  chapterList: Array<{ index: number; url: string }>,
+  selected: Set<number>,
+  from: number,
+  to: number
+): string[] {
+  if (selected.size > 0) {
+    return chapterList.filter((ch) => selected.has(ch.index)).map((ch) => ch.url);
+  }
+  const N = chapterList.length;
+  if (N === 0) return [];
+  const a = Number.isFinite(from) ? Math.trunc(from) : 1;
+  const b = Number.isFinite(to) ? Math.trunc(to) : N;
+  const lo = Math.max(1, Math.min(Number.isFinite(a) ? a : 1, N));
+  const hi = Math.max(1, Math.min(Number.isFinite(b) ? b : N, N));
+  return chapterList.slice(Math.min(lo, hi) - 1, Math.max(lo, hi)).map((ch) => ch.url);
+}

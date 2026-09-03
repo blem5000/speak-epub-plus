@@ -8,7 +8,9 @@ type RangeBarProps = {
   total: number;
   selectedCount: number;
   onChangeRange: (from: number, to: number) => void;
-  onSelectRange: () => void;
+  // Explicit committed range — never reads parent props, so type→Enter/click
+  // always uses what is in the fields (no stale-closure after typing).
+  onSelectRange: (from: number, to: number) => void;
   onClear: () => void;
 };
 
@@ -45,15 +47,30 @@ export default function RangeBar({
     setToStr(val);
   };
 
+  const commitFields = (): [number, number] | null => {
+    if (!N) return null;
+    const clamped = clampRange(fromStr === "" ? from : fromStr, toStr === "" ? to : toStr, N);
+    if (!clamped) return null;
+    const [a, b] = clamped;
+    onChangeRange(a, b);
+    setFromStr(String(a));
+    setToStr(String(b));
+    return [a, b];
+  };
+
+  const handleSelectClick = (): void => {
+    // Commit the visible fields first, then select exactly that range —
+    // parent props may still hold pre-typing values at this point.
+    const committed = commitFields();
+    if (!committed) return;
+    onSelectRange(committed[0], committed[1]);
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
     // P12: Enter confirms range like clicking Zaznacz — handle both inputs
     if (e.key === "Enter") {
       e.preventDefault();
-      if (typeof window === "undefined") return;
-      // clamp both fields (from or to) before select
-      handleFromBlur();
-      handleToBlur();
-      window.setTimeout(() => onSelectRange(), 0);
+      handleSelectClick();
     }
   };
 
@@ -147,7 +164,7 @@ export default function RangeBar({
         <button
           type="button"
           data-testid="range-select"
-          onClick={onSelectRange}
+          onClick={handleSelectClick}
           disabled={disabled}
           aria-disabled={disabled}
           className="rounded-md bg-accent px-4 py-2 text-body font-medium text-accent-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"

@@ -189,11 +189,14 @@ describe("FindInput + debounced search (spec 1.3)", () => {
     fireEvent.keyDown(rows[1], { key: "Enter", code: "Enter" });
     expect(onSelect).toHaveBeenCalledWith("https://www.novelphoenix.com/novel/456");
 
-    // Render selected state → check accent bg #EFF3FF and border-accent
+    // Render selected state → theme-aware accent tint (readable light + dark) and border-accent
     render(<ResultsTable results={results} selectedUrl={results[0].url} onSelect={onSelect} />);
     const selectedRow = screen.getAllByRole("button").find((r) => r.getAttribute("aria-selected") === "true");
     expect(selectedRow).toBeDefined();
-    expect(selectedRow?.className).toContain("bg-[#EFF3FF]");
+    expect(selectedRow?.className).toContain("bg-accent/15");
+    expect(selectedRow?.className).toContain("text-foreground");
+    expect(selectedRow?.className).toContain("border-accent");
+    expect(selectedRow?.className).toContain("border-l-2");
     expect(selectedRow?.className).toContain("border-accent");
     expect(selectedRow?.className).toContain("border-l-2");
   });

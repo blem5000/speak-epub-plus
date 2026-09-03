@@ -419,6 +419,89 @@ export async function getEpubStatus(
   return callSidecar("getEpubStatus", params, opts);
 }
 
+// Audiobook — Step 7: MP3/M4A/M4B via core/audio.py build_audio gate
+export type AudioParams = {
+  novelUrl: string;
+  from?: number | null;
+  to?: number | null;
+  title?: string | null;
+  urls?: string[];
+  voice?: string;
+  parallel?: number;
+  retries?: number;
+  chunkSize?: number;
+  format?: string;
+};
+export type AudioChapter = { number: number; title: string; path: string };
+export type AudioResult = {
+  audio_dir: string;
+  chapter_count: number;
+  part_count: number;
+  chapters: AudioChapter[];
+  audiobook: { path: string; size: number; format: string } | null;
+  format: string;
+  voice: string;
+  ffmpeg: boolean;
+  logs?: string[];
+  from?: number;
+  to?: number;
+  slug?: string;
+};
+
+export async function buildAudio(params: AudioParams, opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
+  if (!params.novelUrl || !params.novelUrl.trim()) throw new Error("url must be non-empty");
+  const novelUrl = params.novelUrl.trim();
+  if (!/^https?:\/\//i.test(novelUrl)) throw new Error("url must be http(s)");
+  const payload: Record<string, unknown> = { novelUrl };
+  if (params.from !== undefined && params.from !== null) payload.from = Math.trunc(Number(params.from));
+  if (params.to !== undefined && params.to !== null) payload.to = Math.trunc(Number(params.to));
+  if (params.title !== undefined && params.title !== null) {
+    payload.title = String(params.title).trim().slice(0, 200);
+  }
+  if (params.urls) {
+    if (!Array.isArray(params.urls)) throw new Error("urls must be array");
+    if (params.urls.length > 1000) throw new Error("too many urls");
+    if (!params.urls.every((u) => typeof u === "string")) throw new Error("urls must be strings");
+    const cleaned = params.urls.map((u) => u.trim()).filter(Boolean);
+    if (cleaned.length === 0) throw new Error("urls empty after trim");
+    payload.urls = cleaned;
+  }
+  if (params.voice !== undefined && params.voice !== null) {
+    const v = String(params.voice).trim();
+    if (!v) throw new Error("voice must be non-empty");
+    payload.voice = v.slice(0, 100);
+  }
+  if (params.parallel !== undefined && params.parallel !== null) payload.parallel = Math.trunc(Number(params.parallel));
+  if (params.retries !== undefined && params.retries !== null) payload.retries = Math.trunc(Number(params.retries));
+  if (params.chunkSize !== undefined && params.chunkSize !== null)
+    payload.chunkSize = Math.trunc(Number(params.chunkSize));
+  if (params.format !== undefined && params.format !== null) {
+    const f = String(params.format).trim().toLowerCase();
+    if (f !== "mp3" && f !== "m4b" && f !== "m4a") throw new Error("format must be mp3, m4b or m4a");
+    payload.format = f;
+  }
+  return callSidecar("buildAudio", payload, opts);
+}
+
+/** Open a file/folder via Tauri opener, with browser fallback. Shared by Result/Audiobook. */
+export async function openPath(path: string): Promise<void> {
+  if (!path || !path.trim()) return;
+  const p = path.trim();
+  try {
+    await invoke("plugin:opener|open_path", { path: p });
+    return;
+  } catch {
+    try {
+      await invoke("plugin:shell|open", { path: p });
+      return;
+    } catch {
+      try {
+        window.open(`file://${p}`, "_blank");
+      } catch {}
+    }
+  }
+}
+
 /**
  * Settings store helpers — mirrors `core/config.py:DEFAULT_STORE` via JSON-RPC.
  * AD-10 single source `store.json` via `core/config.py:load_store`/`save_store`.
@@ -472,8 +555,7 @@ export function isFiltersResult(res: RpcResponse): boolean {
   const r = res.result as Record<string, unknown>;
   return Array.isArray(r.filters);
 }
-export function isEpubResult(res: RpcResponse): boolean {
-  if (!res.result || typeof res.result !== "object") return false;
+export function isEpubResult(res: RpcResponse): boolean {  if (!res.result || typeof res.result !== "object") return false;
   const r = res.result as Record<string, unknown>;
   const hasPath = typeof r.path === "string";
   const hasSize = typeof r.size === "number";
@@ -485,4 +567,14 @@ export function isEpubResult(res: RpcResponse): boolean {
     typeof (r as Record<string, unknown>).chapterCount === "number";
   const hasMessages = Array.isArray(r.messages);
   return hasPath && hasSize && hasEpubCheck && hasCount && hasMessages;
+}
+export function isAudioResult(res: RpcResponse): boolean {
+  if (!res.result || typeof res.result !== "object") return false;
+  const r = res.result as Record<string, unknown>;
+  return (
+    typeof r.audio_dir === "string" &&
+    typeof r.chapter_count === "number" &&
+    Array.isArray(r.chapters) &&
+    typeof r.format === "string"
+  );
 }

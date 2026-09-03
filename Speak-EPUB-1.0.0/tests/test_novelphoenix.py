@@ -329,6 +329,21 @@ class TestFetchChapter:
             adapter.fetchChapter("https://www.novelphoenix.com/novel/123/chapter/999")
         assert exc.value.code in ("LIST_FAILED", "FETCH_FAILED")
 
+    @patch("adapters._http.requests.get")
+    @patch("adapters._http.time.sleep", return_value=None)
+    def test_fetchChapter_captures_cover(self, mock_sleep, mock_get):
+        html = (
+            '<html><head><meta property="og:image" content="/covers/123.jpg"/></head><body>'
+            "<h1>Chapter 1</h1>"
+            '<div id="chapter-content"><p>Text.</p></div>'
+            "</body></html>"
+        )
+        mock_get.return_value = _mock_response(html, url="https://www.novelphoenix.com/novel/123/chapter/1")
+        adapter = NovelPhoenixAdapter()
+        cc = adapter.fetchChapter("https://www.novelphoenix.com/novel/123/chapter/1")
+        assert adapter._last_cover_url == "https://www.novelphoenix.com/covers/123.jpg"
+        assert cc.cover_url == "https://www.novelphoenix.com/covers/123.jpg"
+
 
 # ------------------------------------------------------------------ getSelectors
 class TestSelectors:

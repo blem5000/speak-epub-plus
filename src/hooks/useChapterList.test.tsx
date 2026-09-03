@@ -90,11 +90,15 @@ describe("useChapterList hook", () => {
     expect(result.current.list).toEqual([]);
   });
 
-  it("5s timeout → LIST_FAILED", async () => {
+  it("30s timeout → LIST_FAILED (full novel index needs seconds)", async () => {
     mockedCall.mockImplementation(() => new Promise(() => {})); // never resolves
     const { result } = renderHook(() => useChapterList("https://www.novelphoenix.com/novel/123"));
     expect(result.current.loading).toBe(true);
+    // 5s (old budget) must NOT fire — a 1215-chapter index takes ~6s
     vi.advanceTimersByTime(5000);
+    expect(result.current.error).toBeNull();
+    expect(result.current.loading).toBe(true);
+    vi.advanceTimersByTime(25000);
     await waitFor(() => expect(result.current.error).toBe("LIST_FAILED"));
     expect(result.current.loading).toBe(false);
   });

@@ -12,3 +12,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn().mockResolvedValue(() => {}),
 }));
+
+// Mock @tauri-apps/api/window (useGlobalKeys: Esc closes app)
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: vi.fn(() => ({ close: vi.fn().mockResolvedValue(undefined) })),
+}));

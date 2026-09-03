@@ -23,6 +23,23 @@ from ._http import _get
 BASE = "https://www.novelphoenix.com"
 
 
+def _extract_cover(soup: BeautifulSoup, page_url: str) -> str | None:
+    """Cover via og:image fallback img.cover (shared by list/fetch paths)."""
+    cover_url = None
+    og = soup.select_one('meta[property="og:image"]')
+    if og is not None and og.get("content"):
+        content = og.get("content")
+        if content and content.strip():
+            cover_url = urljoin(page_url, content.strip())
+    if cover_url is None:
+        img_cover = soup.select_one("img.cover")
+        if img_cover is not None:
+            src = img_cover.get("src") or img_cover.get("data-src") or img_cover.get("data-original")
+            if src and src.strip() and not src.strip().lower().startswith("data:"):
+                cover_url = urljoin(page_url, src.strip())
+    return cover_url
+
+
 class NovelPhoenixAdapter(ScraperPort):
     """NovelPhoenix adapter — selectors + heuristic fallback owned by adapter (AD-5/AD-7)."""
 
@@ -162,19 +179,8 @@ class NovelPhoenixAdapter(ScraperPort):
 
         soup = BeautifulSoup(resp.text or "", "lxml")
 
-        # cover via og:image fallback img.cover
-        cover_url = None
-        og = soup.select_one('meta[property="og:image"]')
-        if og is not None and og.get("content"):
-            content = og.get("content")
-            if content and content.strip():
-                cover_url = urljoin(url, content.strip())
-        if cover_url is None:
-            img_cover = soup.select_one("img.cover")
-            if img_cover is not None:
-                src = img_cover.get("src") or img_cover.get("data-src") or img_cover.get("data-original")
-                if src and src.strip() and not src.strip().lower().startswith("data:"):
-                    cover_url = urljoin(url, src.strip())
+        # cover via og:image fallback img.cover (shared helper)
+        cover_url = _extract_cover(soup, url)
         # expose for test inspection and for future cover handling
         with self._lock:
             self._last_cover_url = cover_url
@@ -326,6 +332,16 @@ class NovelPhoenixAdapter(ScraperPort):
         raw_title = title_tag.get_text(strip=True) if title_tag else ""
         title = raw_title if raw_title else url
 
+        # remember page cover for single-chapter flows (same pattern as listChapters)
+        # and carry it on the DTO so fetch cache hits keep it too
+        page_cover: str | None = None
+        try:
+            page_cover = _extract_cover(soup, url)
+            with self._lock:
+                self._last_cover_url = page_cover
+        except Exception:
+            page_cover = None
+
         # delegate isolation to Core clean.py via dynamic import (AD-1 linter exception)
         try:
             import importlib as _il
@@ -393,7 +409,11 @@ class NovelPhoenixAdapter(ScraperPort):
                     text = body.get_text(separator=" ", strip=True)
                     text = re.sub(r"\s+", " ", text).strip()
 
-        return ChapterContent(url=url, title=title, html=html, text=text)
+        try:
+            cover_out = page_cover if isinstance(page_cover, str) and page_cover.strip() else None
+        except Exception:
+            cover_out = None
+        return ChapterContent(url=url, title=title, html=html, text=text, cover_url=cover_out)
 
     # --------------------------------------------------------------- getSelectors
     def getSelectors(self) -> Selectors:

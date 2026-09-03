@@ -35,9 +35,11 @@ function guessSiteForUrl(url: string): string {
 }
 
 function buildMockUrlResult(url: string): SearchResult {
-  // A pasted chapter URL (…/novel/<slug>/chapter-57) lists the whole novel.
-  const stripped = url.trim().replace(/\/chapter-\d+(?:[/?#].*)?$/i, "");
-  const trimmed = stripped || url.trim();
+  // Pass the pasted URL through untouched — including chapter URLs
+  // (…/novel/<slug>/chapter-57 or …/chapter/57). The sidecar decides:
+  // chapter URL → single-chapter row, novel URL → full index.
+  // (Stripping /chapter-N here would make single-chapter paste impossible.)
+  const trimmed = url.trim();
   const site = guessSiteForUrl(trimmed);
   let title = trimmed;
   try {

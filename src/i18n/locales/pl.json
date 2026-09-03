@@ -105,5 +105,19 @@
   "result.notBuilt": "Nie zbudowano",
   "result.chaptersCount": "{count} rozdziałów",
   "result.buildEpub": "Buduj EPUB",
-  "queue.cleaning": "Czyszczenie"
+  "queue.cleaning": "Czyszczenie",
+  "audio.title": "Audiobook",
+  "audio.format": "Format",
+  "audio.formatMP3": "Rozdziały MP3",
+  "audio.formatM4B": "Audiobook M4B",
+  "audio.formatM4A": "Audiobook M4A",
+  "audio.build": "Zbuduj audio",
+  "audio.building": "Generowanie audio…",
+  "audio.notBuilt": "Nie zbudowano",
+  "audio.summary": "Głos {voice} · {parallel} równolegle · fragment {chunk} (zmień w Ustawieniach)",
+  "audio.fetchFirst": "Najpierw pobierz rozdziały",
+  "audio.openFile": "Otwórz plik",
+  "audio.openFolder": "Otwórz folder",
+  "audio.chaptersCount": "{count} rozdziałów",
+  "audio.partsCount": "{count} fragmentów"
 }

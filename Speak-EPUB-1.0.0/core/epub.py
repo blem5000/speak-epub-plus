@@ -65,6 +65,11 @@ def run_epubcheck(epub_path: Path | str) -> Tuple[bool, List[str]]:
     messages: List[str] = []
     # Try epubcheck binary
     epubcheck_bin = shutil.which("epubcheck")
+    try:
+        from core.tts import subprocess_kwargs
+    except Exception:
+        def subprocess_kwargs():  # type: ignore[no-redef]
+            return {}
     if epubcheck_bin:
         try:
             result = subprocess.run(
@@ -72,6 +77,7 @@ def run_epubcheck(epub_path: Path | str) -> Tuple[bool, List[str]]:
                 capture_output=True,
                 text=True,
                 timeout=30,
+                **subprocess_kwargs(),
             )
             out = (result.stdout or "") + (result.stderr or "")
             lines = [l for l in out.splitlines() if l.strip()]
@@ -94,6 +100,7 @@ def run_epubcheck(epub_path: Path | str) -> Tuple[bool, List[str]]:
                         capture_output=True,
                         text=True,
                         timeout=30,
+                        **subprocess_kwargs(),
                     )
                     out = (result.stdout or "") + (result.stderr or "")
                     lines = [l for l in out.splitlines() if l.strip()]
@@ -145,6 +152,166 @@ def _atomic_write_epub(book, output_path: Path) -> None:
 
     epub_lib.write_epub(str(tmp), book)
     tmp.replace(output_path)
+
+
+# ---------------------------------------------------------------------------
+# Chapter image embedding — remote <img> becomes local items (Story 2.4 images).
+# AD-8: EPUB must be self-contained; remote http(s) images break offline
+# readers, so download + embed best-effort. Offline-safe: any failure keeps
+# the original remote URL and only logs.
+# ---------------------------------------------------------------------------
+
+_IMAGE_EXT_BY_CTYPE = {
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/svg+xml": "svg",
+    "image/bmp": "bmp",
+}
+
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+_MAX_IMAGES_PER_CHAPTER = 20
+
+
+def _download_image(url: str, timeout: float = 10.0):
+    """Download one image. Returns (data, ext) or None on any failure."""
+    try:
+        import requests
+    except Exception:
+        return None
+    try:
+        resp = requests.get(url, timeout=timeout, headers={"User-Agent": "SpeakEPUB/1.0"}, stream=True)
+    except Exception:
+        return None
+    try:
+        if resp.status_code != 200:
+            return None
+        ctype = (resp.headers.get("Content-Type", "") or "").lower().split(";")[0].strip()
+        ext = _IMAGE_EXT_BY_CTYPE.get(ctype)
+        if ext is None:
+            return None
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in resp.iter_content(256 * 1024):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > _MAX_IMAGE_BYTES:
+                return None
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        if not data:
+            return None
+        return data, ext
+    except Exception:
+        return None
+    finally:
+        try:
+            resp.close()
+        except Exception:
+            pass
+
+
+def embed_chapter_images(cleaned_html: str, page_url: str, chapter_idx: int, download=None, max_images: int = _MAX_IMAGES_PER_CHAPTER):
+    """Embed remote chapter <img> as local EPUB items.
+
+    - Only http(s) src (data: already embedded; relative resolved via page_url).
+    - On success rewrites src to images/chNNN_MM.ext and drops remote-only
+      srcset/sizes; on any failure the original src is kept.
+    - Never raises for bad images; returns (html, items, embedded, skipped)
+      where items are (uid, file_name, media_type, data) tuples for the caller
+      to add as EpubImage. `download` is injectable for tests.
+    """
+    items: List[Tuple[str, str, str, bytes]] = []
+    if not cleaned_html or not cleaned_html.strip():
+        return cleaned_html or "", items, 0, 0
+    try:
+        from bs4 import BeautifulSoup
+    except Exception:
+        return cleaned_html, items, 0, 0
+    try:
+        from urllib.parse import urljoin, urlparse
+    except Exception:
+        return cleaned_html, items, 0, 0
+
+    fetch = download or _download_image
+    try:
+        soup = BeautifulSoup(cleaned_html, "lxml")
+    except Exception:
+        return cleaned_html, items, 0, 0
+    body = soup.body if soup.body else soup
+    imgs = body.find_all("img")
+    if not imgs:
+        return cleaned_html, items, 0, 0
+
+    embedded = 0
+    skipped = 0
+    for img in imgs:
+        if embedded >= max_images:
+            break
+        try:
+            src = img.get("src") or ""
+        except Exception:
+            skipped += 1
+            continue
+        if not isinstance(src, str) or not src.strip():
+            skipped += 1
+            continue
+        src = src.strip()
+        if src.lower().startswith("data:"):
+            continue  # already embedded
+        try:
+            abs_url = urljoin(page_url, src)
+            scheme = urlparse(abs_url).scheme.lower()
+        except Exception:
+            skipped += 1
+            continue
+        if scheme not in ("http", "https"):
+            skipped += 1
+            continue
+        try:
+            got = fetch(abs_url)
+        except Exception:
+            got = None
+        if not got:
+            skipped += 1
+            continue
+        data, ext = got
+        if not data:
+            skipped += 1
+            continue
+        n = embedded + 1
+        uid = f"img_{chapter_idx:03d}_{n:02d}"
+        file_name = f"images/ch{chapter_idx:03d}_{n:02d}.{ext}"
+        subtype = {"jpg": "jpeg", "svg": "svg+xml"}.get(ext, ext)
+        media_type = f"image/{subtype}"
+        try:
+            img["src"] = file_name
+            # remote-only variant attributes must go (they point at remote files)
+            for attr in ("srcset", "sizes", "data-src", "data-original", "data-srcset"):
+                try:
+                    if attr in img.attrs:
+                        del img.attrs[attr]
+                except Exception:
+                    pass
+        except Exception:
+            skipped += 1
+            continue
+        items.append((uid, file_name, media_type, data))
+        embedded += 1
+
+    if not embedded:
+        return cleaned_html, items, 0, skipped
+    try:
+        if soup.body:
+            html = "".join(str(c) for c in soup.body.contents) if soup.body.contents else ""
+        else:
+            html = str(soup)
+    except Exception:
+        return cleaned_html, items, 0, skipped
+    return html, items, embedded, skipped
 
 
 # ---------------------------------------------------------------------------
@@ -509,6 +676,7 @@ def build_epub(
         raise ImportError(f"filters module missing: {e}") from e
 
     chapter_data: List[Tuple[str, str, str]] = []  # (title, html, text)
+    pending_images: List[Tuple[str, str, str, bytes]] = []  # (uid, file_name, media_type, data)
     for pos, url in enumerate(desired_urls):
         ch_num = from_i + pos
         logs.append(f"cleaning chapter {ch_num}")
@@ -551,6 +719,17 @@ def build_epub(
         if not filtered_html or not filtered_html.strip():
             # fallback to cleaned_text wrapped
             filtered_html = f"<p>{cleaned_text}</p>" if cleaned_text else "<p></p>"
+
+        # Embed remote chapter images so the EPUB works offline (failures keep remote URL)
+        try:
+            filtered_html, img_items, embedded, skipped = embed_chapter_images(filtered_html, url, ch_num)
+            if embedded:
+                logs.append(f"images embedded {embedded} chapter {ch_num}")
+                pending_images.extend(img_items)
+            if skipped:
+                logs.append(f"images skipped {skipped} chapter {ch_num}")
+        except Exception as e:
+            logs.append(f"image embed error chapter {ch_num}: {e}")
 
         # For EPUB XHTML, wrap in body? ebooklib expects HTML fragment
         # We'll keep filtered_html as fragment; epub.EpubHtml will wrap
@@ -639,6 +818,14 @@ def build_epub(
         logs.append("no cover")
         cover_messages.append("no cover")
 
+    # Embedded chapter images collected during cleaning (offline reading)
+    for uid, file_name, media_type, data in pending_images:
+        try:
+            img_item = epub_lib.EpubImage(uid=uid, file_name=file_name, media_type=media_type, content=data)
+            book.add_item(img_item)
+        except Exception as e:
+            logs.append(f"image add failed {file_name}: {e}")
+
     # Create chapter EpubHtml items
     epub_chapters: List[Any] = []
     for idx, (ch_title, ch_html, _ch_text) in enumerate(chapter_data, start=1):
@@ -711,4 +898,4 @@ def build_epub(
     return result
 
 
-__all__ = ["sanitize_filename", "run_epubcheck", "build_epub"]
+__all__ = ["sanitize_filename", "run_epubcheck", "build_epub", "embed_chapter_images"]

@@ -91,7 +91,8 @@ export default function ResultsTable({ results, selectedUrl, onSelect }: Results
                   className={
                     "cursor-pointer border-b last:border-b-0 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset " +
                     (isSelected
-                      ? "border-l-2 border-accent bg-[#EFF3FF] "
+                      // theme-aware tint (readable in light + dark); never a hardcoded near-white
+                      ? "border-l-2 border-accent bg-accent/15 text-foreground "
                       : "border-l-2 border-transparent hover:bg-muted ") +
                     " "
                   }
