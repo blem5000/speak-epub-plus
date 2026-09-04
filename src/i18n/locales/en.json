@@ -120,6 +120,7 @@
   "audio.elapsed": "{elapsed} elapsed",
   "audio.etaLeft": "≈ {remaining} left",
   "audio.merging": "Merging chapters {done}/{total}",
+  "audio.probing": "Probing audio files {done}/{total}",
   "audio.multiplex": "Building {format} file…",
   "audio.notBuilt": "Not built yet",
   "audio.summary": "Voice {voice} · {bitrate} · {parallel} parallel · chunk {chunk} (change in Settings)",

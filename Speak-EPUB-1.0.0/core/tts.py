@@ -684,6 +684,7 @@ def build_m4b(
     ext: str = "m4b",
     bitrate: str = "32k",
     on_progress: Optional[Callable[[int, int], None]] = None,
+    on_probe: Optional[Callable[[int, int], None]] = None,
 ) -> None:
     # defensive ext whitelist
     if ext not in ("m4b", "m4a"):
@@ -724,11 +725,17 @@ def build_m4b(
             f.write(";FFMETADATA1\n")
             f.write(f"title={escape_ffmeta(book_title)}\n\n")
             cursor = 0
-            for chapter_number, marker_title, path in audio_entries:
+            _probe_total = len(audio_entries)
+            for _probe_i, (chapter_number, marker_title, path) in enumerate(audio_entries, 1):
                 try:
                     duration = get_duration_ms(path)
                 except Exception:
                     duration = 0
+                if on_probe is not None:
+                    try:
+                        on_probe(_probe_i, _probe_total)
+                    except Exception:
+                        pass
                 # defensive marker_title handling
                 try:
                     marker_title_str = str(marker_title) if marker_title is not None else ""

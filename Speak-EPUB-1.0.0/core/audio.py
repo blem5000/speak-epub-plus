@@ -523,6 +523,7 @@ def build_audio(
                 fmt,
                 bitrate=bitrate,
                 on_progress=lambda d, t: _emit_phase("multiplex", d, t),
+                on_probe=lambda d, t: _emit_phase("probing", d, t),
             )
             out_path = audio_dir / f"{book_title}.{fmt}"
             if out_path.is_file():

@@ -276,4 +276,58 @@ describe("Audiobook — Step 7 MP3/M4B/M4A", () => {
       delete (globalThis as Record<string, unknown>).__mergeCb;
     }
   }, 30000);
+
+  it("multiplex phase shows byte-scale percent + remaining", async () => {
+    vi.useFakeTimers();
+    try {
+      mockBuildAudio.mockReturnValue(new Promise(() => {}));
+      mockOnMergeProgress.mockImplementation((cb: unknown) => {
+        (globalThis as Record<string, unknown>).__mergeCb = cb;
+        return Promise.resolve(() => {});
+      });
+      render(<Audiobook {...baseProps} progress={{ done: 9, total: 9, percent: 100 }} />);
+      fireEvent.click(screen.getByTestId("audio-build"));
+      const cb = (globalThis as Record<string, unknown>).__mergeCb as (p: unknown) => void;
+      const { act } = await import("@testing-library/react");
+      await act(async () => {
+        cb({ phase: "multiplex", done: 1048576, total: 2097152 });
+      });
+      await vi.advanceTimersByTimeAsync(31000);
+      const eta = screen.getByTestId("audio-eta").textContent ?? "";
+      // 31s elapsed at 50% → ≈31s left
+      expect(eta).toMatch(/50%/);
+      expect(eta).toMatch(/left|pozostało/);
+      expect(eta).toContain("31s");
+    } finally {
+      vi.useRealTimers();
+      delete (globalThis as Record<string, unknown>).__mergeCb;
+    }
+  }, 30000);
+
+  it("probing phase shows file counts with ETA", async () => {
+    vi.useFakeTimers();
+    try {
+      mockBuildAudio.mockReturnValue(new Promise(() => {}));
+      mockOnMergeProgress.mockImplementation((cb: unknown) => {
+        (globalThis as Record<string, unknown>).__mergeCb = cb;
+        return Promise.resolve(() => {});
+      });
+      render(<Audiobook {...baseProps} progress={{ done: 9, total: 9, percent: 100 }} />);
+      fireEvent.click(screen.getByTestId("audio-build"));
+      const cb = (globalThis as Record<string, unknown>).__mergeCb as (p: unknown) => void;
+      const { act } = await import("@testing-library/react");
+      await act(async () => {
+        cb({ phase: "probing", done: 150, total: 300 });
+      });
+      await vi.advanceTimersByTimeAsync(21000);
+      const eta = screen.getByTestId("audio-eta").textContent ?? "";
+      // 21s elapsed at 150/300 → ≈21s left
+      expect(eta).toMatch(/Probing audio files 150\/300|Sprawdzanie plików audio 150\/300/);
+      expect(eta).toMatch(/left|pozostało/);
+      expect(eta).toContain("21s");
+    } finally {
+      vi.useRealTimers();
+      delete (globalThis as Record<string, unknown>).__mergeCb;
+    }
+  }, 30000);
 });

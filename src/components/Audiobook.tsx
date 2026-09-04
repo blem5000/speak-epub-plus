@@ -133,11 +133,23 @@ export default function Audiobook({
   // Merge phase has its own clock (parts are done; chapters merge, then the
   // single-file multiplex runs indeterminately).
   const inMultiplex = building && merge?.phase === "multiplex";
-  const inMerge = building && !inMultiplex && merge != null && merge.total > 0;
+  const inProbing = building && !inMultiplex && merge?.phase === "probing";
+  const inMerge = building && !inMultiplex && !inProbing && merge != null && merge.total > 0;
   const mergeElapsedSec =
     mergeStartRef.current != null ? Math.max(0, Math.floor((now - mergeStartRef.current) / 1000)) : 0;
+  const mergeActive = inMerge || inProbing;
   const mergeRemainingSec =
-    inMerge && merge.done > 0 && mergeElapsedSec >= 2
+    mergeActive && merge != null && merge.done > 0 && mergeElapsedSec >= 2
+      ? Math.max(0, Math.round((mergeElapsedSec / merge.done) * (merge.total - merge.done)))
+      : null;
+  // Multiplex carries byte-scale progress (done/total bytes); the initial
+  // (0,1) heartbeat has total<=1 and stays indeterminate.
+  const multiplexPct =
+    inMultiplex && merge != null && merge.total > 1
+      ? Math.max(0, Math.min(100, Math.round((merge.done / merge.total) * 100)))
+      : null;
+  const multiplexRemainingSec =
+    multiplexPct !== null && merge != null && merge.done > 0 && mergeElapsedSec >= 2
       ? Math.max(0, Math.round((mergeElapsedSec / merge.done) * (merge.total - merge.done)))
       : null;
 
@@ -229,8 +241,14 @@ export default function Audiobook({
         >
           {building ? t("audio.building") : t("audio.build")}
         </button>
-        {building && !inMerge && !inMultiplex ? <ProgressTrack done={progress.done} total={progress.total} /> : null}
+        {building && !inMerge && !inMultiplex && !inProbing ? (
+          <ProgressTrack done={progress.done} total={progress.total} />
+        ) : null}
         {inMerge && merge ? <ProgressTrack done={merge.done} total={merge.total} /> : null}
+        {inProbing && merge ? <ProgressTrack done={merge.done} total={merge.total} /> : null}
+        {inMultiplex && merge && merge.total > 1 ? (
+          <ProgressTrack done={merge.done} total={merge.total} />
+        ) : null}
       </div>
 
       {building ? (
@@ -246,8 +264,20 @@ export default function Audiobook({
         <div className="mt-1 text-body-sm text-muted-foreground" data-testid="audio-eta" aria-live="polite">
           {inMultiplex ? (
             <>
-              {t("audio.multiplex", { format: format.toUpperCase() })} ·{" "}
-              {t("audio.elapsed", { elapsed: formatDuration(elapsedSec) })}
+              {t("audio.multiplex", { format: format.toUpperCase() })}
+              {multiplexPct !== null ? ` ${multiplexPct}%` : ""} ·{" "}
+              {t("audio.elapsed", { elapsed: formatDuration(mergeElapsedSec) })}
+              {multiplexRemainingSec !== null
+                ? ` · ${t("audio.etaLeft", { remaining: formatDuration(multiplexRemainingSec) })}`
+                : ""}
+            </>
+          ) : inProbing && merge ? (
+            <>
+              {t("audio.probing", { done: merge.done, total: merge.total })} ·{" "}
+              {t("audio.elapsed", { elapsed: formatDuration(mergeElapsedSec) })}
+              {mergeRemainingSec !== null && merge.done > 0
+                ? ` · ${t("audio.etaLeft", { remaining: formatDuration(mergeRemainingSec) })}`
+                : ""}
             </>
           ) : inMerge && merge ? (
             <>

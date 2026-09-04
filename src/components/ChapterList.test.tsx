@@ -140,6 +140,33 @@ describe("ChapterList 1.4 - selection helpers", () => {
     expect((screen.getByTestId("range-to") as HTMLInputElement).value).toBe("30");
   });
 
+  it("focusing a range field selects its content (no Ctrl+A needed)", async () => {
+    render(<Harness initialFrom={1} initialTo={30} />);
+    const fromInput = screen.getByTestId("range-from") as HTMLInputElement;
+    fireEvent.focus(fromInput);
+    expect(fromInput.selectionStart).toBe(0);
+    expect(fromInput.selectionEnd).toBe(fromInput.value.length);
+    expect(fromInput.value.length).toBeGreaterThan(0);
+    const toInput = screen.getByTestId("range-to") as HTMLInputElement;
+    fireEvent.focus(toInput);
+    expect(toInput.selectionStart).toBe(0);
+    expect(toInput.selectionEnd).toBe(toInput.value.length);
+  });
+
+  it("ArrowUp/Down steps the focused range field by 1", async () => {
+    render(<Harness initialFrom={30} initialTo={70} />);
+    const fromInput = screen.getByTestId("range-from") as HTMLInputElement;
+    fireEvent.keyDown(fromInput, { key: "ArrowUp", code: "ArrowUp" });
+    await waitFor(() => {
+      expect((screen.getByTestId("range-from") as HTMLInputElement).value).toBe("31");
+    });
+    fireEvent.keyDown(fromInput, { key: "ArrowDown", code: "ArrowDown" });
+    fireEvent.keyDown(fromInput, { key: "ArrowDown", code: "ArrowDown" });
+    await waitFor(() => {
+      expect((screen.getByTestId("range-from") as HTMLInputElement).value).toBe("29");
+    });
+  });
+
   it("type 50 without blur + click selects typed range (no stale props)", async () => {
     render(<Harness initialFrom={1} initialTo={30} />);
     const fromInput = screen.getByTestId("range-from") as HTMLInputElement;

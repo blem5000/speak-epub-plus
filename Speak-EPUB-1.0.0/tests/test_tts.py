@@ -1219,6 +1219,31 @@ def test_build_m4b_progress_poll_reports_size(tmp_path):
     assert seen[-1][0] <= seen[-1][1]
 
 
+def test_build_m4b_probe_reports_per_file(tmp_path):
+    from core.tts import build_m4b
+
+    out = tmp_path / "out_probe"
+    out.mkdir()
+    a = out / "001.mp3"
+    b = out / "002.mp3"
+    a.write_bytes(b"a")
+    b.write_bytes(b"b")
+    entries = [(1, "Ch1", str(a)), (2, "Ch2", str(b))]
+    probed = []
+
+    def fake_run(args, check=True, **kwargs):
+        (out / "book.m4b").write_bytes(b"z")
+        return MagicMock(returncode=0)
+
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.ffprobe_available", return_value=True):
+            with patch("core.tts.get_duration_ms", return_value=1000):
+                with patch("core.tts.subprocess.run", side_effect=fake_run):
+                    build_m4b(str(out), entries, "book", ext="m4b",
+                              on_probe=lambda d, t: probed.append((d, t)))
+    assert [(d, t) for d, t in probed] == [(1, 2), (2, 2)]
+
+
 def test_build_m4b_no_ffmpeg_skip(tmp_path, capsys):
     out = tmp_path / "out_nom4b"
     out.mkdir()

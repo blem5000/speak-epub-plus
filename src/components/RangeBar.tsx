@@ -47,6 +47,17 @@ export default function RangeBar({
     setToStr(val);
   };
 
+  const selectAllOnFocus = (e: React.FocusEvent<HTMLInputElement>): void => {
+    // Clicking/focusing a range field selects its content so typing replaces
+    // it immediately — no Ctrl+A needed. Subsequent clicks place the cursor
+    // normally (focus fires only on entry).
+    try {
+      e.target.select();
+    } catch {
+      // noop (jsdom without layout still supports select)
+    }
+  };
+
   const commitFields = (): [number, number] | null => {
     // Commit each field independently: clamp to 1..N but NEVER swap.
     // The user types lower-then-higher across two fields; rewriting what
@@ -84,11 +95,31 @@ export default function RangeBar({
     onSelectRange(committed[0], committed[1]);
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, kind: "from" | "to"): void => {
     // P12: Enter confirms range like clicking Zaznacz — handle both inputs
     if (e.key === "Enter") {
       e.preventDefault();
       handleSelectClick();
+      return;
+    }
+    // type="text" has no native spinner: ArrowUp/Down step by 1 and commit.
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      e.preventDefault();
+      if (!N) return;
+      const delta = e.key === "ArrowUp" ? 1 : -1;
+      const isFrom = kind === "from";
+      const raw = isFrom ? fromStr : toStr;
+      const fallback = isFrom ? from : to;
+      const base = raw === "" ? fallback : Number(raw);
+      if (!Number.isFinite(base)) return;
+      const v = clamp(Math.trunc(base) + delta, 1, N);
+      if (isFrom) {
+        setFromStr(String(v));
+        onChangeRange(v, to);
+      } else {
+        setToStr(String(v));
+        onChangeRange(from, v);
+      }
     }
   };
 
@@ -121,15 +152,15 @@ export default function RangeBar({
         <input
           id="range-from"
           data-testid="range-from"
-          type="number"
+          type="text"
           inputMode="numeric"
-          step={1}
-          min={1}
-          max={N || undefined}
+          pattern="[0-9]*"
+          autoComplete="off"
           value={fromStr}
           onChange={(e) => handleFromChange(e.target.value)}
           onBlur={handleFromBlur}
-          onKeyDown={handleKeyDown}
+          onFocus={selectAllOnFocus}
+          onKeyDown={(e) => handleKeyDown(e, "from")}
           disabled={disabled}
           aria-disabled={disabled}
           aria-invalid={fromInvalid || undefined}
@@ -143,15 +174,15 @@ export default function RangeBar({
         <input
           id="range-to"
           data-testid="range-to"
-          type="number"
+          type="text"
           inputMode="numeric"
-          step={1}
-          min={1}
-          max={N || undefined}
+          pattern="[0-9]*"
+          autoComplete="off"
           value={toStr}
           onChange={(e) => handleToChange(e.target.value)}
           onBlur={handleToBlur}
-          onKeyDown={handleKeyDown}
+          onFocus={selectAllOnFocus}
+          onKeyDown={(e) => handleKeyDown(e, "to")}
           disabled={disabled}
           aria-disabled={disabled}
           aria-invalid={toInvalid || undefined}

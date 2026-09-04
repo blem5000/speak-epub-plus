@@ -120,6 +120,7 @@
   "audio.elapsed": "minęło {elapsed}",
   "audio.etaLeft": "pozostało ≈ {remaining}",
   "audio.merging": "Scalanie rozdziałów {done}/{total}",
+  "audio.probing": "Sprawdzanie plików audio {done}/{total}",
   "audio.multiplex": "Budowanie pliku {format}…",
   "audio.notBuilt": "Nie zbudowano",
   "audio.summary": "Głos {voice} · {bitrate} · {parallel} równolegle · fragment {chunk} (zmień w Ustawieniach)",

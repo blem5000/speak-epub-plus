@@ -138,7 +138,7 @@ export type PartStatusEvent = {
   status: string;
 };
 export type MergeProgressEvent = {
-  phase: "merging" | "multiplex";
+  phase: "probing" | "merging" | "multiplex";
   done: number;
   total: number;
 };
