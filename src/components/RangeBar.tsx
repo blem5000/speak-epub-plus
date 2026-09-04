@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { t } from "@/i18n";
-import { clampRange } from "@/lib/selection";
+import { clamp } from "@/lib/selection";
 
 type RangeBarProps = {
   from: number;
@@ -48,21 +48,39 @@ export default function RangeBar({
   };
 
   const commitFields = (): [number, number] | null => {
+    // Commit each field independently: clamp to 1..N but NEVER swap.
+    // The user types lower-then-higher across two fields; rewriting what
+    // they just typed (93,30 → 30,93) is the bug. Order normalizes at
+    // selection time (rangeToSet / positional slice handle inversion).
     if (!N) return null;
-    const clamped = clampRange(fromStr === "" ? from : fromStr, toStr === "" ? to : toStr, N);
-    if (!clamped) return null;
-    const [a, b] = clamped;
+    const commitOne = (raw: string, fallback: number): number | null => {
+      if (raw === "") return fallback;
+      const n = Number(raw);
+      if (!Number.isFinite(n)) return null;
+      return clamp(n, 1, N);
+    };
+    const a = commitOne(fromStr, from);
+    const b = commitOne(toStr, to);
+    if (a === null || b === null) return null;
     onChangeRange(a, b);
     setFromStr(String(a));
     setToStr(String(b));
     return [a, b];
   };
 
+  const revertFields = (): void => {
+    setFromStr(String(from));
+    setToStr(String(to));
+  };
+
   const handleSelectClick = (): void => {
     // Commit the visible fields first, then select exactly that range —
     // parent props may still hold pre-typing values at this point.
     const committed = commitFields();
-    if (!committed) return;
+    if (!committed) {
+      revertFields();
+      return;
+    }
     onSelectRange(committed[0], committed[1]);
   };
 
@@ -76,36 +94,18 @@ export default function RangeBar({
 
   const handleFromBlur = (): void => {
     if (!N) {
-      setFromStr(String(from));
+      revertFields();
       return;
     }
-    const clamped = clampRange(fromStr === "" ? from : fromStr, toStr === "" ? to : toStr, N);
-    if (clamped) {
-      const [a, b] = clamped;
-      onChangeRange(a, b);
-      setFromStr(String(a));
-      setToStr(String(b));
-    } else {
-      setFromStr(String(from));
-      setToStr(String(to));
-    }
+    if (!commitFields()) revertFields();
   };
 
   const handleToBlur = (): void => {
     if (!N) {
-      setToStr(String(to));
+      revertFields();
       return;
     }
-    const clamped = clampRange(fromStr === "" ? from : fromStr, toStr === "" ? to : toStr, N);
-    if (clamped) {
-      const [a, b] = clamped;
-      onChangeRange(a, b);
-      setFromStr(String(a));
-      setToStr(String(b));
-    } else {
-      setFromStr(String(from));
-      setToStr(String(to));
-    }
+    if (!commitFields()) revertFields();
   };
 
   // aria-invalid when value out of bounds (empty while typing is not invalid)

@@ -150,15 +150,6 @@ export default function App(): JSX.Element {
     }
   }, [chapterList.length, chapterLoading]);
 
-  // P7: swap from/to if inverted after clamp (a>b) — separate tick to read updated values
-  useEffect(() => {
-    const N = chapterList.length;
-    if (N > 0 && from > to) {
-      setFrom(to);
-      setTo(from);
-    }
-  }, [from, to, chapterList.length]);
-
   useEffect(() => {
     return () => {
       if (retryTimeoutRef.current && typeof window !== "undefined") window.clearTimeout(retryTimeoutRef.current);

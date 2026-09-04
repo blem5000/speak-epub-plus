@@ -127,6 +127,19 @@ describe("ChapterList 1.4 - selection helpers", () => {
     expect(checked.length).toBe(142);
   });
 
+  it("typing From above To keeps user order on blur (no swap)", async () => {
+    render(<Harness initialFrom={1} initialTo={30} />);
+    const fromInput = screen.getByTestId("range-from") as HTMLInputElement;
+    // user replaces 1 with 92, intending to type the upper bound next
+    fireEvent.change(fromInput, { target: { value: "92" } });
+    fireEvent.blur(fromInput);
+    await waitFor(() => {
+      expect((screen.getByTestId("range-from") as HTMLInputElement).value).toBe("92");
+    });
+    // To untouched — must NOT become 92 with From rewritten to 30
+    expect((screen.getByTestId("range-to") as HTMLInputElement).value).toBe("30");
+  });
+
   it("type 50 without blur + click selects typed range (no stale props)", async () => {
     render(<Harness initialFrom={1} initialTo={30} />);
     const fromInput = screen.getByTestId("range-from") as HTMLInputElement;
