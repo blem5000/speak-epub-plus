@@ -117,6 +117,8 @@
   "audio.building": "Generating audio…",
   "audio.elapsed": "{elapsed} elapsed",
   "audio.etaLeft": "≈ {remaining} left",
+  "audio.merging": "Merging chapters {done}/{total}",
+  "audio.multiplex": "Building {format} file…",
   "audio.notBuilt": "Not built yet",
   "audio.summary": "Voice {voice} · {parallel} parallel · chunk {chunk} (change in Settings)",
   "audio.fetchFirst": "Fetch chapters first",

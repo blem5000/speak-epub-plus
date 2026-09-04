@@ -2175,6 +2175,13 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 except Exception:
                     pass
 
+        def _emit_audio_phase(payload: dict) -> None:
+            if emit_fn:
+                try:
+                    emit_fn("mergeProgress", payload)
+                except Exception:
+                    pass
+
         try:
             result_audio = build_audio_fn(
                 novel_url=novelUrl,
@@ -2194,6 +2201,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 on_part_status=_emit_audio_part,
                 on_log=_emit_audio_log,
                 on_progress=_emit_audio_progress,
+                on_phase=_emit_audio_phase,
             )
             if emit_fn:
                 try:

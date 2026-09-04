@@ -137,6 +137,11 @@ export type PartStatusEvent = {
   is_final_chapter_file: boolean;
   status: string;
 };
+export type MergeProgressEvent = {
+  phase: "merging" | "multiplex";
+  done: number;
+  total: number;
+};
 export type LogLineEvent = { line: string };
 export type ThrottleChangedEvent = { tier: string; delay: number };
 
@@ -174,6 +179,11 @@ export async function onPartStatus(
   cb: (payload: PartStatusEvent) => void
 ): Promise<UnlistenFn> {
   return listen<PartStatusEvent>("partStatus", (e) => cb(e.payload));
+}
+export async function onMergeProgress(
+  cb: (payload: MergeProgressEvent) => void
+): Promise<UnlistenFn> {
+  return listen<MergeProgressEvent>("mergeProgress", (e) => cb(e.payload));
 }
 export async function onLogLine(
   cb: (payload: LogLineEvent) => void

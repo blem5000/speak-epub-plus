@@ -168,6 +168,23 @@ class TestBuildAudio:
         assert any("boilerplate templates" in ln for ln in res["logs"])
 
 
+def test_merge_phase_events(tmp_path):
+    from core.audio import build_audio as _build_audio
+
+    _seed(tmp_path, CH1, "Chapter 1", "Short text one.")
+    _seed(tmp_path, CH2, "Chapter 2", "Short text two.")
+    phases: list = []
+    with patch("core.audio.run_part_jobs", side_effect=_fake_run):
+        _build_audio(
+            "https://www.novelphoenix.com/novel/123", from_idx=1, to_idx=2,
+            title="T", output_dir=tmp_path / "out", cache_dir=tmp_path,
+            chapter_urls=[CH1, CH2], audio_format="mp3",
+            on_phase=lambda p: phases.append(dict(p)),
+        )
+    merging = [p for p in phases if p.get("phase") == "merging"]
+    assert [(p["done"], p["total"]) for p in merging] == [(1, 2), (2, 2)]
+
+
 class TestBuildAudioRpc:
     def test_rpc_validation(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

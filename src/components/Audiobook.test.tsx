@@ -6,6 +6,7 @@ import Audiobook, { formatDuration } from "./Audiobook";
 const mockBuildAudio = vi.fn();
 const mockGetStore = vi.fn();
 const mockInvoke = vi.fn();
+const mockOnMergeProgress = vi.fn();
 
 vi.mock("@/lib/sidecar", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
@@ -13,6 +14,7 @@ vi.mock("@/lib/sidecar", async (importOriginal) => {
     ...actual,
     buildAudio: (...args: unknown[]) => mockBuildAudio(...args),
     getStore: (...args: unknown[]) => mockGetStore(...args),
+    onMergeProgress: (...args: unknown[]) => mockOnMergeProgress(...args),
   };
 });
 
@@ -221,6 +223,57 @@ describe("Audiobook — Step 7 MP3/M4B/M4A", () => {
       expect(eta).toContain("4m 20s");
     } finally {
       vi.useRealTimers();
+    }
+  }, 30000);
+
+  it("merge phase shows chapter progress with its own ETA", async () => {
+    vi.useFakeTimers();
+    try {
+      mockBuildAudio.mockReturnValue(new Promise(() => {}));
+      mockOnMergeProgress.mockImplementation((cb: unknown) => {
+        (globalThis as Record<string, unknown>).__mergeCb = cb;
+        return Promise.resolve(() => {});
+      });
+      render(<Audiobook {...baseProps} progress={{ done: 9, total: 9, percent: 100 }} />);
+      fireEvent.click(screen.getByTestId("audio-build"));
+      expect(screen.getByTestId("audio-building")).toBeInTheDocument();
+      const cb = (globalThis as Record<string, unknown>).__mergeCb as (p: unknown) => void;
+      const { act } = await import("@testing-library/react");
+      await act(async () => {
+        cb({ phase: "merging", done: 3, total: 10 });
+      });
+      await vi.advanceTimersByTimeAsync(31000);
+      const eta = screen.getByTestId("audio-eta").textContent ?? "";
+      // merge clock: 31s for 3/10 chapters → ≈72s left
+      expect(eta).toMatch(/Merging chapters 3\/10|Scalanie rozdziałów 3\/10/);
+      expect(eta).toContain("1m 12s");
+    } finally {
+      vi.useRealTimers();
+      delete (globalThis as Record<string, unknown>).__mergeCb;
+    }
+  }, 30000);
+
+  it("multiplex phase shows indeterminate building text", async () => {
+    vi.useFakeTimers();
+    try {
+      mockBuildAudio.mockReturnValue(new Promise(() => {}));
+      mockOnMergeProgress.mockImplementation((cb: unknown) => {
+        (globalThis as Record<string, unknown>).__mergeCb = cb;
+        return Promise.resolve(() => {});
+      });
+      render(<Audiobook {...baseProps} progress={{ done: 9, total: 9, percent: 100 }} />);
+      fireEvent.click(screen.getByTestId("audio-build"));
+      const cb = (globalThis as Record<string, unknown>).__mergeCb as (p: unknown) => void;
+      const { act } = await import("@testing-library/react");
+      await act(async () => {
+        cb({ phase: "multiplex", done: 0, total: 1 });
+      });
+      await vi.advanceTimersByTimeAsync(5000);
+      const eta = screen.getByTestId("audio-eta").textContent ?? "";
+      expect(eta).toMatch(/Building M4B|Budowanie pliku M4B/);
+    } finally {
+      vi.useRealTimers();
+      delete (globalThis as Record<string, unknown>).__mergeCb;
     }
   }, 30000);
 });

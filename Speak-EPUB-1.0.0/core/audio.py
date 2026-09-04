@@ -286,6 +286,7 @@ def build_audio(
     on_part_status: Optional[Callable[[dict], None]] = None,
     on_log: Optional[Callable[[str], None]] = None,
     on_progress: Optional[Callable[[int, int], None]] = None,
+    on_phase: Optional[Callable[[dict], None]] = None,
 ) -> Dict[str, Any]:
     """Build chapter MP3s + optional single-file audiobook from cached chapters.
 
@@ -425,6 +426,14 @@ def build_audio(
             except Exception:
                 pass
 
+    def _emit_phase(phase: str, done: int = 0, total: int = 0) -> None:
+        payload = {"phase": phase, "done": done, "total": total}
+        if on_phase:
+            try:
+                on_phase(payload)
+            except Exception:
+                pass
+
     # run_part_jobs is async; drive it on a private loop (sidecar-safe,
     # same pattern as the runTtsJobs RPC branch)
     async def _runner() -> None:
@@ -476,7 +485,11 @@ def build_audio(
             else:
                 raise
 
-        audio_entries = finalize_chapter_audio(plans, keep_parts=keep_parts)
+        audio_entries = finalize_chapter_audio(
+            plans,
+            keep_parts=keep_parts,
+            on_chapter=lambda d, t: _emit_phase("merging", d, t),
+        )
         if not audio_entries:
             raise RuntimeError("TTS produced no audio files")
 
@@ -487,7 +500,10 @@ def build_audio(
         audiobook: Optional[Dict[str, Any]] = None
         if fmt in ("m4b", "m4a"):
             book_title = f"{slug}_chapters_{from_i:03d}_to_{to_i:03d}"
+            _emit_phase("multiplex", 0, 1)
+            _emit_log(f"building {fmt.upper()} file...")
             build_m4b(str(audio_dir), audio_entries, book_title, fmt)
+            _emit_phase("multiplex", 1, 1)
             out_path = audio_dir / f"{book_title}.{fmt}"
             if out_path.is_file():
                 try:

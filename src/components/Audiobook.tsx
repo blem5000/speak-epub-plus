@@ -1,6 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { t } from "@/i18n";
-import { buildAudio, getStore, isAudioResult, openPath, revealPath, type AudioResult } from "@/lib/sidecar";
+import {
+  buildAudio,
+  getStore,
+  isAudioResult,
+  onMergeProgress,
+  openPath,
+  revealPath,
+  type AudioResult,
+  type MergeProgressEvent,
+} from "@/lib/sidecar";
 import ProgressTrack from "./ProgressTrack";
 
 type AudiobookProps = {
@@ -60,6 +69,8 @@ export default function Audiobook({
   const [toast, setToast] = useState<string | null>(null);
   const [now, setNow] = useState(0);
   const startRef = useRef<number | null>(null);
+  const [merge, setMerge] = useState<MergeProgressEvent | null>(null);
+  const mergeStartRef = useRef<number | null>(null);
 
   // Summary of TTS settings owned by Settings (voice/parallel/chunk).
   useEffect(() => {
@@ -92,10 +103,41 @@ export default function Audiobook({
     return () => window.clearInterval(id);
   }, [building]);
 
+  // Merge/multiplex phase events from the backend (per-chapter merges, M4B encode).
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    (async () => {
+      try {
+        unlisten = await onMergeProgress((payload) => {
+          if (cancelled) return;
+          setMerge({ ...payload });
+          if (mergeStartRef.current == null) mergeStartRef.current = Date.now();
+        });
+      } catch {
+        // ignore in jsdom where listen is mocked
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
   const elapsedSec = startRef.current != null ? Math.max(0, Math.floor((now - startRef.current) / 1000)) : 0;
   const remainingSec =
     building && progress.total > 0 && progress.done > 0 && elapsedSec >= 2
       ? Math.max(0, Math.round((elapsedSec / progress.done) * (progress.total - progress.done)))
+      : null;
+  // Merge phase has its own clock (parts are done; chapters merge, then the
+  // single-file multiplex runs indeterminately).
+  const inMultiplex = building && merge?.phase === "multiplex";
+  const inMerge = building && !inMultiplex && merge != null && merge.total > 0;
+  const mergeElapsedSec =
+    mergeStartRef.current != null ? Math.max(0, Math.floor((now - mergeStartRef.current) / 1000)) : 0;
+  const mergeRemainingSec =
+    inMerge && merge.done > 0 && mergeElapsedSec >= 2
+      ? Math.max(0, Math.round((mergeElapsedSec / merge.done) * (merge.total - merge.done)))
       : null;
 
   const canBuild = canStart && !fetching && !building && urls.length > 0;
@@ -104,6 +146,8 @@ export default function Audiobook({
     if (!canBuild || !novelUrl) return;
     onClearParts();
     startRef.current = Date.now();
+    mergeStartRef.current = null;
+    setMerge(null);
     setNow(Date.now());
     setBuilding(true);
     setError(null);
@@ -184,7 +228,8 @@ export default function Audiobook({
         >
           {building ? t("audio.building") : t("audio.build")}
         </button>
-        {building ? <ProgressTrack done={progress.done} total={progress.total} /> : null}
+        {building && !inMerge && !inMultiplex ? <ProgressTrack done={progress.done} total={progress.total} /> : null}
+        {inMerge && merge ? <ProgressTrack done={merge.done} total={merge.total} /> : null}
       </div>
 
       {building ? (
@@ -198,8 +243,25 @@ export default function Audiobook({
       ) : null}
       {building ? (
         <div className="mt-1 text-body-sm text-muted-foreground" data-testid="audio-eta" aria-live="polite">
-          {t("audio.elapsed", { elapsed: formatDuration(elapsedSec) })}
-          {remainingSec !== null ? ` · ${t("audio.etaLeft", { remaining: formatDuration(remainingSec) })}` : ""}
+          {inMultiplex ? (
+            <>
+              {t("audio.multiplex", { format: format.toUpperCase() })} ·{" "}
+              {t("audio.elapsed", { elapsed: formatDuration(elapsedSec) })}
+            </>
+          ) : inMerge && merge ? (
+            <>
+              {t("audio.merging", { done: merge.done, total: merge.total })} ·{" "}
+              {t("audio.elapsed", { elapsed: formatDuration(mergeElapsedSec) })}
+              {mergeRemainingSec !== null
+                ? ` · ${t("audio.etaLeft", { remaining: formatDuration(mergeRemainingSec) })}`
+                : ""}
+            </>
+          ) : (
+            <>
+              {t("audio.elapsed", { elapsed: formatDuration(elapsedSec) })}
+              {remainingSec !== null ? ` · ${t("audio.etaLeft", { remaining: formatDuration(remainingSec) })}` : ""}
+            </>
+          )}
         </div>
       ) : null}
 

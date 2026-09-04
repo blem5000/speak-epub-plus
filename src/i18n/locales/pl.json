@@ -117,6 +117,8 @@
   "audio.building": "Generowanie audio…",
   "audio.elapsed": "minęło {elapsed}",
   "audio.etaLeft": "pozostało ≈ {remaining}",
+  "audio.merging": "Scalanie rozdziałów {done}/{total}",
+  "audio.multiplex": "Budowanie pliku {format}…",
   "audio.notBuilt": "Nie zbudowano",
   "audio.summary": "Głos {voice} · {parallel} równolegle · fragment {chunk} (zmień w Ustawieniach)",
   "audio.fetchFirst": "Najpierw pobierz rozdziały",

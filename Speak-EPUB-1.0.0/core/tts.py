@@ -23,7 +23,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 Chapter = Tuple[int, str, str]
 AudioEntry = Tuple[int, str, str]
@@ -524,14 +524,36 @@ def escape_ffmeta(s: str) -> str:
     return re.sub(r"([=;#\\])", r"\\\1", s).replace("\r", "\\r").replace("\n", "\\n")
 
 
-def finalize_chapter_audio(plans: List[ChapterPlan], keep_parts: bool) -> List[AudioEntry]:
+def finalize_chapter_audio(
+    plans: List[ChapterPlan],
+    keep_parts: bool,
+    on_chapter: Optional[Callable[[int, int], None]] = None,
+) -> List[AudioEntry]:
+    """Merge part files into per-chapter MP3s (or keep parts without ffmpeg).
+
+    `on_chapter(done, total)` fires once per plan (all exit paths) so long
+    batch jobs can show merge progress. Optional — CLI/tests omit it.
+    """
     audio_entries: List[AudioEntry] = []
     has_ffmpeg = ffmpeg_available()
 
     print("\nFinalizing chapter files...")
 
+    _total_plans = len(plans)
+    _done_plans = 0
+
+    def _emit_chapter() -> None:
+        nonlocal _done_plans
+        _done_plans += 1
+        if on_chapter is not None:
+            try:
+                on_chapter(_done_plans, _total_plans)
+            except Exception:
+                pass
+
     for plan in plans:
         if not plan.part_paths:
+            _emit_chapter()
             continue
 
         # Single-chunk chapter.
@@ -547,6 +569,7 @@ def finalize_chapter_audio(plans: List[ChapterPlan], keep_parts: bool) -> List[A
                     print(f"Warning: missing chapter MP3: {plan.chapter_mp3}")
             except OSError:
                 print(f"Warning: missing chapter MP3: {plan.chapter_mp3}")
+            _emit_chapter()
             continue
 
         # Multi-part chapter.
@@ -559,6 +582,7 @@ def finalize_chapter_audio(plans: List[ChapterPlan], keep_parts: bool) -> List[A
                     audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
                     size_kb = size // 1024
                     print(f"Chapter {plan.chapter_number:03d}: existing merged file reused ({size_kb} KB)")
+                    _emit_chapter()
                     continue
             except OSError:
                 pass
@@ -572,6 +596,7 @@ def finalize_chapter_audio(plans: List[ChapterPlan], keep_parts: bool) -> List[A
                         audio_entries.append(entry)
                 except Exception:
                     continue
+            _emit_chapter()
             continue
 
         if has_ffmpeg:
@@ -610,6 +635,7 @@ def finalize_chapter_audio(plans: List[ChapterPlan], keep_parts: bool) -> List[A
                 except Exception:
                     continue
             # fallback: if marker entries contain missing paths, already filtered; extend only existing
+        _emit_chapter()
     # Try to remove empty _parts folder (exact name match).
     if not keep_parts:
         part_dirs = sorted({str(Path(p).parent) for plan in plans for p in plan.part_paths if Path(p).parent.name == "_parts"})
