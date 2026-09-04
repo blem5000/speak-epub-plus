@@ -205,6 +205,15 @@ export default function Audiobook({
 
       {!building && result ? (
         <div className="mt-4 space-y-3" data-testid="audio-result">
+          {result.format !== "mp3" && !result.audiobook && !result.ffmpeg ? (
+            <div
+              role="alert"
+              data-testid="audio-ffmpeg-warning"
+              className="rounded-md border border-warning/20 bg-warning/10 px-3 py-2 text-body-sm text-warning-foreground"
+            >
+              {t("ffmpeg.missing")}
+            </div>
+          ) : null}
           <div className="flex flex-wrap items-center gap-3 text-body-sm">
             <span data-testid="audio-chapters" className="rounded-full bg-muted px-3 py-1">
               {t("audio.chaptersCount", { count: result.chapter_count })}

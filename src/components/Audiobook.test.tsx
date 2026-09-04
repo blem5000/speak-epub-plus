@@ -121,6 +121,53 @@ describe("Audiobook — Step 7 MP3/M4B/M4A", () => {
     expect(err).toContain("https://x/chapter/9");
   });
 
+  it("m4b without ffmpeg shows missing-ffmpeg warning, no file button", async () => {
+    const user = userEvent.setup();
+    mockBuildAudio.mockResolvedValue({
+      id: "1",
+      result: {
+        audio_dir: "output/Book_audiobook",
+        chapter_count: 1,
+        part_count: 2,
+        chapters: [{ number: 1, title: "Chapter 1", path: "output/Book_audiobook/_parts/001_C_part001.mp3" }],
+        audiobook: null,
+        format: "m4b",
+        voice: "en-US-AndrewNeural",
+        ffmpeg: false,
+      },
+    });
+    render(<Audiobook {...baseProps} />);
+    await user.click(screen.getByTestId("audio-build"));
+    await waitFor(() => {
+      expect(screen.getByTestId("audio-ffmpeg-warning")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("audio-open")).not.toBeInTheDocument();
+    expect(screen.getByTestId("audio-open-folder")).toBeInTheDocument();
+  });
+
+  it("m4b with ffmpeg and no audiobook shows no ffmpeg warning", async () => {
+    const user = userEvent.setup();
+    mockBuildAudio.mockResolvedValue({
+      id: "1",
+      result: {
+        audio_dir: "output/Book_audiobook",
+        chapter_count: 1,
+        part_count: 2,
+        chapters: [],
+        audiobook: null,
+        format: "m4b",
+        voice: "en-US-AndrewNeural",
+        ffmpeg: true,
+      },
+    });
+    render(<Audiobook {...baseProps} />);
+    await user.click(screen.getByTestId("audio-build"));
+    await waitFor(() => {
+      expect(screen.getByTestId("audio-result")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("audio-ffmpeg-warning")).not.toBeInTheDocument();
+  });
+
   it("mp3 result shows open folder button", async () => {
     const user = userEvent.setup();
     mockBuildAudio.mockResolvedValue({
