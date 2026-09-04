@@ -40,6 +40,42 @@ def sanitize_filename(value: str, fallback: str = "chapter", max_len: int = 60) 
     return safe
 
 
+def _list_title_map(novel_url: str) -> Dict[str, str]:
+    """Normalized chapter-url -> chapter-list title from _CHAPTER_CACHE.
+
+    Best-effort (empty when the list was never fetched in this process).
+    Dynamic config import keeps the AD-1 static contract green.
+    """
+    try:
+        import importlib as _il_tm
+
+        _cfg = _il_tm.import_module("core.config")
+        norm = getattr(_cfg, "_normalize_cache_key")
+        cache = getattr(_cfg, "_CHAPTER_CACHE", {})
+        entries = cache.get(norm(novel_url), []) or []
+        out: Dict[str, str] = {}
+        for item in entries:
+            try:
+                if isinstance(item, dict):
+                    u, t = item.get("url") or item.get("link"), item.get("title")
+                else:
+                    u, t = getattr(item, "url", None), getattr(item, "title", None)
+                if u and t and isinstance(t, str) and t.strip():
+                    out[str(u).strip().rstrip("/")] = t.strip()[:200]
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return {}
+
+
+def _list_title_for_url(title_map: Dict[str, str], url: str) -> str:
+    try:
+        return title_map.get(str(url).strip().rstrip("/"), "")
+    except Exception:
+        return ""
+
+
 def _slug_from_title(title: str | None, fallback: str = "book") -> str:
     """Slug for epub filename, max 60 chars, fallback."""
     if not title or not isinstance(title, str) or not title.strip():
@@ -332,6 +368,7 @@ def build_epub(
     start_selector: str | None = None,
     end_selector: str | None = None,
     extra_params: Dict[str, Any] | None = None,
+    auto_boilerplate: bool | None = None,
 ) -> Dict[str, Any]:
     """
     Build validated EPUB offline from cached raw.html.
@@ -452,6 +489,15 @@ def build_epub(
             # fallback: keep as is if sanitize fails
             pass
 
+    # Auto-boilerplate toggle (recurring head/tail lines across chapters).
+    # None reads store.json (default on); explicit bool wins (tests, CLI).
+    if auto_boilerplate is None:
+        try:
+            cfg_mod_ab = importlib.import_module("core.config")
+            auto_boilerplate = bool(getattr(cfg_mod_ab, "load_store")().get("autoBoilerplate", True))
+        except Exception:
+            auto_boilerplate = True
+
     # Resolve output dir
     if output_dir is None or (isinstance(output_dir, str) and not output_dir.strip()):
         # canonical fallback: ./output under repo root if not supplied
@@ -460,6 +506,12 @@ def build_epub(
     else:
         out_base = Path(output_dir)
     out_base = Path(out_base)
+    # Absolute paths: the GUI opener scope + file:// fallback need them
+    # (relative paths silently fail to open). Display shows the full path.
+    try:
+        out_base = out_base.resolve()
+    except Exception:
+        pass
     # If output_dir is file-like? ensure directory
     # out_base is directory for epub file
 
@@ -677,6 +729,13 @@ def build_epub(
 
     chapter_data: List[Tuple[str, str, str]] = []  # (title, html, text)
     pending_images: List[Tuple[str, str, str, bytes]] = []  # (uid, file_name, media_type, data)
+    block_lines_list: List[List[str]] = []  # block lines per chapter for boilerplate detection
+    _tlm = _list_title_map(novel_url)
+    try:
+        _blk_mod = importlib.import_module("core.filters")
+        _block_lines_fn = getattr(_blk_mod, "html_to_block_lines")
+    except Exception:
+        _block_lines_fn = None
     for pos, url in enumerate(desired_urls):
         ch_num = from_i + pos
         logs.append(f"cleaning chapter {ch_num}")
@@ -685,18 +744,18 @@ def build_epub(
         if raw_html is None:
             # should have been caught earlier
             raise FileNotFoundError(f"cache miss chapter {ch_num}")
-        # Extract title from raw html naive? Use soup h1/h2/h3 or fallback to url
-        try:
-            from bs4 import BeautifulSoup
+        # Extract title, best source first:
+        # 1. in-content linkless heading ("Chapter 30: The Eighth Person") —
+        #    skips linked site headers (<a> booktitle). 2. chapter-list title
+        #    from _CHAPTER_CACHE. 3. raw page h1. 4. "Chapter N" fallback.
+        from bs4 import BeautifulSoup
 
+        try:
             soup_tmp = BeautifulSoup(raw_html, "lxml")
             h = soup_tmp.find(["h1", "h2", "h3"])
-            ch_title = h.get_text(strip=True) if h else f"Chapter {ch_num}"
-            if not ch_title or not ch_title.strip():
-                ch_title = f"Chapter {ch_num}"
-            ch_title = ch_title.strip()[:200]
+            raw_title = h.get_text(strip=True) if h else ""
         except Exception:
-            ch_title = f"Chapter {ch_num}"
+            raw_title = ""
 
         # clean
         try:
@@ -704,6 +763,26 @@ def build_epub(
         except ValueError as ve:
             # invalid selector -> propagate as VALUE_ERROR
             raise ValueError(f"invalid selector: {ve}") from ve
+
+        in_title = ""
+        try:
+            soup_clean = BeautifulSoup(cleaned_html, "lxml")
+            for _hh in soup_clean.find_all(["h1", "h2", "h3", "h4"]):
+                try:
+                    if _hh.find(["a", "button", "select"]):
+                        continue
+                    _t = _hh.get_text(strip=True)
+                except Exception:
+                    continue
+                if _t and _t.strip():
+                    in_title = _t.strip()
+                    break
+        except Exception:
+            in_title = ""
+        list_title = _list_title_for_url(_tlm, url)
+        ch_title = (in_title or list_title or raw_title or f"Chapter {ch_num}").strip()[:200]
+        if not ch_title:
+            ch_title = f"Chapter {ch_num}"
 
         # filter once
         try:
@@ -734,7 +813,44 @@ def build_epub(
         # For EPUB XHTML, wrap in body? ebooklib expects HTML fragment
         # We'll keep filtered_html as fragment; epub.EpubHtml will wrap
         chapter_data.append((ch_title, filtered_html, cleaned_text))
+        try:
+            block_lines_list.append(_block_lines_fn(cleaned_html) if _block_lines_fn else [])
+        except Exception:
+            block_lines_list.append([])
         logs.append(f"done chapter {ch_num}")
+
+    # -------------------------------------------------------------------
+    # Auto-boilerplate: recurring head/tail lines across chapters
+    # (headers/footers/ads with only numbers changing). Needs 2+ chapters.
+    # Detection runs on cleaned body lines; the actual strip happens below
+    # on the FINAL content (prepended h2 included) so boilerplate headings
+    # introduced at assembly are caught too.
+    # -------------------------------------------------------------------
+    auto_filters_final: List[Dict[str, Any]] = []
+    if auto_boilerplate and len(chapter_data) >= 2:
+        try:
+            filt_mod_ab = importlib.import_module("core.filters")
+            detect_fn = getattr(filt_mod_ab, "detect_boilerplate")
+            # block lines (clean_html joins everything with spaces — splitlines would see one line)
+            # plus each chapter's final h2 title, so fallback boilerplate headings
+            # (different whitespace normalization than body text) are caught too
+            _detect_input = [
+                (bl + [t]) if t else bl
+                for bl, (t, _, _) in zip(block_lines_list, chapter_data)
+            ]
+            auto_filters_final = detect_fn(_detect_input) or []
+        except Exception as e:
+            logs.append(f"boilerplate detect error: {e}")
+            auto_filters_final = []
+        if auto_filters_final:
+            logs.append(f"boilerplate templates: {len(auto_filters_final)}")
+            for _af in auto_filters_final[:5]:
+                try:
+                    logs.append(f"boilerplate: {_af.get('pattern', '')} (in {_af.get('chapters', '?')} chapters)")
+                except Exception:
+                    pass
+    elif auto_boilerplate:
+        logs.append("boilerplate skipped (need 2+ chapters)")
 
     # -------------------------------------------------------------------
     # Assemble EpubBook
@@ -827,6 +943,11 @@ def build_epub(
             logs.append(f"image add failed {file_name}: {e}")
 
     # Create chapter EpubHtml items
+    try:
+        _ab_mod = importlib.import_module("core.filters")
+        _apply_html_ab = getattr(_ab_mod, "apply_filters_to_html")
+    except Exception:
+        _apply_html_ab = None
     epub_chapters: List[Any] = []
     for idx, (ch_title, ch_html, _ch_text) in enumerate(chapter_data, start=1):
         file_name = f"chapter_{idx:03d}.xhtml"
@@ -835,6 +956,23 @@ def build_epub(
         # Use simple fragment: heading + filtered html fragment
         # filtered html already contains div#chapter-content wrapper; embed directly
         content = f"<h2>{safe_title}</h2>{ch_html}"
+        # Strip boilerplate on the FINAL content so headings introduced at
+        # assembly (fallback raw-h1 titles) are caught too. Never empty it.
+        if auto_filters_final and _apply_html_ab is not None:
+            try:
+                _stripped, _rem = _apply_html_ab(content, auto_filters_final)
+                if _rem:
+                    logs.append(f"boilerplate removed {_rem} block(s) chapter {from_i + idx - 1}")
+                try:
+                    from bs4 import BeautifulSoup as _Bs2
+
+                    _left2 = _Bs2(_stripped or "", "lxml").get_text(separator=" ", strip=True).strip()
+                except Exception:
+                    _left2 = _stripped or ""
+                if _left2:
+                    content = _stripped
+            except Exception as e:
+                logs.append(f"boilerplate strip error: {e}")
         chap = epub_lib.EpubHtml(title=ch_title, file_name=file_name, lang="en", content=content)
         chap.uid = f"chap_{idx}"
         book.add_item(chap)

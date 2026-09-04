@@ -50,6 +50,7 @@ DEFAULT_STORE: Dict[str, Any] = {
     "keepMP3": True,
     "keepM4B": True,
     "filters": [],
+    "autoBoilerplate": True,
     "selection": [],
     "selection_from": 1,
     "selection_to": 30,
@@ -2249,6 +2250,8 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     return "scrapeDelay"
                 if low in ("safe_mode", "safemode"):
                     return "safeMode"
+                if low in ("autoboilerplate", "auto_boilerplate", "auto-boilerplate"):
+                    return "autoBoilerplate"
                 if low in ("keepepub", "keep_epub"):
                     return "keepEPUB"
                 if low in ("keepmp3", "keep_mp3"):
@@ -2262,6 +2265,8 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     return "scrapeDelay"
                 if k in ("safeMode", "safe_mode", "safe-mode"):
                     return "safeMode"
+                if k in ("autoBoilerplate", "auto_boilerplate", "auto-boilerplate"):
+                    return "autoBoilerplate"
                 if k in ("keepEPUB", "keepMP3", "keepM4B", "voice", "rate", "parallel", "retries", "filters", "scrapeDelay", "safeMode"):
                     return k
                 # fallback: if lower matches known without case, map to canonical case
@@ -2343,6 +2348,8 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     iv = max(0, min(20000, iv))
                     sanitized[ck] = iv
                 elif ck == "safeMode":
+                    sanitized[ck] = _to_bool_store(v)
+                elif ck == "autoBoilerplate":
                     sanitized[ck] = _to_bool_store(v)
                 elif ck in ("keepEPUB", "keepMP3", "keepM4B"):
                     sanitized[ck] = _to_bool_store(v)

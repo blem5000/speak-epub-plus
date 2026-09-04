@@ -182,3 +182,61 @@ def test_raw_not_filtered_invariant():
     html, text = clean_html(raw, "div#chapter-content", None)
     assert "nav chrome" in raw  # raw invariant
     assert "nav chrome" not in text
+
+RAW_CHROME = """
+<html><body>
+<div id="chapter-content"><p>Story text stays.</p>
+<iframe data-aa="1" src="//ad.a-ads.com/1/?size=300x250"></iframe>
+<select class="chapindex"><option>Chapter 1</option></select>
+<button id="control-action-btn" type="button"><i class="icon-cog-outline"/></button>
+<form><input type="text"/></form>
+<a class="button prevchap" href="/novel/x/chapter-0" rel="prev">Prev</a>
+<a href="/novel/x/chapter-2" rel="next">Next</a>
+<a href="https://novelphoenix.com/novel/x">Story link stays</a>
+</div></body></html>
+"""
+
+def test_chrome_iframe_select_button_stripped():
+    html, text = clean_html(RAW_CHROME, "div#chapter-content", None)
+    assert "Story text stays." in text
+    assert "<iframe" not in html
+    assert "<select" not in html
+    assert "<button" not in html
+    assert "<form" not in html
+    assert "<input" not in html
+    assert "ad.a-ads.com" not in html and "ad.a-ads.com" not in text
+
+def test_prev_next_rel_links_stripped_plain_links_kept():
+    html, text = clean_html(RAW_CHROME, "div#chapter-content", None)
+    assert "rel=\"prev\"" not in html and "rel=\"next\"" not in html
+    assert "Prev" not in text and "Next" not in text
+    # ordinary story link survives as text
+    assert "Story link stays" in text
+
+def test_chrome_stripped_in_body_fallback():
+    raw = "<html><body><p>Body story.</p><iframe src='//ad/x'></iframe><select><option>1</option></select></body></html>"
+    html, text = clean_html(raw, "div#missing-selector", None)
+    assert "Body story." in text
+    assert "<iframe" not in html
+    assert "<select" not in html
+
+RAW_LINKED_HEADING = """
+<html><body>
+<div id="chapter-content">
+<div class="titles"><h1><a class="booktitle" href="https://novelphoenix.com/novel/x">My House</a><span> - </span><br/><span class="chapter-title">Chapter 5</span></h1></div>
+<h4>Chapter 5: Real Title Here</h4><p>Story.</p>
+<dialog class="control-action"><button>gear</button></dialog>
+</div></body></html>
+"""
+
+def test_linked_heading_stripped_plain_heading_kept():
+    html, text = clean_html(RAW_LINKED_HEADING, "div#chapter-content", None)
+    assert "Chapter 5: Real Title Here" in text
+    assert "Story." in text
+    assert "<h1" not in html
+    assert "My House</a>" not in html
+
+def test_dialog_stripped():
+    html, text = clean_html(RAW_LINKED_HEADING, "div#chapter-content", None)
+    assert "<dialog" not in html
+    assert "gear" not in text

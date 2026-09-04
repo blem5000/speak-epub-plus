@@ -6,11 +6,15 @@ import FiltersWindow from "./FiltersWindow";
 const mockGetFilters = vi.fn();
 const mockAddFilter = vi.fn();
 const mockRemoveFilter = vi.fn();
+const mockGetStore = vi.fn();
+const mockSetStore = vi.fn();
 
 vi.mock("@/lib/sidecar", () => ({
   getFilters: (...args: unknown[]) => mockGetFilters(...args),
   addFilter: (...args: unknown[]) => mockAddFilter(...args),
   removeFilter: (...args: unknown[]) => mockRemoveFilter(...args),
+  getStore: (...args: unknown[]) => mockGetStore(...args),
+  setStore: (...args: unknown[]) => mockSetStore(...args),
   isFiltersResult: (res: { result?: unknown }) => {
     if (!res.result || typeof res.result !== "object") return false;
     const r = res.result as Record<string, unknown>;
@@ -22,6 +26,8 @@ describe("FiltersWindow 4.3 — window pełny", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetFilters.mockResolvedValue({ id: "1", result: { filters: [] } });
+    mockGetStore.mockResolvedValue({ id: "1", result: { autoBoilerplate: true } });
+    mockSetStore.mockResolvedValue({ id: "1", result: { autoBoilerplate: true } });
     mockAddFilter.mockResolvedValue({ id: "1", result: { filters: [{ pattern: "Subscribe", isRegex: false }], added: true } });
     mockRemoveFilter.mockResolvedValue({ id: "1", result: { filters: [], removed: true } });
   });

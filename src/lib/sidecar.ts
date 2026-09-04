@@ -502,6 +502,12 @@ export async function openPath(path: string): Promise<void> {
   }
 }
 
+/** Reveal a file (or folder) in the system file manager. Best UX for "Open folder". */
+export async function revealPath(path: string): Promise<void> {
+  if (!path || !path.trim()) return;
+  await invoke("plugin:opener|reveal_item_in_dir", { paths: [path.trim()] });
+}
+
 /**
  * Settings store helpers — mirrors `core/config.py:DEFAULT_STORE` via JSON-RPC.
  * AD-10 single source `store.json` via `core/config.py:load_store`/`save_store`.

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import Audiobook from "./Audiobook";
+import Audiobook, { formatDuration } from "./Audiobook";
 
 const mockBuildAudio = vi.fn();
 const mockGetStore = vi.fn();
@@ -105,7 +105,6 @@ describe("Audiobook — Step 7 MP3/M4B/M4A", () => {
     await user.click(screen.getByTestId("audio-open"));
     expect(mockInvoke).toHaveBeenCalled();
   });
-
   it("CACHE_MISS shows fetch-first hint with missing", async () => {
     const user = userEvent.setup();
     mockBuildAudio.mockResolvedValue({
@@ -121,4 +120,60 @@ describe("Audiobook — Step 7 MP3/M4B/M4A", () => {
     expect(err).toMatch(/Fetch chapters first|Najpierw pobierz/i);
     expect(err).toContain("https://x/chapter/9");
   });
+
+  it("mp3 result shows open folder button", async () => {
+    const user = userEvent.setup();
+    mockBuildAudio.mockResolvedValue({
+      id: "1",
+      result: {
+        audio_dir: "output/Book_audiobook",
+        chapter_count: 2,
+        part_count: 2,
+        chapters: [
+          { number: 1, title: "Chapter 1", path: "output/Book_audiobook/001_C1.mp3" },
+          { number: 2, title: "Chapter 2", path: "output/Book_audiobook/002_C2.mp3" },
+        ],
+        audiobook: null,
+        format: "mp3",
+        voice: "en-US-AndrewNeural",
+        ffmpeg: true,
+      },
+    });
+    render(<Audiobook {...baseProps} />);
+    await user.click(screen.getByTestId("audio-format-mp3"));
+    await user.click(screen.getByTestId("audio-build"));
+    await waitFor(() => {
+      expect(screen.getByTestId("audio-open-folder")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("audio-open")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("audio-open-folder"));
+    expect(mockInvoke).toHaveBeenCalledWith(
+      expect.stringContaining("reveal_item_in_dir"),
+      expect.objectContaining({ paths: ["output/Book_audiobook"] })
+    );
+  });
+
+  it("formatDuration helper", () => {
+    expect(formatDuration(7)).toBe("7s");
+    expect(formatDuration(65)).toBe("1m 05s");
+    expect(formatDuration(260)).toBe("4m 20s");
+  });
+
+  it("shows elapsed + ETA while building", async () => {
+    vi.useFakeTimers();
+    try {
+      mockBuildAudio.mockReturnValue(new Promise(() => {}));
+      render(<Audiobook {...baseProps} progress={{ done: 2, total: 10, percent: 20 }} />);
+      fireEvent.click(screen.getByTestId("audio-build"));
+      expect(screen.getByTestId("audio-building")).toBeInTheDocument();
+      await vi.advanceTimersByTimeAsync(65000);
+      const eta = screen.getByTestId("audio-eta").textContent ?? "";
+      // 65s elapsed, 2/10 parts → ≈260s left
+      expect(eta).toMatch(/elapsed|minęło/);
+      expect(eta).toMatch(/left|pozostało/);
+      expect(eta).toContain("4m 20s");
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 30000);
 });

@@ -7,12 +7,16 @@ const mockGetFilters = vi.fn();
 const mockAddFilter = vi.fn();
 const mockRemoveFilter = vi.fn();
 const mockSaveFilters = vi.fn();
+const mockGetStore = vi.fn();
+const mockSetStore = vi.fn();
 
 vi.mock("@/lib/sidecar", () => ({
   getFilters: (...args: unknown[]) => mockGetFilters(...args),
   addFilter: (...args: unknown[]) => mockAddFilter(...args),
   removeFilter: (...args: unknown[]) => mockRemoveFilter(...args),
   saveFilters: (...args: unknown[]) => mockSaveFilters(...args),
+  getStore: (...args: unknown[]) => mockGetStore(...args),
+  setStore: (...args: unknown[]) => mockSetStore(...args),
   isFiltersResult: (res: { result?: unknown }) => {
     if (!res.result || typeof res.result !== "object") return false;
     const r = res.result as Record<string, unknown>;
@@ -30,6 +34,24 @@ describe("Filters 2.3 — plain+regex gate", () => {
     });
     mockRemoveFilter.mockImplementation(async () => ({ id: "1", result: { filters: [], removed: true } }));
     mockSaveFilters.mockResolvedValue({ id: "1", result: { filters: [], saved: true } });
+    mockGetStore.mockResolvedValue({ id: "1", result: { autoBoilerplate: true } });
+    mockSetStore.mockResolvedValue({ id: "1", result: { autoBoilerplate: false } });
+  });
+
+  it("auto-boilerplate checkbox loads from store and persists toggle", async () => {
+    const user = userEvent.setup();
+    render(<Filters />);
+    const box = (await screen.findByTestId("filter-auto-boilerplate")) as HTMLInputElement;
+    await waitFor(() => expect(box.checked).toBe(true));
+    await user.click(box);
+    await waitFor(() => expect(mockSetStore).toHaveBeenCalledWith({ autoBoilerplate: false }));
+  });
+
+  it("auto-boilerplate reflects stored false", async () => {
+    mockGetStore.mockResolvedValueOnce({ id: "1", result: { autoBoilerplate: false } });
+    render(<Filters />);
+    const box = (await screen.findByTestId("filter-auto-boilerplate")) as HTMLInputElement;
+    await waitFor(() => expect(box.checked).toBe(false));
   });
 
   it("renders empty state and input + toggle", async () => {

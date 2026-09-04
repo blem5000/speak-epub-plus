@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { getFilters, addFilter, removeFilter, isFiltersResult } from "@/lib/sidecar";
+import { getFilters, addFilter, removeFilter, getStore, setStore, isFiltersResult } from "@/lib/sidecar";
 import { t } from "@/i18n";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
@@ -11,6 +11,7 @@ export default function Filters(): JSX.Element {
   const [isRegex, setIsRegex] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [autoBoilerplate, setAutoBoilerplate] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -33,6 +34,33 @@ export default function Filters(): JSX.Element {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Auto-boilerplate toggle (recurring headers/footers across 2+ chapters)
+  useEffect(() => {
+    let alive = true;
+    getStore()
+      .then((res) => {
+        if (!alive) return;
+        const data = (res as { result?: Record<string, unknown> }).result;
+        if (data && typeof data === "object" && typeof data.autoBoilerplate === "boolean") {
+          setAutoBoilerplate(data.autoBoilerplate as boolean);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const handleAutoToggle = async (checked: boolean): Promise<void> => {
+    setAutoBoilerplate(checked);
+    try {
+      const res = await setStore({ autoBoilerplate: checked });
+      if (res.error) setError(res.error.message);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   const handleAdd = async (): Promise<void> => {
     const pat = pattern.trim();
@@ -114,6 +142,17 @@ export default function Filters(): JSX.Element {
         </span>
       </div>
       <p className="text-body-sm text-muted-foreground mt-1">{t("filters.hint") || "Plain contains + regex, nakładane raz na buildzie EPUB po izolacji selektorów."}</p>
+
+      <label className="mt-3 flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={autoBoilerplate}
+          onChange={(e) => void handleAutoToggle(e.target.checked)}
+          data-testid="filter-auto-boilerplate"
+          className="h-4 w-4 rounded border-input"
+        />
+        <span className="text-body-sm">{t("filters.autoBoilerplate")}</span>
+      </label>
 
       <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-end">
         <label className="flex flex-1 flex-col gap-1">

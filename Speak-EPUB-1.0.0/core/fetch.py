@@ -284,7 +284,7 @@ def fetch_one(
             from bs4 import BeautifulSoup
 
             soup = BeautifulSoup(cached, "lxml")
-            ttag = soup.find(["h1", "h2", "h3"])
+            ttag = soup.find(["h1", "h2", "h3", "h4"])
             title = ttag.get_text(strip=True) if ttag else url
         except Exception:
             title = url

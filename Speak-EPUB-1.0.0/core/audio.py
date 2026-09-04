@@ -131,11 +131,18 @@ def _chapter_texts(
     start_selector: Optional[str],
     end_selector: Optional[str],
     logs: List[str],
+    novel_url: str = "",
 ) -> List[ChapterText]:
-    """Read cache -> clean -> filter (text) per chapter. Returns (number, title, text)."""
+    """Read cache -> clean -> block lines -> filter (text) per chapter.
+
+    Returns (number, title, text) with text as "\\n"-joined block lines
+    (clean_html joins everything with spaces, so block structure is rebuilt
+    via html_to_block_lines — also what boilerplate detection needs).
+    """
     from bs4 import BeautifulSoup
 
     from core.clean import clean_html, resolve_selectors
+    from core.filters import html_to_block_lines
 
     # Effective selectors: explicit params win, else the adapter default plus
     # any saved user override (dynamic import — same AD-1 exception as
@@ -158,6 +165,12 @@ def _chapter_texts(
         eff_end = eff_end.strip() or None
 
     out: List[ChapterText] = []
+    try:
+        from core.epub import _list_title_map as _audio_tlm_fn  # type: ignore[attr-defined]
+
+        _audio_tlm = _audio_tlm_fn(novel_url)
+    except Exception:
+        _audio_tlm = {}
     for pos, url in enumerate(desired_urls):
         ch_num = from_i + pos
         raw_html = read_cache(url, cache_dir)
@@ -166,16 +179,41 @@ def _chapter_texts(
         try:
             soup_tmp = BeautifulSoup(raw_html, "lxml")
             h = soup_tmp.find(["h1", "h2", "h3"])
-            ch_title = h.get_text(strip=True) if h else f"Chapter {ch_num}"
-            if not ch_title or not ch_title.strip():
-                ch_title = f"Chapter {ch_num}"
-            ch_title = ch_title.strip()[:200]
+            raw_title = h.get_text(strip=True) if h else ""
         except Exception:
-            ch_title = f"Chapter {ch_num}"
+            raw_title = ""
         try:
-            cleaned_html, cleaned_text = clean_html(raw_html, eff_start, eff_end)
+            cleaned_html, _cleaned_text_joined = clean_html(raw_html, eff_start, eff_end)
         except ValueError as ve:
             raise ValueError(f"invalid selector: {ve}") from ve
+        # real chapter title: in-content linkless heading, else list title, else raw h1
+        in_title = ""
+        try:
+            soup_clean = BeautifulSoup(cleaned_html, "lxml")
+            for _hh in soup_clean.find_all(["h1", "h2", "h3", "h4"]):
+                try:
+                    if _hh.find(["a", "button", "select"]):
+                        continue
+                    _t = _hh.get_text(strip=True)
+                except Exception:
+                    continue
+                if _t and _t.strip():
+                    in_title = _t.strip()
+                    break
+        except Exception:
+            in_title = ""
+        try:
+            list_title = _audio_tlm.get(str(url).strip().rstrip("/"), "")
+        except Exception:
+            list_title = ""
+        ch_title = (in_title or list_title or raw_title or f"Chapter {ch_num}").strip()[:200]
+        if not ch_title:
+            ch_title = f"Chapter {ch_num}"
+        try:
+            block_lines = html_to_block_lines(cleaned_html)
+        except Exception:
+            block_lines = []
+        cleaned_text = "\n".join(block_lines) if block_lines else (_cleaned_text_joined or "")
         try:
             filtered_text, removed = apply_filters(cleaned_text or "", filters)
             if removed:
@@ -210,6 +248,7 @@ def build_audio(
     audio_format: str = "m4b",
     keep_parts: bool = False,
     keep_mp3: Optional[bool] = None,
+    auto_boilerplate: bool | None = None,
     on_part_status: Optional[Callable[[dict], None]] = None,
     on_log: Optional[Callable[[str], None]] = None,
     on_progress: Optional[Callable[[int, int], None]] = None,
@@ -287,12 +326,53 @@ def build_audio(
         out_base = Path(od)
     else:
         out_base = Path("output")
+    # Absolute paths: the GUI opener scope + file:// fallback need them.
+    try:
+        out_base = out_base.resolve()
+    except Exception:
+        pass
 
     filt = _load_filters(filters)
     logs: List[str] = []
 
     desired = _resolve_audio_urls(novel_url, from_i, to_i, chapter_urls, cache_dir)
-    chapters = _chapter_texts(desired, from_i, cache_dir, filt, start_selector, end_selector, logs)
+    chapters = _chapter_texts(desired, from_i, cache_dir, filt, start_selector, end_selector, logs, novel_url)
+
+    # Auto-boilerplate (same detection as EPUB so listeners skip headers too)
+    if auto_boilerplate is None:
+        try:
+            from core.config import load_store  # dynamic, no cycles
+
+            auto_boilerplate = bool(load_store().get("autoBoilerplate", True))
+        except Exception:
+            auto_boilerplate = True
+    if auto_boilerplate and len(chapters) >= 2:
+        try:
+            from core.filters import apply_filters as _apply_text_filters
+            from core.filters import detect_boilerplate as _detect_bp
+
+            auto_f = _detect_bp([t for _, _, t in chapters]) or []
+        except Exception as e:
+            logs.append(f"boilerplate detect error: {e}")
+            auto_f = []
+        if auto_f:
+            logs.append(f"boilerplate templates: {len(auto_f)}")
+            cleaned_chapters: List[ChapterText] = []
+            for _n, _t, _x in chapters:
+                try:
+                    _x2, _rem = _apply_text_filters(_x, auto_f)
+                    if _rem:
+                        logs.append(f"boilerplate removed {_rem} line(s) chapter {_n}")
+                    cleaned_chapters.append((_n, _t, _x2.strip() or _x))
+                except Exception as e:
+                    logs.append(f"boilerplate strip error chapter {_n}: {e}")
+                    cleaned_chapters.append((_n, _t, _x))
+            # drop chapters left empty after stripping (pure-chrome fragments)
+            chapters = [(n, t, x) for n, t, x in cleaned_chapters if x.strip()]
+            if not chapters:
+                raise ValueError("no chapters with text to convert")
+    elif auto_boilerplate:
+        logs.append("boilerplate skipped (need 2+ chapters)")
 
     slug = sanitize_filename(title or "book", fallback="book", max_len=60)
     audio_dir = out_base / f"{slug}_audiobook"

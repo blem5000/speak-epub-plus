@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { t } from "@/i18n";
 import type { EpubResult } from "@/lib/sidecar";
+import { revealPath } from "@/lib/sidecar";
 
 type ResultProps = {
   result: EpubResult | null;
@@ -83,9 +84,9 @@ export default function Result({
     }
   };
 
-  const handleOpen = async (): Promise<void> => {
-    if (!result?.path) return;
-    const path = result.path;
+  const handleOpen = async (target: string | undefined): Promise<void> => {
+    if (!target) return;
+    const path = target;
     // Try Tauri opener plugin
     try {
       await invoke("plugin:opener|open_path", { path });
@@ -102,6 +103,19 @@ export default function Result({
         } catch {}
       }
     }
+  };
+
+  const handleOpenFile = (): void => {
+    void handleOpen(result?.path);
+  };
+
+  const handleOpenFolder = (): void => {
+    // Reveal the file in its folder (Explorer opens with the file selected).
+    if (!result?.path) return;
+    revealPath(result.path).catch((e: unknown) => {
+      setToast(e instanceof Error ? e.message : String(e));
+      window.setTimeout(() => setToast(null), 4000);
+    });
   };
 
   const isProxy =
@@ -232,7 +246,15 @@ export default function Result({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => void handleOpen()}
+              onClick={handleOpenFile}
+              data-testid="open-file"
+              className="rounded-md border bg-card px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {t("result.openFile")}
+            </button>
+            <button
+              type="button"
+              onClick={handleOpenFolder}
               data-testid="open-folder"
               className="rounded-md border bg-card px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >

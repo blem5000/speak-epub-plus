@@ -360,9 +360,15 @@ class NovelPhoenixAdapter(ScraperPort):
                 clean_html2 = getattr(_mod2, "clean_html")
                 html, text = clean_html2(resp.text or "", None, None)
             except Exception:
-                # ultimate fallback: heuristic inline
-                for tag in soup(["script", "style", "nav", "aside"]):
+                # ultimate fallback: heuristic inline (mirror core.clean noise list)
+                for tag in soup(["script", "style", "nav", "aside", "iframe", "select", "button", "form", "input", "textarea", "object", "embed", "canvas"]):
                     tag.decompose()
+                for _sel in ("a[rel='prev']", "a[rel='next']", "a[rel='previous']"):
+                    try:
+                        for _el in soup.select(_sel):
+                            _el.decompose()
+                    except Exception:
+                        continue
                 body = soup.body or soup
                 html = str(body)
                 text = body.get_text(separator=" ", strip=True)
@@ -379,7 +385,7 @@ class NovelPhoenixAdapter(ScraperPort):
                 except Exception:
                     target = None
             if target is not None:
-                for tag in target(["script", "style", "nav", "aside"]):
+                for tag in target(["script", "style", "nav", "aside", "iframe", "select", "button", "form", "input", "textarea", "object", "embed", "canvas"]):
                     tag.decompose()
                 html = str(target)
                 text = target.get_text(separator=" ", strip=True)
@@ -396,13 +402,13 @@ class NovelPhoenixAdapter(ScraperPort):
                     except Exception:
                         continue
                 if heuristic is not None:
-                    for tag in heuristic(["script", "style", "nav", "aside"]):
+                    for tag in heuristic(["script", "style", "nav", "aside", "iframe", "select", "button", "form", "input", "textarea", "object", "embed", "canvas"]):
                         tag.decompose()
                     html = str(heuristic)
                     text = heuristic.get_text(separator=" ", strip=True)
                     text = re.sub(r"\s+", " ", text).strip()
                 else:
-                    for tag in soup(["script", "style", "nav", "aside"]):
+                    for tag in soup(["script", "style", "nav", "aside", "iframe", "select", "button", "form", "input", "textarea", "object", "embed", "canvas"]):
                         tag.decompose()
                     body = soup.body or soup
                     html = str(body)

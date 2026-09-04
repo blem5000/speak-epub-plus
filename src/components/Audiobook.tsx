@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { t } from "@/i18n";
-import { buildAudio, getStore, isAudioResult, openPath, type AudioResult } from "@/lib/sidecar";
+import { buildAudio, getStore, isAudioResult, openPath, revealPath, type AudioResult } from "@/lib/sidecar";
 import ProgressTrack from "./ProgressTrack";
 
 type AudiobookProps = {
@@ -22,6 +22,15 @@ function humanSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** "65s" → "1m 05s"; "7s" → "7s". Units are intentionally locale-neutral. */
+export function formatDuration(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rest = s % 60;
+  return `${m}m ${rest.toString().padStart(2, "0")}s`;
 }
 
 const FORMAT_LABEL = {
@@ -48,6 +57,9 @@ export default function Audiobook({
   const [error, setError] = useState<string | null>(null);
   const [missing, setMissing] = useState<string[] | null>(null);
   const [result, setResult] = useState<AudioResult | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [now, setNow] = useState(0);
+  const startRef = useRef<number | null>(null);
 
   // Summary of TTS settings owned by Settings (voice/parallel/chunk).
   useEffect(() => {
@@ -73,11 +85,26 @@ export default function Audiobook({
     onBuildingChange?.(building);
   }, [building, onBuildingChange]);
 
+  // Live clock for the ETA while generating (appears right after pressing Build).
+  useEffect(() => {
+    if (!building) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [building]);
+
+  const elapsedSec = startRef.current != null ? Math.max(0, Math.floor((now - startRef.current) / 1000)) : 0;
+  const remainingSec =
+    building && progress.total > 0 && progress.done > 0 && elapsedSec >= 2
+      ? Math.max(0, Math.round((elapsedSec / progress.done) * (progress.total - progress.done)))
+      : null;
+
   const canBuild = canStart && !fetching && !building && urls.length > 0;
 
   const handleBuild = async (): Promise<void> => {
     if (!canBuild || !novelUrl) return;
     onClearParts();
+    startRef.current = Date.now();
+    setNow(Date.now());
     setBuilding(true);
     setError(null);
     setMissing(null);
@@ -169,6 +196,12 @@ export default function Audiobook({
           {t("audio.building")}…
         </div>
       ) : null}
+      {building ? (
+        <div className="mt-1 text-body-sm text-muted-foreground" data-testid="audio-eta" aria-live="polite">
+          {t("audio.elapsed", { elapsed: formatDuration(elapsedSec) })}
+          {remainingSec !== null ? ` · ${t("audio.etaLeft", { remaining: formatDuration(remainingSec) })}` : ""}
+        </div>
+      ) : null}
 
       {!building && result ? (
         <div className="mt-4 space-y-3" data-testid="audio-result">
@@ -193,14 +226,31 @@ export default function Audiobook({
             {result.audiobook?.path ?? result.audio_dir}
           </div>
           {openTarget ? (
-            <button
-              type="button"
-              data-testid="audio-open"
-              onClick={() => void openPath(openTarget)}
-              className="rounded-md border bg-card px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              {result.audiobook ? t("audio.openFile") : t("audio.openFolder")}
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              {result.audiobook ? (
+                <button
+                  type="button"
+                  data-testid="audio-open"
+                  onClick={() => void openPath(openTarget)}
+                  className="rounded-md border bg-card px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {t("audio.openFile")}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                data-testid="audio-open-folder"
+                onClick={() => {
+                  revealPath(result.audiobook?.path ?? result.audio_dir).catch((e: unknown) => {
+                    setToast(e instanceof Error ? e.message : String(e));
+                    window.setTimeout(() => setToast(null), 4000);
+                  });
+                }}
+                className="rounded-md border bg-card px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {t("audio.openFolder")}
+              </button>
+            </div>
           ) : null}
         </div>
       ) : null}
@@ -215,6 +265,11 @@ export default function Audiobook({
         <div role="alert" className="mt-3 text-body-sm text-destructive" data-testid="audio-error">
           {error}{" "}
           {missing && missing.length > 0 ? `— ${missing.slice(0, 3).join(", ")}` : ""}
+        </div>
+      ) : null}
+      {toast ? (
+        <div className="mt-2 text-body-sm text-muted-foreground" role="status" aria-live="polite" data-testid="audio-toast">
+          {toast}
         </div>
       ) : null}
     </section>

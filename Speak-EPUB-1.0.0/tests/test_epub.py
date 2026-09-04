@@ -39,7 +39,9 @@ def test_happy_20_with_cover(tmp_path):
     chapter_urls = [f"https://www.novelphoenix.com/novel/123/chapter/{i}" for i in range(1, 21)]
     out = tmp_path / "output"
     with patch("core.fetch.read_cache", side_effect=fake_read), patch("core.fetch.get_cache_path", side_effect=lambda u, c=None: Path("dummy")), patch("requests.get", return_value=mock_resp):
-        res = build_epub(novel_url, 1, 20, title="Lord of Mysteries", author="Cuttlefish That Loves Diving", cover_url=cover_url, output_dir=str(out), filters=[], chapter_urls=chapter_urls, start_selector="div#chapter-content")
+        # auto-boilerplate explicitly off: fixture lines are story stand-ins,
+        # and this test covers cover/naming/spine, not boilerplate
+        res = build_epub(novel_url, 1, 20, title="Lord of Mysteries", author="Cuttlefish That Loves Diving", cover_url=cover_url, output_dir=str(out), filters=[], chapter_urls=chapter_urls, start_selector="div#chapter-content", auto_boilerplate=False)
     assert Path(res["path"]).exists()
     assert "Lord of Mysteries_chapters_001_to_020" in res["path"]
     assert res["chapter_count"] == 20
@@ -204,3 +206,91 @@ def test_atomic_write_via_tmp(tmp_path):
         # check that tmp file not left behind
         assert not p.with_suffix(p.suffix + ".tmp").exists()
         assert p.exists()
+
+def _bp_raw(num: int):
+    head = (
+        f"<div class=\"titles\"><h1><a class=\"booktitle\" href=\"https://novelphoenix.com/novel/123\">My House</a>"
+        f"<span> - </span><br/><span class=\"chapter-title\">Chapter {num}</span></h1></div>"
+        f"<p>My House of Horrors-Chapter {num}</p><p>My House of Horrors</p>"
+        f"<p>Chapter {num}</p><p>[ ... words ]</p><p>Restore scroll position</p>"
+    )
+    foot = (
+        "<p>Translator: Lonelytree Editor: Millman97</p><p>Share to your friends</p>"
+        f"<p>Chapter {num}</p><p>Tip: You can use left keys.</p>"
+        "<div class=\"report-container\"><a href=\"javascript:;\"><span>Report</span></a></div>"
+        "<iframe src=\"//ad.a-ads.com/1/\"></iframe>"
+    )
+    # NOTE: story text MUST differ per chapter (like real books) — identical
+    # story would itself be detected as boilerplate.
+    story = "Chen Ge walked in slowly." if num % 2 else "The mirror showed a woman."
+    subtitle = "She Has Arrived" if num % 2 else "New Fools"
+    return (
+        f"<html><body><div id=\"chapter-content\">{head}"
+        f"<h2>Chapter {num}: {subtitle}</h2><p>{story}</p>"
+        f"{foot}</div></body></html>"
+    )
+
+
+def _bp_urls():
+    return [f"https://www.novelphoenix.com/novel/123/chapter/{i}" for i in (57, 58)]
+
+
+def _built_chapter_texts(path):
+    book = ebooklib.epub.read_epub(path)
+    texts = []
+    for item in book.get_items():
+        try:
+            name = item.get_name()
+        except Exception:
+            continue
+        if "chapter_" in name and name.endswith(".xhtml"):
+            texts.append(item.get_content().decode("utf-8", "replace"))
+    return texts
+
+
+def test_boilerplate_auto_strips_headers_footers_ads(tmp_path):
+    novel_url = "https://www.novelphoenix.com/novel/123"
+    out = tmp_path / "output"
+    with patch("core.fetch.read_cache", side_effect=lambda u, c=None: _bp_raw(57 if u.endswith("/57") else 58)), patch(
+        "core.fetch.get_cache_path", side_effect=lambda u, c=None: Path("dummy")
+    ):
+        res = build_epub(novel_url, 57, 58, title="Test", author="Auth", cover_url=None,
+                         output_dir=str(out), filters=[], chapter_urls=_bp_urls(),
+                         start_selector="div#chapter-content", auto_boilerplate=True)
+    assert Path(res["path"]).exists()
+    assert any("boilerplate templates" in m for m in res["logs"])
+    texts = _built_chapter_texts(res["path"])
+    assert len(texts) == 2
+    joined = "\n".join(texts)
+    # boilerplate gone
+    assert "Share to your friends" not in joined
+    assert "Translator: Lonelytree" not in joined
+    assert "Restore scroll position" not in joined
+    assert "My House of Horrors-Chapter" not in joined
+    assert "Tip: You can use left keys." not in joined
+    assert "Report" not in joined
+    assert "ad.a-ads.com" not in joined
+    assert "<iframe" not in joined
+    # real content kept: unique title + story
+    assert "She Has Arrived" in joined
+    assert "Chen Ge walked in slowly." in joined
+    # real in-content title becomes the h2 heading (not site-boilerplate h1)
+    assert "<h2>Chapter 57: She Has Arrived</h2>" in joined
+    assert "<h2>My House" not in joined
+
+
+def test_boilerplate_disabled_keeps_everything(tmp_path):
+    novel_url = "https://www.novelphoenix.com/novel/123"
+    out = tmp_path / "output"
+    with patch("core.fetch.read_cache", side_effect=lambda u, c=None: _bp_raw(57 if u.endswith("/57") else 58)), patch(
+        "core.fetch.get_cache_path", side_effect=lambda u, c=None: Path("dummy")
+    ):
+        res = build_epub(novel_url, 57, 58, title="Test", author="Auth", cover_url=None,
+                         output_dir=str(out), filters=[], chapter_urls=_bp_urls(),
+                         start_selector="div#chapter-content", auto_boilerplate=False)
+    texts = _built_chapter_texts(res["path"])
+    joined = "\n".join(texts)
+    assert "Share to your friends" in joined
+    assert "She Has Arrived" in joined
+    # chrome stripping (clean level) still applies regardless of toggle
+    assert "ad.a-ads.com" not in joined

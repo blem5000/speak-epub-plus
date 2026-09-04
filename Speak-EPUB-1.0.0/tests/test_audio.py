@@ -41,6 +41,22 @@ async def _fake_run(jobs, voice, parallel, retries, on_part_status=None, on_log=
         on_progress(len(jobs), len(jobs))
 
 
+def _bp_seed(tmp_path, url, num, story, subtitle):
+    head = (
+        f"<p>My House of Horrors-Chapter {num}</p><p>My House of Horrors</p>"
+        f"<p>Chapter {num}</p><p>Restore scroll position</p>"
+    )
+    foot = (
+        "<p>Translator: Lonelytree Editor: Millman97</p><p>Share to your friends</p>"
+        f"<p>Chapter {num}</p><p>Report</p>"
+    )
+    html = (
+        f"<html><body><div id='chapter-content'>{head}"
+        f"<h2>Chapter {num}: {subtitle}</h2><p>{story}</p>{foot}</div></body></html>"
+    )
+    write_cache(url, html, cache_dir=tmp_path)
+
+
 class TestBuildAudio:
     def test_mp3_two_chapters(self, tmp_path):
         _seed(tmp_path, CH1, "Chapter 1", "Short text one.")
@@ -98,6 +114,31 @@ class TestBuildAudio:
             pass
         else:
             raise AssertionError("expected VALUE_ERROR")
+
+    def test_boilerplate_stripped_from_tts_texts(self, tmp_path):
+        _bp_seed(tmp_path, CH1, 57, "Chen Ge walked in slowly.", "She Has Arrived")
+        _bp_seed(tmp_path, CH2, 58, "The mirror showed a woman.", "New Fools")
+        seen_texts = []
+
+        async def _capture(jobs, voice, parallel, retries, on_part_status=None, on_log=None, on_progress=None):
+            for j in jobs:
+                seen_texts.append(j.text)
+            await _fake_run(jobs, voice, parallel, retries, on_part_status, on_log, on_progress)
+
+        with patch("core.audio.run_part_jobs", side_effect=_capture):
+            res = build_audio(
+                "https://www.novelphoenix.com/novel/123", from_idx=57, to_idx=58,
+                title="Test", output_dir=tmp_path / "out", cache_dir=tmp_path,
+                chapter_urls=[CH1, CH2], audio_format="mp3", auto_boilerplate=True,
+            )
+        assert res["chapter_count"] == 2
+        joined = "\n".join(seen_texts)
+        assert "Share to your friends" not in joined
+        assert "Translator: Lonelytree" not in joined
+        assert "Restore scroll position" not in joined
+        assert "She Has Arrived" in joined
+        assert "Chen Ge walked in slowly." in joined
+        assert any("boilerplate templates" in ln for ln in res["logs"])
 
 
 class TestBuildAudioRpc:

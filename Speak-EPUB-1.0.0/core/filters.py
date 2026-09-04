@@ -1,5 +1,6 @@
 """
-core/filters.py — Filter gate for plain + regex line removal (Story 2.3).
+core/filters.py — Filter gate for plain + regex line removal (Story 2.3)
++ automatic boilerplate detection (recurring head/tail lines across chapters).
 AD-2: raw never filtered, filter applies once after clean_html on cleaned text.
 Pure module — no adapter imports, keeps GUI→Core→Port→Adapter.
 """
@@ -9,6 +10,144 @@ import re
 from typing import Any, List, Tuple
 
 Filter = dict[str, Any]  # {pattern:str, isRegex:bool} canonical
+
+# Boilerplate detection tuning — see detect_boilerplate docstring.
+_BOILERPLATE_MIN_CHAPTERS = 2
+_BOILERPLATE_HEAD_LINES = 15
+_BOILERPLATE_TAIL_LINES = 15
+_BOILERPLATE_MIN_LEN = 3
+_BOILERPLATE_MAX_TEMPLATES = 200
+_BOILERPLATE_MAX_LINE_LEN = 200
+
+
+def mask_numbers(line: str) -> str:
+    """Replace digit runs with # so 'Chapter 57' matches 'Chapter 58'."""
+    return re.sub(r"\d+", "#", line)
+
+
+_BLOCK_TAGS = ("p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "pre", "a")
+# Structural tags only (links are inline — a div with just links is still a leaf line)
+_STRUCTURAL_TAGS = ("p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "pre")
+
+
+def html_to_block_lines(html: str) -> List[str]:
+    """Split cleaned HTML into block texts in document order (true lines).
+
+    clean_html joins everything with spaces, so plain splitlines() would see
+    one giant line. Block elements (p/headings/items + leaf div containers)
+    are the real lines for boilerplate detection. Standalone links (<a>
+    report/share buttons whose text never appears as a block) are included
+    too — story links are unique per chapter and never match a template.
+    """
+    if not html or not isinstance(html, str) or not html.strip():
+        return []
+    try:
+        from bs4 import BeautifulSoup
+    except Exception:
+        return [ln.strip() for ln in html.splitlines() if ln.strip()]
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        return [ln.strip() for ln in html.splitlines() if ln.strip()]
+    body = soup.body if soup.body else soup
+    lines: List[str] = []
+    for el in body.find_all(list(_BLOCK_TAGS) + ["div", "section", "article"]):
+        try:
+            if el.name in ("div", "section", "article") and el.find(list(_STRUCTURAL_TAGS)):
+                continue  # container — children carry the lines
+            txt = el.get_text(separator=" ", strip=True)
+            txt = re.sub(r"\s+", " ", txt).strip()
+            if txt:
+                lines.append(txt)
+        except Exception:
+            continue
+    return lines
+
+
+def _template_regex(line: str) -> str:
+    """Whole-line regex for a detected template: literals escaped, digit runs wild."""
+    parts = re.split(r"(\d+)", line)
+    rx = "".join(r"\d+" if p.isdigit() else re.escape(p) for p in parts)
+    return f"^{rx}$"
+
+
+def detect_boilerplate(
+    texts: List[str],
+    min_chapters: int = _BOILERPLATE_MIN_CHAPTERS,
+    head_lines: int = _BOILERPLATE_HEAD_LINES,
+    tail_lines: int = _BOILERPLATE_TAIL_LINES,
+) -> List[Filter]:
+    """Find recurring header/footer lines across chapters (user: auto-filter junk).
+
+    Only lines in the head/tail zones (first/last N lines) of each chapter can
+    become templates, and only templates seen in >= min_chapters chapters are
+    kept. Digit runs are masked, so 'Chapter 57'/'Chapter 58' collapse while a
+    distinctive title like 'Chapter 57: She Has Arrived' stays unique.
+
+    Safety is positional + anchored: templates are LEARNED only from edges,
+    and removal matches whole lines (^...$), so a story sentence merely
+    CONTAINING template text is never touched. A mid-chapter line identical
+    to an edge template is still removed — accepted (indistinguishable from
+    injected ads, and vanishingly rare for anchored matches); disable with
+    the autoBoilerplate store toggle if ever unwanted.
+
+    `texts` is a list of chapters, each either a "\n"-separated string or a
+    pre-split list of block lines (see html_to_block_lines — REQUIRED for
+    clean_html output, which joins everything with spaces).
+
+    Returns canonical regex filters with source:"auto" (transient — never
+    persisted to store.json), most-widespread first.
+    """
+    if not texts or not isinstance(texts, list):
+        return []
+    per_chapter: List[List[str]] = []
+    for text in texts:
+        if isinstance(text, (list, tuple)):
+            lines = [ln.strip() for ln in text if isinstance(ln, str) and ln.strip()]
+        elif isinstance(text, str) and text:
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        else:
+            continue
+        if lines:
+            per_chapter.append(lines)
+    if not per_chapter:
+        return []
+    votes: dict[str, set[int]] = {}
+    samples: dict[str, str] = {}
+    for ch_idx, lines in enumerate(per_chapter):
+        n = len(lines)
+        seen_in_chapter: set[str] = set()
+        for i, line in enumerate(lines):
+            if len(line) < _BOILERPLATE_MIN_LEN or len(line) > _BOILERPLATE_MAX_LINE_LEN:
+                continue
+            in_head = i < head_lines
+            in_tail = i >= n - tail_lines
+            if not (in_head or in_tail):
+                continue
+            template = mask_numbers(line)
+            if len(template) < _BOILERPLATE_MIN_LEN:
+                continue
+            if template in seen_in_chapter:
+                continue
+            seen_in_chapter.add(template)
+            votes.setdefault(template, set()).add(ch_idx)
+            samples.setdefault(template, line)
+    if min_chapters < 2:
+        min_chapters = 2
+    out: List[Filter] = []
+    ranked = sorted(votes.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    for template, chapters in ranked:
+        if len(chapters) < min_chapters:
+            continue
+        try:
+            pattern = _template_regex(samples.get(template, template))
+            re.compile(pattern)
+        except re.error:
+            continue
+        out.append({"pattern": pattern, "isRegex": True, "source": "auto", "chapters": len(chapters)})
+        if len(out) >= _BOILERPLATE_MAX_TEMPLATES:
+            break
+    return out
 
 
 def _normalize_filter(f: Any) -> Tuple[str, bool]:
@@ -140,7 +279,9 @@ def apply_filters_to_html(cleaned_html: str, filters: List[Filter] | None) -> Tu
     # If html is fragment without body, use soup itself
     body = soup.body if soup.body else soup
     # Collect all block elements; exclude outer container (div#chapter-content) to avoid deleting whole chapter
-    candidates_all = body.find_all(["p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "section", "article"])
+    # Standalone links are candidates too (report/share buttons whose text is
+    # not a block); story links never match an anchored boilerplate template.
+    candidates_all = body.find_all(["p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "section", "article", "a"])
     candidates = [el for el in candidates_all if not (el.name == "div" and el.get("id") == "chapter-content")]
     # also exclude wrapper divs that contain multiple block children (avoid nuking chapter when inner p matches)
     # If a div contains at least one p descendant, treat it as container not leaf — skip it
@@ -164,14 +305,23 @@ def apply_filters_to_html(cleaned_html: str, filters: List[Filter] | None) -> Tu
         # get text for this element
         el_text = el.get_text(separator=" ", strip=True)
         el_text = re.sub(r"\s+", " ", el_text).strip()
+        # Links are inline: only remove a link when its ENTIRE text matches
+        # (report/share buttons), never for a substring hit that would eat
+        # linked story words a manual plain filter happens to contain.
+        link_only = el.name == "a"
         hit = False
         for pat, is_regex, rx in compiled:
             if is_regex:
-                if rx.search(el_text):  # type: ignore
+                m = rx.search(el_text)  # type: ignore
+                if m and (not link_only or (m.group(0) == el_text)):
                     hit = True
                     break
             else:
-                if pat in el_text:
+                if link_only:
+                    if pat == el_text:
+                        hit = True
+                        break
+                elif pat in el_text:
                     hit = True
                     break
         if hit:

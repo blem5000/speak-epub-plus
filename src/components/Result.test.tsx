@@ -82,7 +82,7 @@ describe("Result 2.4 — EPUB assembly + epubcheck", () => {
     expect(screen.getByTestId("epubcheck-badge").textContent).toMatch(/✗|fail/i);
   });
 
-  it("open folder invokes Tauri opener", async () => {
+  it("open folder invokes Tauri opener with directory", async () => {
     const result = {
       path: "output/Test_chapters_001_to_001.epub",
       size: 5000,
@@ -94,6 +94,26 @@ describe("Result 2.4 — EPUB assembly + epubcheck", () => {
     const user = userEvent.setup();
     render(<Result result={result} building={false} error={null} canBuild={true} onBuild={vi.fn()} />);
     await user.click(screen.getByTestId("open-folder"));
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalled());
+    // reveal opens Explorer with the file selected
+    expect(mockInvoke).toHaveBeenCalledWith(
+      expect.stringContaining("reveal_item_in_dir"),
+      expect.objectContaining({ paths: [result.path] })
+    );
+  });
+
+  it("open file invokes Tauri opener with full epub path", async () => {
+    const result = {
+      path: "output/Test_chapters_001_to_001.epub",
+      size: 5000,
+      chapter_count: 1,
+      epubcheck_ok: true,
+      messages: [],
+      logs: [],
+    } as unknown as import("@/lib/sidecar").EpubResult;
+    const user = userEvent.setup();
+    render(<Result result={result} building={false} error={null} canBuild={true} onBuild={vi.fn()} />);
+    await user.click(screen.getByTestId("open-file"));
     await waitFor(() => expect(mockInvoke).toHaveBeenCalled());
     expect(mockInvoke).toHaveBeenCalledWith(expect.stringContaining("opener"), expect.objectContaining({ path: result.path }));
   });

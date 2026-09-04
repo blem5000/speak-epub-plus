@@ -14,6 +14,31 @@ from bs4 import BeautifulSoup
 
 from core.ports import Selectors
 
+# Chrome that is never book content for novels: scripts/styles/nav plus
+# interactive/ad containers. <select> is the chapter-jump dropdown, <button>
+# the reader settings gear, <iframe>/<object>/<embed>/<canvas> ad slots or
+# trackers (they render as grey boxes offline), form controls likewise.
+# prev/next <a rel> links are handled separately (attribute selector).
+_NOISE_TAGS = [
+    "script",
+    "style",
+    "nav",
+    "aside",
+    "iframe",
+    "select",
+    "button",
+    "form",
+    "input",
+    "textarea",
+    "object",
+    "embed",
+    "canvas",
+    "dialog",
+]
+
+# Unambiguous navigation links (prev/next chapter). Practically never story.
+_NAV_LINK_SELECTORS = ["a[rel='prev']", "a[rel='next']", "a[rel='previous']"]
+
 # Heuristic fallback order — matches adapters/novelphoenix.py fallback + ARCHITECTURE-SPINE AD-7
 _HEURISTIC_SELECTORS = [
     "article",
@@ -134,8 +159,26 @@ def resolve_selectors(adapter) -> Selectors:
 
 
 def _strip_noise(tag) -> None:
-    for t in tag(["script", "style", "nav", "aside"]):
+    for t in tag(_NOISE_TAGS):
         t.decompose()
+    for sel in _NAV_LINK_SELECTORS:
+        try:
+            for el in tag.select(sel):
+                el.decompose()
+        except Exception:
+            continue
+    # Linked headings are site chrome (linked novel title / chapter dropdown
+    # label), never the story title — drop them so they can't leak into the
+    # chapter head or the title fallback chain.
+    try:
+        for h in tag.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+            try:
+                if h.find(["a", "button", "select", "input"]):
+                    h.decompose()
+            except Exception:
+                continue
+    except Exception:
+        pass
 
 
 def _text_of(tag) -> str:
@@ -217,7 +260,7 @@ def clean_html(raw_html: str, start: str | None, end: str | None) -> Tuple[str, 
                                         # Re-parse collected to normalize
                                         combined = "".join(collected)
                                         c_soup = BeautifulSoup(combined, "lxml")
-                                        for t in c_soup(["script", "style", "nav", "aside"]):
+                                        for t in c_soup(_NOISE_TAGS):
                                             t.decompose()
                                         # html is combined outer
                                         html = "".join(str(c) for c in c_soup.body.contents) if c_soup.body else combined
@@ -253,8 +296,14 @@ def clean_html(raw_html: str, start: str | None, end: str | None) -> Tuple[str, 
                 return html, text
         # fallback body
         # need fresh soup without decomposed target? We already decomposed noise from soup parts, but re-strip all
-        for tag in soup(["script", "style", "nav", "aside"]):
+        for tag in soup(_NOISE_TAGS):
             tag.decompose()
+        for sel in _NAV_LINK_SELECTORS:
+            try:
+                for el in soup.select(sel):
+                    el.decompose()
+            except Exception:
+                continue
         body = soup.body or soup
         html = str(body)
         text = body.get_text(separator=" ", strip=True)
