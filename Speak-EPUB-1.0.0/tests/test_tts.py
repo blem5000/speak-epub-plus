@@ -1130,7 +1130,7 @@ def test_build_m4b_creates_with_markers(tmp_path, capsys):
     assert args[0] == "ffmpeg"
     assert "-y" in args and "-f" in args and "concat" in args
     assert "-map_metadata" in args and "1" in args
-    assert "-c:a" in args and "aac" in args and "-b:a" in args and "64k" in args
+    assert "-c:a" in args and "aac" in args and "-b:a" in args and "32k" in args
     expected_out = str(out / f"{book_title}.m4b")
     assert args[-1] == expected_out
     # temps removed
@@ -1138,6 +1138,85 @@ def test_build_m4b_creates_with_markers(tmp_path, capsys):
     assert not (out / "_metadata.txt").exists()
     assert (out / f"{book_title}.m4b").exists()
     assert "M4B saved" in capsys.readouterr().out
+
+
+def test_build_m4b_bitrate_passthrough_and_validation(tmp_path):
+    import time
+
+    from core.tts import _estimate_m4b_size, _parse_audio_bitrate, build_m4b
+
+    assert _parse_audio_bitrate(None) == "32k"
+    assert _parse_audio_bitrate("") == "32k"
+    assert _parse_audio_bitrate("48K") == "48k"
+    assert _parse_audio_bitrate(" 64k ") == "64k"
+    for bad in ("ogg", "0k", "8k", "999k", 123):
+        try:
+            _parse_audio_bitrate(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected VALUE_ERROR for {bad!r}")
+
+    # estimate scales with bitrate*duration
+    assert _estimate_m4b_size("64k", 60_000) > _estimate_m4b_size("32k", 60_000) > 0
+
+    out = tmp_path / "out_br"
+    out.mkdir()
+    a = out / "001.mp3"
+    a.write_bytes(b"a")
+    entries = [(1, "Ch1", str(a))]
+    captured = {}
+
+    def fake_run(args, check=True, **kwargs):
+        captured["args"] = args
+        (out / "book.m4b").write_bytes(b"x" * 100)
+        return MagicMock(returncode=0)
+
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.ffprobe_available", return_value=True):
+            with patch("core.tts.get_duration_ms", return_value=1000):
+                with patch("core.tts.subprocess.run", side_effect=fake_run):
+                    build_m4b(str(out), entries, "book", ext="m4b", bitrate="48k")
+    assert "-b:a" in captured["args"] and "48k" in captured["args"]
+
+    try:
+        build_m4b(str(out), entries, "book", ext="m4b", bitrate="ogg")
+    except ValueError as e:
+        assert "bitrate" in str(e)
+    else:
+        raise AssertionError("expected VALUE_ERROR for bad bitrate")
+
+
+def test_build_m4b_progress_poll_reports_size(tmp_path):
+    import time
+
+    from core.tts import build_m4b
+
+    out = tmp_path / "out_prog"
+    out.mkdir()
+    a = out / "001.mp3"
+    a.write_bytes(b"a")
+    entries = [(1, "Ch1", str(a))]
+    seen = []
+
+    def fake_slow_run(args, check=True, **kwargs):
+        # simulate a 4.5s encode with a growing output file
+        target = out / "book.m4b"
+        for _ in range(9):
+            with open(target, "ab") as f:
+                f.write(b"x" * 50000)
+            time.sleep(0.5)
+        return MagicMock(returncode=0)
+
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.ffprobe_available", return_value=True):
+            with patch("core.tts.get_duration_ms", return_value=60000):
+                with patch("core.tts.subprocess.run", side_effect=fake_slow_run):
+                    build_m4b(str(out), entries, "book", ext="m4b",
+                              on_progress=lambda d, t: seen.append((d, t)))
+    assert seen, "expected at least one progress callback during slow encode"
+    assert all(0 <= d <= t and t > 0 for d, t in seen)
+    assert seen[-1][0] <= seen[-1][1]
 
 
 def test_build_m4b_no_ffmpeg_skip(tmp_path, capsys):
@@ -1225,8 +1304,8 @@ def test_speak_delegation_parity_merge(monkeypatch, tmp_path):
         called["finalize"] = (plans, keep)
         return [(1, "T", "/tmp/a.mp3")]
 
-    def fake_m4b(out_dir, entries, title, ext="m4b"):
-        called["m4b"] = (out_dir, entries, title, ext)
+    def fake_m4b(out_dir, entries, title, ext="m4b", **kwargs):
+        called["m4b"] = (out_dir, entries, title, ext, kwargs.get("bitrate"))
 
     monkeypatch.setattr(core_mod, "ffmpeg_available", fake_ffmpeg)
     monkeypatch.setattr(core_mod, "ffprobe_available", fake_ffprobe)
@@ -1563,8 +1642,8 @@ def test_convert_wiring(tmp_path, monkeypatch):
         called["finalize"] = (len(plans), keep_parts)
         return [(36, "Ch36", "/tmp/036_Ch36.mp3"), (37, "Ch37", "/tmp/037_Ch37.mp3")]
 
-    def fake_build_m4b(output_dir_arg, entries, book_title_arg, ext_arg="m4b"):
-        called["build_m4b"] = (output_dir_arg, entries, book_title_arg, ext_arg)
+    def fake_build_m4b(output_dir_arg, entries, book_title_arg, ext_arg="m4b", bitrate="32k"):
+        called["build_m4b"] = (output_dir_arg, entries, book_title_arg, ext_arg, bitrate)
 
     monkeypatch.setattr(speak_mod, "extract_chapters", fake_extract)
     monkeypatch.setattr(speak_mod, "build_generation_plan", fake_build_plan)

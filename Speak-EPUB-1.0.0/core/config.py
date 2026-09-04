@@ -51,6 +51,7 @@ DEFAULT_STORE: Dict[str, Any] = {
     "keepM4B": True,
     "filters": [],
     "autoBoilerplate": True,
+    "audioBitrate": "32k",
     "selection": [],
     "selection_from": 1,
     "selection_to": 30,
@@ -2046,6 +2047,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         outputDir_p = params.get("outputDir", params.get("output_dir", params.get("output")))
         urls_p = params.get("urls", params.get("chapterUrls", params.get("chapter_urls")))
         voice_p = params.get("voice", params.get("voiceName"))
+        bitrate_p = params.get("audioBitrate", params.get("audio_bitrate", params.get("bitrate")))
         parallel_p = params.get("parallel")
         retries_p = params.get("retries")
         chunk_p = params.get("chunkSize", params.get("chunk_size", params.get("chunk-size")))
@@ -2088,6 +2090,16 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 voice_p = str(store_audio.get("voice", "en-US-AndrewNeural"))
             except Exception:
                 voice_p = "en-US-AndrewNeural"
+        if bitrate_p is None:
+            try:
+                bitrate_p = str(store_audio.get("audioBitrate", "32k")) if isinstance(store_audio, dict) else "32k"
+            except Exception:
+                bitrate_p = "32k"
+        # fail fast on garbage bitrate (audio.py re-validates authoritatively)
+        _br_m = _re_audio.fullmatch(r"\s*(\d+)\s*k\s*", str(bitrate_p), _re_audio.I) if bitrate_p is not None else None
+        if not _br_m or not (16 <= int(_br_m.group(1)) <= 128):
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid audioBitrate {bitrate_p}"}}
+        bitrate_p = f"{int(_br_m.group(1))}k"
         if parallel_p is None:
             parallel_p = store_audio.get("parallel", 3) if isinstance(store_audio, dict) else 3
         if retries_p is None:
@@ -2196,6 +2208,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 retries=retries_p,
                 chunk_size=chunk_p,
                 audio_format=format_p or "m4b",
+                audio_bitrate=bitrate_p,
                 keep_parts=keep_parts_bool,
                 keep_mp3=None,
                 on_part_status=_emit_audio_part,
@@ -2260,6 +2273,8 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     return "safeMode"
                 if low in ("autoboilerplate", "auto_boilerplate", "auto-boilerplate"):
                     return "autoBoilerplate"
+                if low in ("audiobitrate", "audio_bitrate", "audio-bitrate"):
+                    return "audioBitrate"
                 if low in ("keepepub", "keep_epub"):
                     return "keepEPUB"
                 if low in ("keepmp3", "keep_mp3"):
@@ -2275,6 +2290,8 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     return "safeMode"
                 if k in ("autoBoilerplate", "auto_boilerplate", "auto-boilerplate"):
                     return "autoBoilerplate"
+                if k in ("audioBitrate", "audio_bitrate", "audio-bitrate"):
+                    return "audioBitrate"
                 if k in ("keepEPUB", "keepMP3", "keepM4B", "voice", "rate", "parallel", "retries", "filters", "scrapeDelay", "safeMode"):
                     return k
                 # fallback: if lower matches known without case, map to canonical case
@@ -2359,6 +2376,16 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     sanitized[ck] = _to_bool_store(v)
                 elif ck == "autoBoilerplate":
                     sanitized[ck] = _to_bool_store(v)
+                elif ck == "audioBitrate":
+                    if not isinstance(v, str):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "audioBitrate must be string"}}
+                    vv = v.strip().lower()
+                    import re as _re_br
+
+                    m = _re_br.fullmatch(r"(\d+)\s*k", vv)
+                    if not m or not (16 <= int(m.group(1)) <= 128):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid audioBitrate {v}"}}
+                    sanitized[ck] = f"{int(m.group(1))}k"
                 elif ck in ("keepEPUB", "keepMP3", "keepM4B"):
                     sanitized[ck] = _to_bool_store(v)
                 elif ck == "filters":

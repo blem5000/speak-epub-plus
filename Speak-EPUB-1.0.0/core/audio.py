@@ -283,6 +283,7 @@ def build_audio(
     keep_parts: bool = False,
     keep_mp3: Optional[bool] = None,
     auto_boilerplate: bool | None = None,
+    audio_bitrate: str | None = None,
     on_part_status: Optional[Callable[[dict], None]] = None,
     on_log: Optional[Callable[[str], None]] = None,
     on_progress: Optional[Callable[[int, int], None]] = None,
@@ -344,6 +345,19 @@ def build_audio(
     fmt = (audio_format or "m4b").strip().lower()
     if fmt not in ("mp3", "m4b", "m4a"):
         raise ValueError("format must be mp3, m4b or m4a")
+    if audio_bitrate is None:
+        try:
+            from core.config import load_store as _load_store_br  # dynamic, no cycles
+
+            audio_bitrate = str(_load_store_br().get("audioBitrate", "32k"))
+        except Exception:
+            audio_bitrate = "32k"
+    try:
+        from core.tts import _parse_audio_bitrate as _parse_br
+
+        bitrate = _parse_br(audio_bitrate)
+    except ValueError as e:
+        raise ValueError(str(e)) from e
 
     from_i = _to_int(from_idx, 1) or 1
     to_i = _to_int(to_idx, None)
@@ -502,8 +516,14 @@ def build_audio(
             book_title = f"{slug}_chapters_{from_i:03d}_to_{to_i:03d}"
             _emit_phase("multiplex", 0, 1)
             _emit_log(f"building {fmt.upper()} file...")
-            build_m4b(str(audio_dir), audio_entries, book_title, fmt)
-            _emit_phase("multiplex", 1, 1)
+            build_m4b(
+                str(audio_dir),
+                audio_entries,
+                book_title,
+                fmt,
+                bitrate=bitrate,
+                on_progress=lambda d, t: _emit_phase("multiplex", d, t),
+            )
             out_path = audio_dir / f"{book_title}.{fmt}"
             if out_path.is_file():
                 try:
@@ -537,6 +557,7 @@ def build_audio(
         "chapters": chapter_infos,
         "audiobook": audiobook,
         "format": fmt,
+        "bitrate": bitrate,
         "voice": voice,
         "ffmpeg": ffmpeg_available(),
         "logs": logs,

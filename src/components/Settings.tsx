@@ -14,6 +14,8 @@ const VOICE_OPTIONS = [
   "pl-PL-MarekNeural",
 ];
 
+const BITRATE_OPTIONS = ["32k", "48k", "64k", "96k"];
+
 const PRESET_DELAYS = [3000, 4000, 5000] as const;
 
 export default function Settings({ open, onClose }: SettingsProps): JSX.Element | null {
@@ -25,6 +27,7 @@ export default function Settings({ open, onClose }: SettingsProps): JSX.Element 
 
   // form state
   const [voice, setVoice] = useState<string>("en-US-AndrewNeural");
+  const [audioBitrate, setAudioBitrate] = useState<string>("32k");
   const [voiceCustom, setVoiceCustom] = useState<string>("");
   const [isVoiceCustom, setIsVoiceCustom] = useState(false);
   const [rateNum, setRateNum] = useState<number>(0);
@@ -134,6 +137,11 @@ export default function Settings({ open, onClose }: SettingsProps): JSX.Element 
         prevRef.current["keepMP3"] = typeof data.keepMP3 === "boolean" ? data.keepMP3 : true;
         setKeepM4B(typeof data.keepM4B === "boolean" ? (data.keepM4B as boolean) : true);
         prevRef.current["keepM4B"] = typeof data.keepM4B === "boolean" ? data.keepM4B : true;
+        // audio bitrate
+        const bv = typeof data.audioBitrate === "string" ? (data.audioBitrate as string).trim().toLowerCase() : "32k";
+        const bitrateVal = BITRATE_OPTIONS.includes(bv) ? bv : "32k";
+        setAudioBitrate(bitrateVal);
+        prevRef.current["audioBitrate"] = bitrateVal;
         setLoading(false);
       } catch {
         if (alive) setLoading(false);
@@ -232,6 +240,7 @@ export default function Settings({ open, onClose }: SettingsProps): JSX.Element 
           else if (revertKey === "keepEPUB") setKeepEPUB(Boolean(revertVal));
           else if (revertKey === "keepMP3") setKeepMP3(Boolean(revertVal));
           else if (revertKey === "keepM4B") setKeepM4B(Boolean(revertVal));
+          else if (revertKey === "audioBitrate") setAudioBitrate(String(revertVal));
         }
         return;
       }
@@ -263,6 +272,7 @@ export default function Settings({ open, onClose }: SettingsProps): JSX.Element 
         else if (revertKey === "keepEPUB") setKeepEPUB(Boolean(revertVal));
         else if (revertKey === "keepMP3") setKeepMP3(Boolean(revertVal));
         else if (revertKey === "keepM4B") setKeepM4B(Boolean(revertVal));
+        else if (revertKey === "audioBitrate") setAudioBitrate(String(revertVal));
       }
     }
   };
@@ -314,6 +324,14 @@ export default function Settings({ open, onClose }: SettingsProps): JSX.Element 
       setVoice("custom");
     }
     void persist({ voice: vv }, "voice", prev);
+  };
+
+  const handleBitrateChange = (e: React.ChangeEvent<HTMLSelectElement>): void => {
+    const val = e.target.value.trim().toLowerCase();
+    if (!BITRATE_OPTIONS.includes(val)) return;
+    const prev = prevRef.current["audioBitrate"];
+    setAudioBitrate(val);
+    void persist({ audioBitrate: val }, "audioBitrate", prev);
   };
 
   const handleRateSlider = (e: React.ChangeEvent<HTMLInputElement>): void => {
@@ -570,6 +588,23 @@ export default function Settings({ open, onClose }: SettingsProps): JSX.Element 
                     </div>
                     <span className="text-body-sm text-muted-foreground">{t("settings.helper.rate")}</span>
                   </div>
+
+                  <label className="flex flex-col gap-1">
+                    <span className="text-body-sm font-medium">{t("settings.audio.bitrate")}</span>
+                    <select
+                      data-testid="settings-audio-bitrate"
+                      value={audioBitrate}
+                      onChange={handleBitrateChange}
+                      className="h-9 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      {BITRATE_OPTIONS.map((opt) => (
+                        <option key={opt} value={opt}>
+                          {opt}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-body-sm text-muted-foreground">{t("settings.helper.bitrate")}</span>
+                  </label>
                 </div>
               </section>
 

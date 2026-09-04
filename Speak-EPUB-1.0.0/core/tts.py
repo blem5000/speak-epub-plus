@@ -21,9 +21,10 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 Chapter = Tuple[int, str, str]
 AudioEntry = Tuple[int, str, str]
@@ -649,10 +650,48 @@ def finalize_chapter_audio(
     return audio_entries
 
 
-def build_m4b(output_dir: str, audio_entries: List[AudioEntry], book_title: str, ext: str = "m4b") -> None:
+def _parse_audio_bitrate(value: Any, default: str = "32k") -> str:
+    """Normalize an M4B/M4A audio bitrate like '32k' (16k-128k).
+
+    Spoken-word TTS sources are ~24-48k MP3, so re-encoding above 64k only
+    grows the file. Raises ValueError on garbage.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = default
+    text = str(value).strip().lower()
+    match = re.fullmatch(r"(\d+)\s*k", text)
+    if not match:
+        raise ValueError(f"bitrate must be like 32k (16k-128k), got {value!r}")
+    kbps = int(match.group(1))
+    if kbps < 16 or kbps > 128:
+        raise ValueError(f"bitrate must be like 32k (16k-128k), got {value!r}")
+    return f"{kbps}k"
+
+
+def _estimate_m4b_size(bitrate: str, total_ms: int) -> int:
+    """Expected M4B bytes for CBR encode + container slack (progress denominator)."""
+    try:
+        kbps = int(bitrate[:-1])
+    except Exception:
+        kbps = 32
+    return max(1, int(kbps * 1000 / 8 * (total_ms / 1000) * 1.1) + 65536)
+
+
+def build_m4b(
+    output_dir: str,
+    audio_entries: List[AudioEntry],
+    book_title: str,
+    ext: str = "m4b",
+    bitrate: str = "32k",
+    on_progress: Optional[Callable[[int, int], None]] = None,
+) -> None:
     # defensive ext whitelist
     if ext not in ("m4b", "m4a"):
         ext = "m4b"
+    try:
+        bitrate = _parse_audio_bitrate(bitrate)
+    except ValueError as e:
+        raise ValueError(str(e)) from e
     # defensive book_title sanitization (prevent traversal / illegal chars)
     # caller already sanitizes via sanitize_filename, but re-sanitize defensively
     book_title = sanitize_filename(book_title, fallback="audiobook", max_len=120)
@@ -705,6 +744,26 @@ def build_m4b(output_dir: str, audio_entries: List[AudioEntry], book_title: str,
                 f.write(f"title={escape_ffmeta(chapter_title)}\n\n")
                 cursor += duration
 
+        # Size-poll progress for the (potentially multi-minute) encode so GUIs
+        # can show a live ETA. Daemon thread, stopped in finally below.
+        _expected_total = _estimate_m4b_size(bitrate, cursor)
+        _prog_stop = threading.Event()
+
+        def _poll_output_size() -> None:
+            while not _prog_stop.wait(2.0):
+                try:
+                    _sz = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+                except OSError:
+                    _sz = 0
+                if on_progress is not None and _expected_total > 0:
+                    try:
+                        on_progress(min(_sz, _expected_total), _expected_total)
+                    except Exception:
+                        pass
+
+        _prog_thread = threading.Thread(target=_poll_output_size, daemon=True)
+        _prog_thread.start()
+
         subprocess.run(
             [
                 "ffmpeg",
@@ -722,13 +781,17 @@ def build_m4b(output_dir: str, audio_entries: List[AudioEntry], book_title: str,
                 "-c:a",
                 "aac",
                 "-b:a",
-                "64k",
+                bitrate,
                 out_path,
             ],
             check=True,
             **subprocess_kwargs(),
         )
     finally:
+        try:
+            _prog_stop.set()
+        except Exception:
+            pass
         try:
             if os.path.exists(concat_file):
                 os.remove(concat_file)

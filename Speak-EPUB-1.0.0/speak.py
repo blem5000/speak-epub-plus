@@ -183,8 +183,8 @@ def finalize_chapter_audio(plans: list[ChapterPlan], keep_parts: bool) -> list[A
     return _core_finalize(plans, keep_parts)
 
 
-def build_m4b(output_dir: str, audio_entries: list[AudioEntry], book_title: str, ext: str = "m4b") -> None:
-    return _core_m4b(output_dir, audio_entries, book_title, ext)
+def build_m4b(output_dir: str, audio_entries: list[AudioEntry], book_title: str, ext: str = "m4b", bitrate: str = "32k") -> None:
+    return _core_m4b(output_dir, audio_entries, book_title, ext, bitrate=bitrate)
 
 
 async def convert(
@@ -199,6 +199,7 @@ async def convert(
     keep_parts: bool = False,
     parallel: int = 3,
     retries: int = 5,
+    bitrate: str = "32k",
 ) -> None:
     try:
         chapters = extract_chapters(epub_path, start_chapter=start_chapter, end_chapter=end_chapter)
@@ -246,7 +247,8 @@ async def convert(
         else:
             book_title = f"{base_book_title}_chapters_{start_chapter:03d}_to_{end_chapter:03d}"
         ext = "m4a" if m4a else "m4b"
-        build_m4b(output_dir, audio_entries, book_title, ext)
+        print(f"M4B/M4A bitrate: {bitrate}")
+        build_m4b(output_dir, audio_entries, book_title, ext, bitrate=bitrate)
 
 
 def main() -> None:
@@ -264,6 +266,7 @@ def main() -> None:
     parser.add_argument("--keep-parts", action="store_true", help="Keep temporary part MP3 files after merging.")
     parser.add_argument("--parallel", type=int, default=3, help="Number of TTS parts to generate at the same time. Recommended: 2 or 3. Default: 3.")
     parser.add_argument("--retries", type=int, default=5, help="Retries per TTS request/chunk. Default: 5.")
+    parser.add_argument("--bitrate", default="32k", help="M4B/M4A audio bitrate like 32k (16k-128k, speech default: 32k).")
 
     args = parser.parse_args()
 
@@ -299,6 +302,11 @@ def main() -> None:
         print("Error: --retries must be at least 1.")
         sys.exit(1)
 
+    _bitrate_match = re.match(r"^(\d+)\s*k$", (args.bitrate or "").strip(), re.IGNORECASE)
+    if not _bitrate_match or not (16 <= int(_bitrate_match.group(1)) <= 128):
+        print("Error: --bitrate must be like 32k (16k-128k).")
+        sys.exit(1)
+
     output_dir = args.output or (epub_path.stem + "_audiobook")
 
     asyncio.run(
@@ -314,6 +322,7 @@ def main() -> None:
             keep_parts=args.keep_parts,
             parallel=args.parallel,
             retries=args.retries,
+            bitrate=f"{int(_bitrate_match.group(1))}k",
         )
     )
 

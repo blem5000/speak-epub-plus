@@ -83,7 +83,8 @@ export default function Audiobook({
           const voice = typeof data.voice === "string" ? data.voice : "en-US-AndrewNeural";
           const parallel = Number(data.parallel ?? 3);
           const chunk = Number((data as Record<string, unknown>)["chunk-size"] ?? 3500);
-          setSummary(t("audio.summary", { voice, parallel, chunk }) as string);
+          const bitrate = typeof data.audioBitrate === "string" ? data.audioBitrate : "32k";
+          setSummary(t("audio.summary", { voice, parallel, chunk, bitrate }) as string);
         }
       })
       .catch(() => {});

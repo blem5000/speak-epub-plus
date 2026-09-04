@@ -193,6 +193,20 @@ def test_setStore_keep_bools(tmp_path, monkeypatch):
     assert r3["result"]["keepMP3"] is False
 
 
+def test_setStore_audioBitrate_valid_variants_invalid(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    r = handle_rpc({"id": "1", "method": "setStore", "params": {"audioBitrate": "48k"}})
+    assert r["result"]["audioBitrate"] == "48k"
+    r2 = handle_rpc({"id": "2", "method": "setStore", "params": {"audio_bitrate": "64K"}})
+    assert r2["result"]["audioBitrate"] == "64k"
+    r3 = handle_rpc({"id": "3", "method": "setStore", "params": {"audioBitrate": "ogg"}})
+    assert r3["error"]["code"] == "VALUE_ERROR"
+    r4 = handle_rpc({"id": "4", "method": "setStore", "params": {"audioBitrate": "8k"}})
+    assert r4["error"]["code"] == "VALUE_ERROR"
+    r5 = handle_rpc({"id": "5", "method": "setStore", "params": {"audioBitrate": 48}})
+    assert r5["error"]["code"] == "VALUE_ERROR"
+
+
 def test_kebab_snake_normalization(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     # chunk_size should normalize to chunk-size

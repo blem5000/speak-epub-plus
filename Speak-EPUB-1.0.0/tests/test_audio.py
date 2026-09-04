@@ -200,3 +200,31 @@ class TestBuildAudioRpc:
             "urls": [CH1], "format": "mp3"}})
         assert res["error"]["code"] == "CACHE_MISS"
         assert res["error"]["missing"] == [CH1]
+
+    def test_bitrate_result_and_invalid(self, tmp_path):
+        _seed(tmp_path)
+        with patch("core.audio.run_part_jobs", side_effect=_fake_run):
+            res = build_audio(
+                "https://www.novelphoenix.com/novel/123", from_idx=1, to_idx=1,
+                title="T", output_dir=tmp_path / "out", cache_dir=tmp_path,
+                chapter_urls=[CH1], audio_format="mp3", audio_bitrate="48k",
+            )
+        assert res["bitrate"] == "48k"
+        try:
+            with patch("core.audio.run_part_jobs", side_effect=_fake_run):
+                build_audio(
+                    "https://www.novelphoenix.com/novel/123", output_dir=tmp_path / "o2",
+                    cache_dir=tmp_path, chapter_urls=[CH1], audio_bitrate="ogg",
+                )
+        except ValueError as e:
+            assert "bitrate" in str(e)
+        else:
+            raise AssertionError("expected VALUE_ERROR")
+
+    def test_rpc_bitrate_invalid(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _seed(tmp_path)
+        res = handle_rpc({"id": "1", "method": "buildAudio", "params": {
+            "novelUrl": "https://www.novelphoenix.com/novel/123",
+            "urls": [CH1], "format": "mp3", "audioBitrate": "ogg"}})
+        assert res["error"]["code"] == "VALUE_ERROR"

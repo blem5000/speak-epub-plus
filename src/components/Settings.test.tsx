@@ -90,9 +90,17 @@ describe("Settings 4.2 — form + persist + i18n", () => {
     expect(screen.getByTestId("settings-scrape-delay")).toHaveValue("5000");
     expect(screen.getByTestId("settings-output-keepMP3")).not.toBeChecked();
   });
-
-  it("onBlur parallel 3→2 calls setStore and toast Zapisano", async () => {
+  it("bitrate select 32k→48k calls setStore", async () => {
     const user = userEvent.setup();
+    render(<Settings open={true} onClose={vi.fn()} />);
+    await waitFor(() => expect(mockGetStore).toHaveBeenCalled());
+    const sel = screen.getByTestId("settings-audio-bitrate") as HTMLSelectElement;
+    expect(sel.value).toBe("32k");
+    await user.selectOptions(sel, "48k");
+    await waitFor(() => expect(mockSetStore).toHaveBeenCalledWith({ audioBitrate: "48k" }));
+  });
+
+  it("onBlur parallel 3→2 calls setStore and toast Zapisano", async () => {    const user = userEvent.setup();
     render(<Settings open={true} onClose={vi.fn()} />);
     await waitFor(() => expect(mockGetStore).toHaveBeenCalled());
     const sel = screen.getByTestId("settings-perf-parallel") as HTMLSelectElement;
