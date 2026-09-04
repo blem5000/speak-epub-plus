@@ -115,6 +115,33 @@ class TestBuildAudio:
         else:
             raise AssertionError("expected VALUE_ERROR")
 
+    def test_heartbeat_during_long_finalize(self, tmp_path, monkeypatch):
+        import time
+
+        import core.audio as audio_mod
+
+        monkeypatch.setattr(audio_mod, "_HEARTBEAT_SEC", 0.2)
+        _seed(tmp_path)
+        handed_logs: list[str] = []
+
+        def _slow_m4b(*args, **kwargs):
+            time.sleep(1.0)
+
+        def _on_log(line):
+            handed_logs.append(line)
+
+        with patch("core.audio.run_part_jobs", side_effect=_fake_run), patch(
+            "core.audio.build_m4b", side_effect=_slow_m4b
+        ):
+            res = build_audio(
+                "https://www.novelphoenix.com/novel/123", from_idx=1, to_idx=1,
+                title="Test", output_dir=tmp_path / "out", cache_dir=tmp_path,
+                chapter_urls=[CH1], audio_format="m4b", on_log=_on_log,
+            )
+        beats = [ln for ln in res["logs"] if ln.startswith("still working")]
+        assert len(beats) >= 1, res["logs"]
+        assert handed_logs and any("still working" in ln for ln in handed_logs)
+
     def test_boilerplate_stripped_from_tts_texts(self, tmp_path):
         _bp_seed(tmp_path, CH1, 57, "Chen Ge walked in slowly.", "She Has Arrived")
         _bp_seed(tmp_path, CH2, 58, "The mirror showed a woman.", "New Fools")

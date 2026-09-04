@@ -194,8 +194,10 @@ except Exception as e:
     let mut reader = BufReader::new(stdout);
     let mut resp_opt: Option<RpcResponse> = None;
     // Stream events: python may emit {"event":"chapterStatus",...} etc before final response {"id":...}
-    // Use longer timeout for real fetch (polite 3-5s + jitter, up to 20s backoff) — keep 30s
-    let timeout_secs = 60;
+    // Long silent stretches (multi-minute M4B re-encode) are kept alive by
+    // heartbeat log lines from the backend; this timeout only catches truly
+    // hung sidecars, so it is generous.
+    let timeout_secs = 300;
     loop {
         let mut out = String::new();
         let read_fut = reader.read_line(&mut out);

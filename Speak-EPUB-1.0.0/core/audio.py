@@ -12,6 +12,7 @@ Pure Core module: static imports are stdlib-only or installed deps
 """
 from __future__ import annotations
 
+import contextlib
 import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -31,6 +32,39 @@ from core.tts import (
 ChapterText = Tuple[int, str, str]  # (chapter_number, title, text)
 
 MAX_AUDIO_RANGE = 200
+_HEARTBEAT_SEC = 20  # tests patch this down to ~0.2
+
+
+@contextlib.contextmanager
+def _heartbeat_scope(emit: Callable[[str], None], interval: float | None = None):
+    """Emit 'still working…' lines while long silent work runs.
+
+    The desktop sidecar treats minutes of stdout silence as a hung backend
+    (notably the final M4B re-encode of a big book). A daemon thread beats
+    every `interval` seconds until the scope exits. Harmless everywhere else
+    (CLI prints one extra line per interval).
+    """
+    import threading
+    import time
+
+    if interval is None:
+        interval = _HEARTBEAT_SEC
+    stop = threading.Event()
+    start = time.monotonic()
+
+    def _beat() -> None:
+        while not stop.wait(interval):
+            try:
+                emit(f"still working... {int(time.monotonic() - start)}s elapsed")
+            except Exception:
+                pass
+
+    th = threading.Thread(target=_beat, daemon=True)
+    th.start()
+    try:
+        yield
+    finally:
+        stop.set()
 
 
 def _to_int(v: Any, default: Optional[int] = None) -> Optional[int]:
@@ -406,74 +440,79 @@ def build_audio(
     except Exception:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-    try:
-        if loop.is_running():
-            import threading as _th
+    # Long silent stretches (TTS gaps between parts, per-chapter merges, and
+    # especially the final multi-minute M4B re-encode) must not look dead:
+    # the desktop sidecar times out after seconds of silence. Heartbeat lines
+    # keep the stream alive; the Rust reader additionally tolerates gaps.
+    with _heartbeat_scope(_emit_log):
+        try:
+            if loop.is_running():
+                import threading as _th
 
-            box: Dict[str, Any] = {}
-            exc_box: Dict[str, Any] = {}
+                box: Dict[str, Any] = {}
+                exc_box: Dict[str, Any] = {}
 
-            def _run_in_new_loop() -> None:
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    new_loop.run_until_complete(_runner())
-                    box["ok"] = True
-                except Exception as e:  # noqa: BLE001
-                    exc_box["e"] = e
-                finally:
-                    new_loop.close()
-
-            th = _th.Thread(target=_run_in_new_loop, daemon=True)
-            th.start()
-            th.join(timeout=1800)
-            if "e" in exc_box:
-                raise exc_box["e"]
-        else:
-            loop.run_until_complete(_runner())
-    except RuntimeError as rte:
-        if "already running" in str(rte).lower() or "closed" in str(rte).lower():
-            asyncio.run(_runner())
-        else:
-            raise
-
-    audio_entries = finalize_chapter_audio(plans, keep_parts=keep_parts)
-    if not audio_entries:
-        raise RuntimeError("TTS produced no audio files")
-
-    chapter_infos = [
-        {"number": num, "title": t, "path": p} for num, t, p in audio_entries
-    ]
-
-    audiobook: Optional[Dict[str, Any]] = None
-    if fmt in ("m4b", "m4a"):
-        book_title = f"{slug}_chapters_{from_i:03d}_to_{to_i:03d}"
-        build_m4b(str(audio_dir), audio_entries, book_title, fmt)
-        out_path = audio_dir / f"{book_title}.{fmt}"
-        if out_path.is_file():
-            try:
-                size = out_path.stat().st_size
-            except OSError:
-                size = 0
-            audiobook = {"path": str(out_path), "size": size, "format": fmt}
-            # honor keepMP3=false: single file replaces chapter MP3s
-            if keep_mp3 is None:
-                try:
-                    from core.config import load_store  # dynamic, no cycles
-
-                    keep_mp3 = bool(load_store().get("keepMP3", True))
-                except Exception:
-                    keep_mp3 = True
-            if keep_mp3 is False:
-                for _num, _t, p in audio_entries:
+                def _run_in_new_loop() -> None:
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
                     try:
-                        if Path(p).is_file() and Path(p).resolve() != out_path.resolve():
-                            Path(p).unlink()
-                    except OSError:
-                        continue
-                logs.append("chapter MP3s removed (keepMP3=false)")
-        else:
-            logs.append(f"warning: expected {fmt.upper()} not found after ffmpeg (see warnings above)")
+                        new_loop.run_until_complete(_runner())
+                        box["ok"] = True
+                    except Exception as e:  # noqa: BLE001
+                        exc_box["e"] = e
+                    finally:
+                        new_loop.close()
+
+                th = _th.Thread(target=_run_in_new_loop, daemon=True)
+                th.start()
+                th.join(timeout=1800)
+                if "e" in exc_box:
+                    raise exc_box["e"]
+            else:
+                loop.run_until_complete(_runner())
+        except RuntimeError as rte:
+            if "already running" in str(rte).lower() or "closed" in str(rte).lower():
+                asyncio.run(_runner())
+            else:
+                raise
+
+        audio_entries = finalize_chapter_audio(plans, keep_parts=keep_parts)
+        if not audio_entries:
+            raise RuntimeError("TTS produced no audio files")
+
+        chapter_infos = [
+            {"number": num, "title": t, "path": p} for num, t, p in audio_entries
+        ]
+
+        audiobook: Optional[Dict[str, Any]] = None
+        if fmt in ("m4b", "m4a"):
+            book_title = f"{slug}_chapters_{from_i:03d}_to_{to_i:03d}"
+            build_m4b(str(audio_dir), audio_entries, book_title, fmt)
+            out_path = audio_dir / f"{book_title}.{fmt}"
+            if out_path.is_file():
+                try:
+                    size = out_path.stat().st_size
+                except OSError:
+                    size = 0
+                audiobook = {"path": str(out_path), "size": size, "format": fmt}
+                # honor keepMP3=false: single file replaces chapter MP3s
+                if keep_mp3 is None:
+                    try:
+                        from core.config import load_store  # dynamic, no cycles
+
+                        keep_mp3 = bool(load_store().get("keepMP3", True))
+                    except Exception:
+                        keep_mp3 = True
+                if keep_mp3 is False:
+                    for _num, _t, p in audio_entries:
+                        try:
+                            if Path(p).is_file() and Path(p).resolve() != out_path.resolve():
+                                Path(p).unlink()
+                        except OSError:
+                            continue
+                    logs.append("chapter MP3s removed (keepMP3=false)")
+            else:
+                logs.append(f"warning: expected {fmt.upper()} not found after ffmpeg (see warnings above)")
 
     return {
         "audio_dir": str(audio_dir),
