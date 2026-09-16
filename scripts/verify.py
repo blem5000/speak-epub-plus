@@ -3,9 +3,9 @@
 import sys
 from pathlib import Path
 
-# Ensure Speak-EPUB-1.0.0 is on path (via pth normally)
+# Ensure repo root is on path (core/adapters live at root)
 root = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(root / "Speak-EPUB-1.0.0"))
+sys.path.insert(0, str(root))
 
 import core.config as cfg
 from core.ports import ScraperPort, Selectors
@@ -24,7 +24,7 @@ try:
     os.name = "posix"
     v_posix = cfg.get_venv_python()
     print(f"  posix simulated: {v_posix}")
-    assert v_posix == "Speak-EPUB-1.0.0/venv/bin/python"
+    assert v_posix == "venv/bin/python"
     print("  PASS posix path")
 finally:
     os.name = orig

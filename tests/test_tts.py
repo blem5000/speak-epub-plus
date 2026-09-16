@@ -15,9 +15,11 @@ from core.tts import (
     ChapterPlan,
     PartJob,
     run_part_jobs,
+    resolve_output_dir,
     sanitize_filename,
     split_text_for_tts,
     tts_text_to_mp3,
+    verify_part_audio,
     ffmpeg_available,
     ffprobe_available,
     concat_mp3_files,
@@ -333,7 +335,9 @@ def test_frozen_immutability():
     assert getattr(PartJob, "__dataclass_params__").frozen is True  # type: ignore[attr-defined]
 
 
-def test_existing_file_skip_guard(tmp_path):
+def test_existing_file_skip_guard(tmp_path, monkeypatch):
+    # hermetic: fake fixture files have no real audio duration to probe
+    monkeypatch.setattr("core.tts.ffprobe_available", lambda: False)
     out = str(tmp_path / "out")
     os.makedirs(out, exist_ok=True)
     part_dir = Path(out) / "_parts"
@@ -343,7 +347,7 @@ def test_existing_file_skip_guard(tmp_path):
     # Pre-create part file for ch40 p1 to simulate resume
     # Need to know safe title; for "C40" it's "C40"
     pre_part = part_dir / "040_C40_part001.mp3"
-    pre_part.write_text("dummy", encoding="utf-8")
+    pre_part.write_text("x" * 2048, encoding="utf-8")
     # Also test chapter_mp3 existence skip
     # For single chunk case, pre-create chapter mp3
     # Now build plan
@@ -359,7 +363,7 @@ def test_existing_file_skip_guard(tmp_path):
     # Also test that if chapter_mp3 exists, no jobs for that chapter
     # Create chapter mp3 for 041 single? But 041 is multi (2 parts) so chapter_mp3 is 041_C41.mp3
     chapter_mp3_path = Path(out) / "041_C41.mp3"
-    chapter_mp3_path.write_text("dummy", encoding="utf-8")
+    chapter_mp3_path.write_text("x" * 2048, encoding="utf-8")
     plans2, jobs2 = build_generation_plan(chapters, out, 3500)
     # Now jobs for chapter 041 should be empty because chapter_mp3 exists (guard: not exists(chapter_mp3) and not exists(part_path))
     job_ch41 = [j for j in jobs2 if j.chapter_number == 41]
@@ -425,8 +429,10 @@ def test_partjob_fields_presence():
     assert "chapter_title" in fields
 
 
-def test_single_chunk_resume_skip(tmp_path):
+def test_single_chunk_resume_skip(tmp_path, monkeypatch):
     """Single-chunk chapter MP3 already exists → jobs == [] (resume)."""
+    # hermetic: fake fixture file has no real audio duration to probe
+    monkeypatch.setattr("core.tts.ffprobe_available", lambda: False)
     out = str(tmp_path / "out_resume_single")
     os.makedirs(out, exist_ok=True)
     # single-chunk chapter (short text)
@@ -434,7 +440,7 @@ def test_single_chunk_resume_skip(tmp_path):
     # predict chapter_mp3 name
     safe = sanitize_filename("T", fallback="Chapter_005")
     chapter_mp3 = Path(out) / f"005_{safe}.mp3"
-    chapter_mp3.write_text("dummy", encoding="utf-8")
+    chapter_mp3.write_text("x" * 2048, encoding="utf-8")
     plans, jobs = build_generation_plan(chapters, out, 3500)
     assert jobs == [], "single-chunk resume should skip existing chapter MP3"
     assert len(plans) == 1
@@ -479,7 +485,7 @@ def test_tts_retry_success_after_429(tmp_path, capsys):
             if save_calls["count"] <= 2:
                 raise Exception("429 Too Many Requests")
             # success on 3rd
-            Path(path).write_text("fake-mp3", encoding="utf-8")
+            Path(path).write_text("x" * 2048, encoding="utf-8")
 
     sleep_calls = []
 
@@ -495,7 +501,7 @@ def test_tts_retry_success_after_429(tmp_path, capsys):
 
     assert save_calls["count"] == 3
     assert out.exists()
-    assert out.read_text(encoding="utf-8") == "fake-mp3"
+    assert out.read_text(encoding="utf-8") == "x" * 2048
     # sleep waits = min(20,2*1)=2, min(20,2*2)=4
     assert sleep_calls == [2, 4]
     captured = capsys.readouterr().out.lower()
@@ -600,7 +606,7 @@ def test_run_part_jobs_skip_existing_parts(tmp_path, capsys):
     # Manually craft 2 jobs in same chapter, one already exists
     job1_path = parts_dir / "040_C40_part001.mp3"
     job2_path = parts_dir / "040_C40_part002.mp3"
-    job1_path.write_text("already-there", encoding="utf-8")
+    job1_path.write_text("x" * 2048, encoding="utf-8")
     # size will be len /1024 = 0 KB
 
     jobs = [
@@ -1772,7 +1778,7 @@ def test_run_part_jobs_callbacks_skipped(tmp_path, capsys):
     parts_dir = out_dir / "_parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
     p1 = parts_dir / "040_C40_part001.mp3"
-    p1.write_text("already", encoding="utf-8")
+    p1.write_text("x" * 2048, encoding="utf-8")
     p2 = parts_dir / "040_C40_part002.mp3"
     jobs = [
         PartJob(chapter_number=40, chapter_title="C40", part_number=1, part_count=2, text="c1", output_path=str(p1), is_final_chapter_file=False),
@@ -1863,7 +1869,7 @@ def test_run_part_jobs_callbacks_parallel_order_and_skipped6(tmp_path):
         jobs.append(PartJob(chapter_number=41, chapter_title="C41", part_number=pn, part_count=3, text=f"c41-{pn}", output_path=str(out_dir / "_parts" / f"041_C41_part{pn:03d}.mp3"), is_final_chapter_file=False))
     (out_dir / "_parts").mkdir(parents=True, exist_ok=True)
     # pre-create one part to test skipped 1/6
-    (out_dir / "_parts" / "040_C40_part001.mp3").write_text("pre", encoding="utf-8")
+    (out_dir / "_parts" / "040_C40_part001.mp3").write_text("x" * 2048, encoding="utf-8")
 
     statuses = []
     logs = []
@@ -1907,4 +1913,300 @@ def test_run_part_jobs_callbacks_parallel_order_and_skipped6(tmp_path):
     assert concurrent["max"] <= 3
     # reading order queued before fetching: first 6 statuses are queued
     assert all(s["status"] == "queued" for s in statuses[:6])
+
+
+# ---------------------------------------------------------------------------
+# Part-audio verification — anti-gap gate (truncated Edge TTS output)
+# ---------------------------------------------------------------------------
+
+
+def test_verify_part_audio_missing(tmp_path):
+    ok, reason = verify_part_audio(str(tmp_path / "nope.mp3"), "some longer text here " * 10)
+    assert (ok, reason) == (False, "missing")
+
+
+def test_verify_part_audio_too_small(tmp_path):
+    tiny = tmp_path / "tiny.mp3"
+    tiny.write_bytes(b"x" * 100)
+    assert verify_part_audio(str(tiny), "hello world this is longer than fifty chars " * 3) == (False, "too_small")
+
+
+def test_verify_part_audio_size_ok_without_ffprobe(tmp_path):
+    p = tmp_path / "ok.mp3"
+    p.write_bytes(b"x" * 2048)
+    with patch("core.tts.ffprobe_available", return_value=False):
+        assert verify_part_audio(str(p), "a" * 1000) == (True, "ok_no_duration_check")
+
+
+def test_verify_part_audio_short_text_skips_duration(tmp_path):
+    p = tmp_path / "short.mp3"
+    p.write_bytes(b"x" * 2048)
+    with patch("core.tts.get_duration_ms") as mock_dur:
+        ok, reason = verify_part_audio(str(p), "hi")
+        assert (ok, reason) == (True, "ok_no_duration_check")
+        mock_dur.assert_not_called()
+
+
+def test_verify_part_audio_truncated_and_ok(tmp_path):
+    p = tmp_path / "part.mp3"
+    p.write_bytes(b"x" * 4096)
+    text = "a" * 3500  # min expected = 3500*1000/15*0.5 ≈ 116667 ms
+    with patch("core.tts.ffprobe_available", return_value=True):
+        with patch("core.tts.get_duration_ms", return_value=30_000):
+            assert verify_part_audio(str(p), text) == (False, "truncated")
+        with patch("core.tts.get_duration_ms", return_value=250_000):
+            assert verify_part_audio(str(p), text) == (True, "ok")
+
+
+def test_verify_part_audio_no_duration(tmp_path):
+    p = tmp_path / "nodur.mp3"
+    p.write_bytes(b"x" * 2048)
+    with patch("core.tts.ffprobe_available", return_value=True):
+        with patch("core.tts.get_duration_ms", return_value=0):
+            assert verify_part_audio(str(p), "a" * 1000) == (False, "no_duration")
+
+
+def test_tts_empty_save_retries_then_succeeds(tmp_path, capsys):
+    """Save writing an empty file counts as failed attempt: retry, then success."""
+    out = tmp_path / "empty_retry.mp3"
+    calls = {"n": 0}
+
+    class FakeCommunicate:
+        def __init__(self, text, voice_arg):
+            pass
+
+        async def save(self, path):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                Path(path).write_bytes(b"")
+            else:
+                Path(path).write_bytes(b"x" * 2048)
+
+    async def fake_sleep(seconds):
+        pass
+
+    async def _run():
+        with patch("edge_tts.Communicate", FakeCommunicate):
+            with patch("core.tts.asyncio.sleep", new=fake_sleep):
+                await tts_text_to_mp3("hello world", str(out), "v", retries=5)
+
+    asyncio.run(_run())
+
+    assert calls["n"] == 2
+    assert out.stat().st_size == 2048
+    assert "retry 1/4" in capsys.readouterr().out.lower()
+
+
+def test_tts_truncated_raises_immediately_with_hint(tmp_path):
+    """Deterministic truncation: no pointless retries, actionable --chunk-size hint."""
+    out = tmp_path / "trunc.mp3"
+    calls = {"n": 0}
+    long_text = "word " * 700  # 3500 chars -> duration check applies
+
+    class FakeCommunicate:
+        def __init__(self, text, voice_arg):
+            pass
+
+        async def save(self, path):
+            calls["n"] += 1
+            Path(path).write_bytes(b"x" * 4096)
+
+    async def _run():
+        with patch("edge_tts.Communicate", FakeCommunicate):
+            with patch("core.tts.ffprobe_available", return_value=True):
+                with patch("core.tts.get_duration_ms", return_value=10_000):
+                    with pytest.raises(RuntimeError, match=r"truncated.*chunk-size"):
+                        await tts_text_to_mp3(long_text, str(out), "v", retries=5)
+
+    asyncio.run(_run())
+
+    assert calls["n"] == 1  # no retries for deterministic truncation
+    assert not out.exists()  # invalid file removed, resume will regenerate
+
+
+def test_run_part_jobs_regenerates_invalid_part(tmp_path, capsys):
+    """Resume must regenerate a stale tiny part instead of skipping the gap."""
+    out_dir = tmp_path / "out_regen"
+    parts_dir = out_dir / "_parts"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    stale = parts_dir / "040_C40_part001.mp3"
+    stale.write_bytes(b"x" * 100)  # truncated leftover from an earlier run
+    fresh = parts_dir / "040_C40_part002.mp3"
+    jobs = [
+        PartJob(chapter_number=40, chapter_title="C40", part_number=1, part_count=2, text="chunk one", output_path=str(stale), is_final_chapter_file=False),
+        PartJob(chapter_number=40, chapter_title="C40", part_number=2, part_count=2, text="chunk two", output_path=str(fresh), is_final_chapter_file=False),
+    ]
+    calls = []
+
+    async def fake_tts(text, output_path, voice, retries=5):
+        calls.append(Path(output_path).name)
+        Path(output_path).write_bytes(b"x" * 2048)
+
+    async def _run():
+        with patch("core.tts.tts_text_to_mp3", new=fake_tts):
+            await run_part_jobs(jobs, voice="v", parallel=1, retries=5)
+
+    asyncio.run(_run())
+
+    assert sorted(calls) == ["040_C40_part001.mp3", "040_C40_part002.mp3"]
+    assert stale.stat().st_size == 2048
+    out = capsys.readouterr().out
+    assert "regenerating" in out
+    assert "skip" not in out.lower()
+
+
+def test_build_generation_plan_requeues_tiny_part(tmp_path):
+    """Plan guard must re-queue a tiny stale part file (resume heals gaps)."""
+    out = str(tmp_path / "out_requeue")
+    os.makedirs(out, exist_ok=True)
+    chapters = [(40, "C40", "a" * 4000)]  # 2 chunks
+    plans, jobs = build_generation_plan(chapters, out, 3500)
+    assert len(jobs) == 2
+    # simulate stale truncated download of part 1
+    Path(plans[0].part_paths[0]).write_bytes(b"x")
+    _, jobs2 = build_generation_plan(chapters, out, 3500)
+    assert Path(jobs2[0].output_path).name == "040_C40_part001.mp3"
+
+
+def test_build_generation_plan_drops_gapped_merged_file(tmp_path, capsys):
+    """A merged chapter MP3 built from truncated parts must not shadow them."""
+    out = str(tmp_path / "out_gapped")
+    os.makedirs(out, exist_ok=True)
+    chapters = [(40, "C40", "a" * 4000)]  # 2 chunks, full text 4000 chars
+    plans, _ = build_generation_plan(chapters, out, 3500)
+    merged = Path(plans[0].chapter_mp3)
+    merged.write_bytes(b"x" * 4096)  # stale merge containing only a fragment
+    with patch("core.tts.ffprobe_available", return_value=True):
+        with patch("core.tts.get_duration_ms", return_value=5_000):  # ~10% of expected
+            _, jobs = build_generation_plan(chapters, out, 3500)
+    assert not merged.exists()  # gapped merge dropped
+    assert sorted(Path(j.output_path).name for j in jobs) == [
+        "040_C40_part001.mp3", "040_C40_part002.mp3",
+    ]
+    assert "re-generating" in capsys.readouterr().out
+
+
+def test_build_generation_plan_keeps_valid_merged_file(tmp_path, capsys):
+    """A merged chapter MP3 with plausible duration is still reused (no rework)."""
+    out = str(tmp_path / "out_valid_merge")
+    os.makedirs(out, exist_ok=True)
+    chapters = [(40, "C40", "a" * 4000)]
+    plans, _ = build_generation_plan(chapters, out, 3500)
+    merged = Path(plans[0].chapter_mp3)
+    merged.write_bytes(b"x" * 4096)
+    with patch("core.tts.ffprobe_available", return_value=True):
+        with patch("core.tts.get_duration_ms", return_value=280_000):  # ~4000/15 cps
+            _, jobs = build_generation_plan(chapters, out, 3500)
+    assert merged.exists()
+    assert jobs == []
+    assert "re-generating" not in capsys.readouterr().out
+
+
+def test_build_generation_plan_drops_truncated_single_chapter(tmp_path):
+    """Single-chunk chapter MP3 with implausible duration is re-queued."""
+    out = str(tmp_path / "out_single_trunc")
+    os.makedirs(out, exist_ok=True)
+    chapters = [(5, "T", "Hello world " * 200)]  # 2400 chars, single chunk
+    plans, _ = build_generation_plan(chapters, out, 3500)
+    single = Path(plans[0].chapter_mp3)
+    single.write_bytes(b"x" * 2048)
+    with patch("core.tts.ffprobe_available", return_value=True):
+        with patch("core.tts.get_duration_ms", return_value=2_000):
+            _, jobs = build_generation_plan(chapters, out, 3500)
+    assert not single.exists()
+    assert len(jobs) == 1 and jobs[0].part_count == 1
+
+
+# ---------------------------------------------------------------------------
+# resolve_output_dir — CWD-robust output (WinError 5 when CWD is System32)
+# ---------------------------------------------------------------------------
+
+
+def _patch_denied_cwd(monkeypatch, tmp_path):
+    """Fake an unwritable CWD (System32): probe says denied, mkdir is a tripwire.
+
+    Returns (fake_cwd, touched): touched collects every mkdir attempted under
+    the fake CWD — resolve_output_dir must never touch it, only probe it.
+    """
+    import os as _os
+
+    fake_cwd = tmp_path / "System32"
+    fake_cwd.mkdir()  # like the real System32: exists, but denied below
+    real_mkdir = Path.mkdir
+    real_writable = _os.access
+    touched = []
+
+    def _mkdir(self, *args, **kwargs):
+        try:
+            self.relative_to(fake_cwd)
+        except ValueError:
+            return real_mkdir(self, *args, **kwargs)
+        touched.append(str(self))
+        raise PermissionError(13, "Access is denied")
+
+    def _writable(path):
+        try:
+            Path(path).relative_to(fake_cwd)
+        except ValueError:
+            return real_writable(path, _os.W_OK)
+        return False
+
+    monkeypatch.setattr(Path, "mkdir", _mkdir)
+    monkeypatch.setattr(Path, "cwd", classmethod(lambda cls: fake_cwd))
+    monkeypatch.setattr("core.tts._is_writable", _writable)
+    return fake_cwd, touched
+
+
+def test_resolve_output_dir_absolute_passthrough(tmp_path):
+    out = resolve_output_dir(tmp_path / "books")
+    assert out.is_absolute()
+    assert (tmp_path / "books").is_dir()
+
+
+def test_resolve_output_dir_default_uses_writable_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    out = resolve_output_dir(None)
+    assert out == (tmp_path / "output").resolve()
+    assert out.is_dir()
+
+
+def test_resolve_output_dir_falls_back_when_cwd_denied(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("core.tts.user_output_base", lambda: tmp_path / "docs")
+    _, touched = _patch_denied_cwd(monkeypatch, tmp_path)
+    out = resolve_output_dir(None)
+    assert out == (tmp_path / "docs" / "output").resolve()
+    assert out.is_dir()
+    assert touched == [], "denied CWD must be probed, never touched"
+    assert "not usable" in capsys.readouterr().out
+
+
+def test_resolve_output_dir_explicit_relative_falls_back(tmp_path, monkeypatch):
+    monkeypatch.setattr("core.tts.user_output_base", lambda: tmp_path / "docs")
+    _, touched = _patch_denied_cwd(monkeypatch, tmp_path)
+    out = resolve_output_dir("mybooks")
+    assert out == (tmp_path / "docs" / "output").resolve()
+    assert touched == [], "denied CWD must be probed, never touched"
+
+
+def test_resolve_output_dir_explicit_absolute_denied_raises(tmp_path, monkeypatch):
+    def _deny(self, *args, **kwargs):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(Path, "mkdir", _deny)
+    with pytest.raises(OSError):
+        resolve_output_dir(tmp_path / "nope")
+
+
+def test_resolve_output_dir_no_ensure_no_writes(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "cwd", classmethod(lambda cls: tmp_path / "ghost"))
+    out = resolve_output_dir(None, ensure=False)
+    assert out == (tmp_path / "ghost" / "output").resolve()
+    assert not (tmp_path / "ghost").exists()
+    # unwritable probe -> fallback selected, still without creating anything
+    monkeypatch.setattr("core.tts._is_writable", lambda path: False)
+    out2 = resolve_output_dir(None, ensure=False)
+    from core.tts import user_output_base
+
+    assert out2 == (user_output_base() / "output").resolve()
+    assert not (tmp_path / "ghost").exists()
 

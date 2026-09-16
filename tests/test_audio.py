@@ -97,7 +97,7 @@ class TestBuildAudio:
             raise AssertionError("expected VALUE_ERROR")
         try:
             with patch("core.audio.run_part_jobs", side_effect=_fake_run):
-                build_audio("https://www.novelphoenix.com/novel/123", from_idx=1, to_idx=500,
+                build_audio("https://www.novelphoenix.com/novel/123", from_idx=1, to_idx=501,
                             output_dir=tmp_path / "o", cache_dir=tmp_path, chapter_urls=[CH1])
         except ValueError as e:
             assert "too large" in str(e)
@@ -228,3 +228,46 @@ class TestBuildAudioRpc:
             "novelUrl": "https://www.novelphoenix.com/novel/123",
             "urls": [CH1], "format": "mp3", "audioBitrate": "ogg"}})
         assert res["error"]["code"] == "VALUE_ERROR"
+
+    def test_output_falls_back_when_cwd_unwritable(self, tmp_path, monkeypatch, capsys):
+        """System32-CWD regression: default output lands in user docs, no WinError 5."""
+        import os as _os
+
+        monkeypatch.setattr("core.tts.user_output_base", lambda: tmp_path / "docs")
+        fake_cwd = tmp_path / "System32"
+        fake_cwd.mkdir()  # like the real System32: exists, but denied below
+        real_mkdir = Path.mkdir
+        real_writable = _os.access
+        touched = []
+
+        def _mkdir(self, *args, **kwargs):
+            try:
+                self.relative_to(fake_cwd)
+            except ValueError:
+                return real_mkdir(self, *args, **kwargs)
+            touched.append(str(self))
+            raise PermissionError(13, "Access is denied")
+
+        def _writable(path):
+            try:
+                Path(path).relative_to(fake_cwd)
+            except ValueError:
+                return real_writable(path, _os.W_OK)
+            return False
+
+        monkeypatch.setattr(Path, "mkdir", _mkdir)
+        monkeypatch.setattr(Path, "cwd", classmethod(lambda cls: fake_cwd))
+        monkeypatch.setattr("core.tts._is_writable", _writable)
+        _seed(tmp_path)
+        with patch("core.audio.run_part_jobs", side_effect=_fake_run):
+            res = build_audio(
+                "https://www.novelphoenix.com/novel/123", from_idx=1, to_idx=1,
+                title="T", output_dir=None, cache_dir=tmp_path,
+                chapter_urls=[CH1], audio_format="mp3",
+            )
+        fallback = (tmp_path / "docs" / "output").resolve()
+        assert Path(res["audio_dir"]).resolve().parent == fallback
+        for ch in res["chapters"]:
+            assert Path(ch["path"]).is_file()
+        assert touched == [], "denied CWD must be probed, never touched"
+        assert "not usable" in capsys.readouterr().out

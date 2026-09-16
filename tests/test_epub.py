@@ -294,3 +294,47 @@ def test_boilerplate_disabled_keeps_everything(tmp_path):
     assert "She Has Arrived" in joined
     # chrome stripping (clean level) still applies regardless of toggle
     assert "ad.a-ads.com" not in joined
+
+
+def test_build_epub_falls_back_when_cwd_unwritable(tmp_path, monkeypatch, capsys):
+    """System32-CWD regression: default output lands in user docs, no WinError 5."""
+    import os as _os
+
+    monkeypatch.setattr("core.tts.user_output_base", lambda: tmp_path / "docs")
+    fake_cwd = tmp_path / "System32"
+    fake_cwd.mkdir()  # like the real System32: exists, but denied below
+    real_mkdir = Path.mkdir
+    real_writable = _os.access
+    touched = []
+
+    def _mkdir(self, *args, **kwargs):
+        try:
+            self.relative_to(fake_cwd)
+        except ValueError:
+            return real_mkdir(self, *args, **kwargs)
+        touched.append(str(self))
+        raise PermissionError(13, "Access is denied")
+
+    def _writable(path):
+        try:
+            Path(path).relative_to(fake_cwd)
+        except ValueError:
+            return real_writable(path, _os.W_OK)
+        return False
+
+    monkeypatch.setattr(Path, "mkdir", _mkdir)
+    monkeypatch.setattr(Path, "cwd", classmethod(lambda cls: fake_cwd))
+    monkeypatch.setattr("core.tts._is_writable", _writable)
+    novel_url = "https://www.novelphoenix.com/novel/123"
+    chapter_urls = [f"{novel_url}/chapter/1"]
+    with patch("core.fetch.read_cache", side_effect=lambda u, c=None: _raw_content(1)), patch(
+        "core.fetch.get_cache_path", side_effect=lambda u, c=None: Path("dummy")
+    ):
+        res = build_epub(novel_url, 1, 1, title="Test", author="Auth", cover_url=None,
+                         output_dir=None, filters=[], chapter_urls=chapter_urls,
+                         start_selector="div#chapter-content")
+    fallback = (tmp_path / "docs" / "output").resolve()
+    assert Path(res["path"]).resolve().parent == fallback
+    assert Path(res["path"]).is_file()
+    assert touched == [], "denied CWD must be probed, never touched"
+    assert "not usable" in capsys.readouterr().out

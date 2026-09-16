@@ -60,12 +60,6 @@ warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 Chapter = tuple[int, str, str]
 AudioEntry = tuple[int, str, str]
 
-# Root vs inner path handling: when executed from project root, core lives in Speak-EPUB-1.0.0/core
-if not (Path(__file__).resolve().parent / "core").is_dir():
-    _candidate = Path(__file__).resolve().parent / "Speak-EPUB-1.0.0"
-    if _candidate.is_dir() and str(_candidate) not in sys.path:
-        sys.path.insert(0, str(_candidate))
-
 # Core delegation — single source of truth AD-1 (3.1/3.3 ratyfikacja brownfield)
 # core/tts.py is pure Core-owned; speak.py delegates, does not duplicate.
 from core.tts import PartJob, ChapterPlan
@@ -81,7 +75,7 @@ from core.tts import get_duration_ms as _core_dur
 from core.tts import escape_ffmeta as _core_escape
 from core.tts import finalize_chapter_audio as _core_finalize
 from core.tts import build_m4b as _core_m4b
-
+from core.tts import resolve_output_dir as _core_resolve_out
 
 def sanitize_filename(value: str, fallback: str = "chapter", max_len: int = 60) -> str:
     return _core_sanitize(value, fallback, max_len)
@@ -136,12 +130,12 @@ async def tts_text_to_mp3(text: str, output_path: str, voice: str, retries: int 
 async def list_voices(all_languages: bool = False) -> None:
     voices = await edge_tts.list_voices()
     if not all_languages:
-        voices = [v for v in voices if v["Locale"].startswith("en")]
+        voices = [v for v in voices if str(v.get("Locale", "")).startswith("en")]
 
     print(f"{'Name':<35} {'Gender':<8} {'Locale'}")
     print("-" * 60)
-    for v in sorted(voices, key=lambda x: x["ShortName"]):
-        print(f"{v['ShortName']:<35} {v['Gender']:<8} {v['Locale']}")
+    for v in sorted(voices, key=lambda x: str(x.get("ShortName", ""))):
+        print(f"{str(v.get('ShortName', '?')):<35} {str(v.get('Gender', '?')):<8} {str(v.get('Locale', '?'))}")
 
     if all_languages:
         print(f"\nTotal voices: {len(voices)}")
@@ -211,6 +205,9 @@ async def convert(
         print("No text chapters found in selected chapter range.")
         return
 
+    # CWD-robust: unwritable CWD (e.g. System32) falls back to
+    # ~/Documents/speak-epub instead of WinError 5 on makedirs.
+    output_dir = str(_core_resolve_out(output_dir))
     os.makedirs(output_dir, exist_ok=True)
     total = len(chapters)
 

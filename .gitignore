@@ -36,12 +36,8 @@ _bmad/
 .opencode/
 AGENTS.md
 
-# Keep original snapshot but don't double-track venv inside it
-Speak-EPUB-1.0.0/venv/
-Speak-EPUB-1.0.0/__pycache__/
-Speak-EPUB-1.0.0/*.mp3
-Speak-EPUB-1.0.0/*.m4b
-Speak-EPUB-1.0.0/*_audiobook/
+# Python runtime (venv lives at root now)
+venv/
 
 # Node / Tauri
 node_modules/
@@ -54,18 +50,15 @@ dist-ssr/
 
 # Store
 store.json
-last-run.json
 .bmad-loop/runs/
 .bmad-loop/cache/
 .bmad-loop/policy.toml
 _bmad/render/
 
-# Cache for polite fetcher resume (AD-9) — raw.html must persist for resume, do not ignore _cache/*.html
-# _cache directory is kept with .gitkeep; *.mp3 already ignored above
-!Speak-EPUB-1.0.0/_cache/
-!Speak-EPUB-1.0.0/_cache/.gitkeep
-!Speak-EPUB-1.0.0/_cache/**
-!Speak-EPUB-1.0.0/_cache/**/*.html
+# Scraper cache — resume works locally, never commit 100+ MB of raw.html
+# (AD-9 resume needs local files, not git-tracked ones)
+_cache/*
+!_cache/.gitkeep
 
 # Tool state
 .cline/

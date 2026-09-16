@@ -4,14 +4,10 @@ from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 import pytest
 
-# Ensure repo root on path (Speak-EPUB-1.0.0 is package root's parent)
+# Ensure repo root on path (core/adapters live at root)
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-# Also add parent of Speak-EPUB-1.0.0 for adapters.* import
-PARENT = ROOT.parent
-if str(PARENT) not in sys.path:
-    sys.path.insert(0, str(PARENT))
 
 from core.config import handle_rpc, _CHAPTER_CACHE
 from core.ports import ChapterInfo

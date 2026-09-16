@@ -5,7 +5,7 @@ AD-1: GUI→Core→Port→Adapter — this module is pure Core-owned single sour
 AD-8: EPUB as intermediate invariant; TTS reads only EPUB via extract_chapters.
 AD-2: raw never filtered; no filtering here.
 
-Ratifies Speak-EPUB-1.0.0/speak.py semantics:
+Ratifies speak.py semantics:
 - split_text_for_tts 3500 sentence-boundary r"(?<=[.!?;:])\\s+" + hard-cut fallback >3500
 - PartJob frozen dataclass with chapter_title retained for speak.py compat
 - build_generation_plan global queue reading-order ch40 p1..20 before ch41 p1
@@ -32,17 +32,125 @@ AudioEntry = Tuple[int, str, str]
 
 def sanitize_filename(value: str, fallback: str = "chapter", max_len: int = 60) -> str:
     """
-    Mirror Speak-EPUB-1.0.0/speak.py:84 sanitize_filename.
+    Mirror speak.py:84 sanitize_filename.
 
     - replace [\\/:*?"<>|] with _
     - collapse whitespace
     - truncate max_len
     - fallback if empty
+    NOTE: intentionally keeps speak.py behaviour where "///" -> "___"
+    (epub.py falls back to "chapter" here — historic divergence, deferred).
     """
+    if not isinstance(value, str):
+        value = str(value) if value is not None else ""
     safe = re.sub(r'[\\/:*?"<>|]', "_", value).strip()
     safe = re.sub(r"\s+", " ", safe).strip()
     safe = safe[:max_len].strip()
     return safe or fallback
+
+
+def user_output_base() -> Path:
+    """User-writable base directory for app output (EPUB/audiobook files).
+
+    Used when the process working directory is not writable — e.g. the GUI
+    exe launched with CWD=C:\\Windows\\System32, where creating ./output
+    dies with WinError 5 (Access is denied).
+    """
+    home = Path.home()
+    if os.name == "nt":
+        return home / "Documents" / "speak-epub"
+    return home / "speak-epub"
+
+
+def _is_writable(path: Path) -> bool:
+    """os.access probe, isolated as a seam so tests can simulate a denied CWD."""
+    try:
+        return os.access(path, os.W_OK)
+    except Exception:
+        return False
+
+
+def _abspath(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except Exception:
+        return path
+
+
+def _seems_usable_dir(path: Path) -> bool:
+    """True if path exists as dir or its nearest existing ancestor is writable.
+
+    Pure probe — creates nothing, so an unwritable location (e.g.
+    C:\\Windows\\System32) is never touched, only inspected.
+    """
+    try:
+        probe = path
+        while not probe.exists():
+            parent = probe.parent
+            if parent == probe:
+                return False
+            probe = parent
+        return probe.is_dir() and _is_writable(probe)
+    except Exception:
+        return False
+
+
+def resolve_output_dir(
+    output_dir: Any = None, dirname: str = "output", ensure: bool = True
+) -> Path:
+    """Resolve an output directory to an absolute, writable path.
+
+    - explicit absolute path → returned as-is (explicit choice wins; the
+      caller creates it and surfaces the real error if it is bad)
+    - explicit relative path or default `dirname` → anchored at the process
+      working directory (CLI compat: ./output next to where you run it),
+      but only when that location probes writable — an unwritable CWD
+      (e.g. GUI exe launched from C:\\Windows\\System32) is never touched,
+      no mkdir is ever attempted there
+    - otherwise falls back to user_output_base()/dirname and prints where
+      the files actually go (stdout is sidecar-safe: heartbeat lines already
+      flow through it, and both build_epub/build_audio return absolute paths)
+    - ensure=False performs no filesystem writes; picks the cwd-anchored dir
+      when it seems usable, else the fallback (for read-only status probes)
+
+    Raises the underlying OSError only when nothing is writable.
+    """
+    if isinstance(output_dir, Path):
+        raw = str(output_dir).strip() or dirname
+    elif isinstance(output_dir, str):
+        raw = output_dir.strip() or dirname
+    elif output_dir is None:
+        raw = dirname
+    else:
+        try:
+            raw = str(output_dir).strip() or dirname
+        except Exception:
+            raw = dirname
+
+    cand = Path(raw)
+    if cand.is_absolute():
+        if ensure:
+            cand.mkdir(parents=True, exist_ok=True)
+        return _abspath(cand)
+
+    try:
+        anchored = Path.cwd() / cand
+    except Exception:
+        anchored = None
+    if anchored is not None and _seems_usable_dir(anchored):
+        if not ensure:
+            return _abspath(anchored)
+        try:
+            anchored.mkdir(parents=True, exist_ok=True)
+            return _abspath(anchored)
+        except OSError:
+            pass  # lost race or ACL quirk between probe and mkdir → fallback
+    fallback = user_output_base() / dirname
+    if ensure:
+        fallback.mkdir(parents=True, exist_ok=True)
+    if anchored is not None:
+        print(f"output directory not usable: {anchored} — using {fallback} instead")
+    return _abspath(fallback)
 
 
 @dataclass(frozen=True)
@@ -65,6 +173,98 @@ class ChapterPlan:
     marker_entries_if_unmerged: List[AudioEntry]
 
 
+# ---------------------------------------------------------------------------
+# Part-audio verification (anti-gap gate).
+#
+# Root cause of skipped fragments in finished audiobooks: Edge TTS silently
+# truncates overlong requests, and the resume logic treated ANY existing file
+# as done — so a truncated part was skipped forever and the merge kept the gap.
+# Every gate below (fresh save, resume skip, plan guard) now validates.
+# ---------------------------------------------------------------------------
+
+#: Files smaller than this are partial writes, never valid speech.
+MIN_PART_BYTES = 1024
+
+#: Baseline speech rate used to derive the minimum plausible duration.
+#: Neural voices read ~13-16 chars/s; 15 is the conservative middle.
+EXPECTED_TTS_CPS = 15.0
+
+#: Actual duration must reach at least this fraction of the expected duration.
+#: 0.5 at 15 cps == effective floor of 7.5 chars/s — far below any natural
+#: rate, so false positives only cost one re-fetch while real truncations
+#: (typically <50% of the text) are caught.
+MIN_DURATION_RATIO = 0.5
+
+#: Duration check applies only to chunks of at least this length; tiny chunks
+#: get the size check only (ffprobe rounding would dominate).
+MIN_TEXT_LEN_FOR_DURATION_CHECK = 50
+
+
+class _TruncatedPartError(RuntimeError):
+    """Internal: Edge TTS returned a complete-but-short file (deterministic)."""
+
+
+def _part_file_valid_quick(path: str) -> bool:
+    """Pure size gate for build_generation_plan (no subprocess, keeps it pure)."""
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) >= MIN_PART_BYTES
+    except OSError:
+        return False
+
+
+def _ensure_valid_or_drop(path: str, text: Optional[str], label: str) -> bool:
+    """Plan-guard helper: an existing file counts as done only if it verifies.
+
+    A stale truncated/merged-with-gaps file is deleted so its parts get
+    re-queued (resume heals instead of reusing the gap). Returns True when
+    the file exists and is valid.
+    """
+    if not _part_file_valid_quick(path):
+        return False
+    ok, reason = verify_part_audio(path, text)
+    if ok:
+        return True
+    try:
+        Path(path).unlink(missing_ok=True)
+    except Exception:
+        pass
+    print(f"{label}: existing file invalid ({reason}), re-generating")
+    return False
+
+
+def verify_part_audio(path: str, text: Optional[str] = None) -> Tuple[bool, str]:
+    """Check a generated part MP3 is complete, not truncated.
+
+    Returns (ok, reason) with reason in:
+    missing | too_small | no_duration | truncated | ok | ok_no_duration_check.
+
+    The duration check needs text + ffprobe; without either only the size
+    gate applies (still catches empty/partial writes).
+    """
+    try:
+        if not os.path.isfile(path):
+            return False, "missing"
+        if os.path.getsize(path) < MIN_PART_BYTES:
+            return False, "too_small"
+    except OSError:
+        return False, "missing"
+
+    if text is None or len(text) < MIN_TEXT_LEN_FOR_DURATION_CHECK:
+        return True, "ok_no_duration_check"
+    if not ffprobe_available():
+        return True, "ok_no_duration_check"
+    try:
+        duration_ms = get_duration_ms(path)
+    except Exception:
+        return True, "ok_no_duration_check"
+    if duration_ms <= 0:
+        return False, "no_duration"
+    min_expected_ms = len(text) * 1000.0 / EXPECTED_TTS_CPS * MIN_DURATION_RATIO
+    if duration_ms < min_expected_ms:
+        return False, "truncated"
+    return True, "ok"
+
+
 def split_text_for_tts(text: str, max_chars: int = 3500) -> List[str]:
     """
     Sentence-boundary chunking with hard-cut fallback.
@@ -74,6 +274,8 @@ def split_text_for_tts(text: str, max_chars: int = 3500) -> List[str]:
     - current flush, len(sentence)>max_chars -> hard cut while start
     - all chunks <=max_chars, order preserved via chunks.append
     """
+    if not isinstance(max_chars, int) or max_chars < 1:
+        raise ValueError("max_chars must be a positive integer")
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return []
@@ -128,14 +330,20 @@ def build_generation_plan(
     - sanitize title via sanitize_filename
     - output paths: f"{chapter_number:03d}_{safe}_part{part_number:03d}.mp3" in _parts for multi
       single-chunk "{chapter_number:03d}_{safe}.mp3" with is_final_chapter_file=True
-    - guard: if not exists(chapter_mp3) and not exists(part_path): jobs.append (resume hint for 3.2)
-      single guard: if not exists(chapter_mp3): jobs.append
+    - guard: an existing chapter/part file re-queues unless it verifies
+      (_ensure_valid_or_drop: size gate + duration vs text when ffprobe is
+      available), so truncated/partial files are regenerated instead of
+      skipped forever; single-chunk guard applies to chapter_mp3 directly
     - ChapterPlan mirror speak.py:75
     - empty chunks -> plan with [],[] and no jobs
-    Pure, no edge_tts/subprocess.
+    I/O only (os + ffprobe resume validation), no edge_tts.
     """
     plans: List[ChapterPlan] = []
     jobs: List[PartJob] = []
+    # CWD-robust: a relative output dir under an unwritable CWD (GUI exe
+    # launched from System32) resolves to the user fallback instead of
+    # dying later in makedirs with WinError 5.
+    output_dir = str(resolve_output_dir(output_dir))
     part_dir = os.path.join(output_dir, "_parts")
 
     for chapter_number, title, text in chapters:
@@ -151,7 +359,7 @@ def build_generation_plan(
             plans.append(
                 ChapterPlan(chapter_number, title, chapter_mp3, [chapter_mp3], [(chapter_number, title, chapter_mp3)])
             )
-            if not os.path.exists(chapter_mp3):
+            if not _ensure_valid_or_drop(chapter_mp3, chunks[0], f"Chapter {chapter_number:03d}"):
                 jobs.append(
                     PartJob(
                         chapter_number=chapter_number,
@@ -169,12 +377,17 @@ def build_generation_plan(
         part_paths: List[str] = []
         marker_entries: List[AudioEntry] = []
 
+        # A merged chapter file with gaps (built from truncated parts by an
+        # older run) must not shadow its parts: verify against the full text.
+        merged_ok = _ensure_valid_or_drop(chapter_mp3, text, f"Chapter {chapter_number:03d}")
         for part_number, chunk in enumerate(chunks, 1):
             part_path = os.path.join(part_dir, f"{chapter_number:03d}_{safe_title}_part{part_number:03d}.mp3")
             part_paths.append(part_path)
             marker_entries.append((chapter_number, f"{title} - part {part_number}", part_path))
 
-            if not os.path.exists(chapter_mp3) and not os.path.exists(part_path):
+            if not merged_ok and not _ensure_valid_or_drop(
+                part_path, chunk, f"Chapter {chapter_number:03d} part {part_number:03d}"
+            ):
                 jobs.append(
                     PartJob(
                         chapter_number=chapter_number,
@@ -198,6 +411,10 @@ async def tts_text_to_mp3(text: str, output_path: str, voice: str, retries: int 
 
     - edge_tts lazy import inside loop (CI without deps still imports core.tts)
     - for attempt in 1..retries: edge_tts.Communicate(text,voice).save
+    - after each save verify_part_audio: invalid file is deleted and the
+      attempt counts as failed (empty/partial writes are retried; a
+      "truncated" verdict raises immediately with a --chunk-size hint —
+      Edge cuts overlong requests deterministically so retries can't help)
     - wait = min(20, 2*attempt) + asyncio.sleep + log retry {attempt}/{retries-1} for {name}
     - raise RuntimeError after exhausting retries with last_error chained
 
@@ -211,9 +428,28 @@ async def tts_text_to_mp3(text: str, output_path: str, voice: str, retries: int 
 
             communicate = edge_tts.Communicate(text, voice)
             await communicate.save(output_path)
-            return
+            ok, reason = verify_part_audio(output_path, text)
+            if ok:
+                return
+            # saved file failed verification — remove so resume never reuses it
+            try:
+                Path(output_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+            if reason == "truncated":
+                raise _TruncatedPartError(
+                    f"TTS output truncated for {Path(output_path).name} "
+                    f"({len(text)} chars) — lower --chunk-size (e.g. 2000) and re-run"
+                )
+            # non-truncated but invalid (empty/partial/unprobed): reuse the
+            # generic retry path below so it gets backoff logging + sleep
+            raise RuntimeError(
+                f"TTS saved invalid audio ({reason}) for {Path(output_path).name}"
+            )
         except (ModuleNotFoundError, ImportError) as e:
             raise RuntimeError(f"edge-tts not installed for {output_path}: {e}") from e
+        except _TruncatedPartError:
+            raise
         except Exception as e:
             last_error = e
             # clean partial file left by failed save to avoid resume skipping corrupt file
@@ -246,7 +482,8 @@ async def run_part_jobs(
     - asyncio.Queue[Optional[PartJob]] filled for job in jobs: put_nowait(job) then sentinel None×parallel
     - workers parallel = asyncio.create_task(worker(i+1)) for i in range(parallel)
     - worker while True: job=await queue.get(); if job is None: task_done/break
-    - skip if os.path.exists(output_path): log skip + size_kb, no TTS call
+    - skip if output verifies (verify_part_audio): log skip + size_kb, no TTS call
+    - else if file exists but invalid (too_small/truncated/no_duration): delete + regenerate
     - else start/done logs + await tts_text_to_mp3
     - progress completed/total with completed_lock, queue.task_done, queue.join, gather, cancel on exception
     - empty jobs -> print No TTS jobs ... and return
@@ -337,7 +574,13 @@ async def run_part_jobs(
                 break
 
             try:
-                if os.path.exists(job.output_path):
+                # Resume gate: an existing file is reused only if it verifies.
+                # Stale truncated/partial files from earlier runs are deleted
+                # and regenerated — previously they were skipped forever,
+                # leaving silent gaps in the finished audiobook.
+                needs_gen = True
+                ok, reason = verify_part_audio(job.output_path, job.text)
+                if ok:
                     try:
                         size_kb = os.path.getsize(job.output_path) // 1024
                     except OSError:
@@ -350,7 +593,19 @@ async def run_part_jobs(
                     _emit_log(f"skip Chapter {job.chapter_number:03d} part {job.part_number:03d}/{job.part_count:03d}")
                     _emit_log(msg_skip)
                     _emit_part(job, "skipped")
-                else:
+                    needs_gen = False
+                elif reason != "missing":
+                    try:
+                        Path(job.output_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    msg_invalid = (
+                        f"worker {worker_id}: invalid Chapter {job.chapter_number:03d} "
+                        f"part {job.part_number:03d}/{job.part_count:03d} ({reason}), regenerating"
+                    )
+                    print(msg_invalid)
+                    _emit_log(msg_invalid)
+                if needs_gen:
                     msg_start = (
                         f"worker {worker_id}: start Chapter {job.chapter_number:03d} "
                         f"part {job.part_number:03d}/{job.part_count:03d}"
@@ -464,7 +719,9 @@ def concat_mp3_files(input_paths: List[str], output_path: str) -> None:
     try:
         with open(concat_file, "w", encoding="utf-8") as f:
             for p in input_paths:
-                safe = os.path.abspath(p).replace("\\", "/").replace("'", "\\'")
+                if not os.path.isfile(p):
+                    raise FileNotFoundError(f"missing concat input: {p}")
+                safe = os.path.abspath(p).replace("\\", "/").replace("'", "'\\''")
                 f.write(f"file '{safe}'\n")
 
         subprocess.run(
@@ -580,11 +837,29 @@ def finalize_chapter_audio(
                 if size == 0:
                     print(f"Warning: existing merged file empty, will re-merge: {plan.chapter_mp3}")
                 else:
-                    audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
-                    size_kb = size // 1024
-                    print(f"Chapter {plan.chapter_number:03d}: existing merged file reused ({size_kb} KB)")
-                    _emit_chapter()
-                    continue
+                    # Corrupt zero-duration merges must not be reused when
+                    # ffprobe can tell (size gate alone keeps gappy merges).
+                    # Only applies to plausibly-large files — tiny test
+                    # fixtures stay on the legacy size path.
+                    try:
+                        if (
+                            size >= MIN_PART_BYTES
+                            and ffprobe_available()
+                            and get_duration_ms(plan.chapter_mp3) <= 0
+                        ):
+                            print(f"Warning: existing merged file has no duration, will re-merge: {plan.chapter_mp3}")
+                        else:
+                            audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
+                            size_kb = size // 1024
+                            print(f"Chapter {plan.chapter_number:03d}: existing merged file reused ({size_kb} KB)")
+                            _emit_chapter()
+                            continue
+                    except Exception:
+                        audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
+                        size_kb = size // 1024
+                        print(f"Chapter {plan.chapter_number:03d}: existing merged file reused ({size_kb} KB)")
+                        _emit_chapter()
+                        continue
             except OSError:
                 pass
 
@@ -820,8 +1095,15 @@ def build_m4b(
 
 __all__ = [
     "sanitize_filename",
+    "user_output_base",
+    "resolve_output_dir",
     "PartJob",
     "ChapterPlan",
+    "MIN_PART_BYTES",
+    "EXPECTED_TTS_CPS",
+    "MIN_DURATION_RATIO",
+    "MIN_TEXT_LEN_FOR_DURATION_CHECK",
+    "verify_part_audio",
     "split_text_for_tts",
     "build_generation_plan",
     "tts_text_to_mp3",

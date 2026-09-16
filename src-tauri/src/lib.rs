@@ -80,9 +80,9 @@ fn resolve_sidecar_entry(app: &tauri::AppHandle) -> (PathBuf, Option<PathBuf>) {
     //    relative path fails with "file not found" → SIDECAR_FAILED when the
     //    exe is double-clicked outside the repo root.)
     #[cfg(target_os = "windows")]
-    const DEV_VENV_REL: &str = "Speak-EPUB-1.0.0/venv/Scripts/python.exe";
+    const DEV_VENV_REL: &str = "venv/Scripts/python.exe";
     #[cfg(not(target_os = "windows"))]
-    const DEV_VENV_REL: &str = "Speak-EPUB-1.0.0/venv/bin/python";
+    const DEV_VENV_REL: &str = "venv/bin/python";
     let rel = PathBuf::from(DEV_VENV_REL);
     if rel.is_file() {
         return (rel, None);

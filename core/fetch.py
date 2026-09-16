@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional
 from urllib.parse import urlparse, urlunparse
 
-# Default cache root: Speak-EPUB-1.0.0/_cache
+# Default cache root: <repo>/_cache
 CACHE_ROOT: Path = Path(__file__).resolve().parents[1] / "_cache"
 
 # Global lock for sequential fetch, no parallel even if GUI double clicks Start
@@ -291,7 +291,7 @@ def fetch_one(
         cover = None
         if not cleaned_text and on_log:
             try:
-                on_log(f"cache-hit isolation empty {url}")
+                on_log(f"cache-hit isolation empty {url} — chapter has no text after cleaning and will be skipped downstream; delete its cache to re-fetch")
             except Exception:
                 pass
         from core.ports import ChapterContent

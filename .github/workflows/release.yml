@@ -47,14 +47,14 @@ jobs:
           $py = Join-Path $runtime 'python/python.exe'
           if (-not (Test-Path $py)) { throw 'Embedded python not found after extraction' }
           & $py -m pip install --disable-pip-version-check --quiet --upgrade pip
-          & $py -m pip install --disable-pip-version-check --quiet -r 'Speak-EPUB-1.0.0/requirements.txt'
+          & $py -m pip install --disable-pip-version-check --quiet -r 'requirements.txt'
 
           # Copy the Python core so `from core.config import handle_rpc` resolves from cwd.
           $code = Join-Path $runtime 'code'
           New-Item -ItemType Directory -Force -Path $code | Out-Null
-          Copy-Item 'Speak-EPUB-1.0.0/core' $code -Recurse
-          Copy-Item 'Speak-EPUB-1.0.0/adapters' $code -Recurse
-          Copy-Item 'Speak-EPUB-1.0.0/speak.py' $code
+          Copy-Item 'core' $code -Recurse
+          Copy-Item 'adapters' $code -Recurse
+          Copy-Item 'speak.py' $code
 
           # Sanity check: ping through handle_rpc with the bundled runtime.
           $ping = & $py -c "import sys; sys.path.insert(0, r'$code'); from core.config import handle_rpc; print(handle_rpc({'id':'1','method':'ping'}))"

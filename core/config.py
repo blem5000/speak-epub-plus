@@ -17,19 +17,19 @@ from typing import Any, Dict
 def get_venv_python() -> str:
     """
     Return OS-aware venv python path.
-    Windows: Speak-EPUB-1.0.0/venv/Scripts/python.exe
-    POSIX  : Speak-EPUB-1.0.0/venv/bin/python
+    Windows: venv/Scripts/python.exe
+    POSIX  : venv/bin/python
     """
-    # Resolve relative to project root (two levels up from this file if run as module,
+    # Resolve relative to project root (one level up from core/),
     # but we return the spec-expected relative string for Tauri shell spawn)
     if os.name == "nt":
-        return "Speak-EPUB-1.0.0/venv/Scripts/python.exe"
-    return "Speak-EPUB-1.0.0/venv/bin/python"
+        return "venv/Scripts/python.exe"
+    return "venv/bin/python"
 
 
 def get_venv_python_abs() -> Path:
     """Absolute path to venv python for local checks."""
-    base = Path(__file__).resolve().parents[2]  # repo root
+    base = Path(__file__).resolve().parents[1]  # repo root
     rel = get_venv_python()
     return base / rel
 
@@ -88,13 +88,12 @@ def get_store_path() -> Path:
     """
     Resolve store.json path.
     Tauri store defaults to app config dir; for CLI parity we also check
-    ./store.json and Speak-EPUB-1.0.0/store.json.
+    ./store.json.
     """
     # Prefer Tauri app config dir if available via env (fallback to local)
     # For sidecar, use repo-root store.json
     for candidate in [
         Path("store.json"),
-        Path("Speak-EPUB-1.0.0/store.json"),
         Path.home() / ".config" / "speak-epub" / "store.json",
     ]:
         if candidate.is_file():
@@ -983,6 +982,8 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     th = _th.Thread(target=_run_in_new_loop, daemon=True)
                     th.start()
                     th.join(timeout=300)
+                    if th.is_alive():
+                        raise TimeoutError("TTS timed out after 300s; partial files kept, re-run to resume")
                     if "e" in exc_box:
                         raise exc_box["e"]
                 else:
@@ -1798,7 +1799,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             # also show raw clamp if from was 0? ensure log shows 0->1
             # if raw was 0 and clamped is 1, above handles
         else:
-            if (to_idx - from_idx) > 500:
+            if (to_idx - from_idx + 1) > 500:
                 return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "range too large (max 500 without cache)"}}
             # still ensure within 1..100000 and swap already done
 
@@ -2004,7 +2005,16 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             import re as _re_stat
             from pathlib import Path as _Path_stat
 
-            base_dir = _Path_stat(outputDir_p) if isinstance(outputDir_p, (str, _Path_stat)) and str(outputDir_p).strip() else _Path_stat("output")
+            base_dir = None
+            try:
+                import importlib as _il_out_stat
+
+                _tts_out_stat = _il_out_stat.import_module("core.tts")
+                base_dir = getattr(_tts_out_stat, "resolve_output_dir")(outputDir_p, ensure=False)
+            except Exception:
+                base_dir = None
+            if base_dir is None:
+                base_dir = _Path_stat(outputDir_p) if isinstance(outputDir_p, (str, _Path_stat)) and str(outputDir_p).strip() else _Path_stat("output")
             if not base_dir.exists():
                 return {"id": rid, "result": {"exists": False, "path": None}}
             # Find most recent .epub file
@@ -2421,7 +2431,7 @@ def _handle_list_chapters_count(rid: Any, url: str) -> Dict[str, Any]:
         return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must be http(s)"}}
     try:
         parsed = urlparse(url)
-        host = (parsed.netloc or "").lower()
+        host = (parsed.hostname or "").lower().rstrip(".")
         if not host:
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must contain host"}}
     except Exception as e:
@@ -2528,5 +2538,5 @@ def run_sidecar_loop() -> None:
 
 if __name__ == "__main__":
     # Allow `python -m core.config` or `python core/config.py` to run loop
-    # Add Speak-EPUB-1.0.0 parent to path when executed directly
+    # Add repo root to path when executed directly
     run_sidecar_loop()

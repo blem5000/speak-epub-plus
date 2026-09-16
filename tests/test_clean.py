@@ -171,7 +171,7 @@ def test_clear_overrides():
 def test_resolve_never_overwrites_adapter_file():
     # ensure adapter file still has original selector
     from pathlib import Path
-    p = Path("Speak-EPUB-1.0.0/adapters/novelphoenix.py")
+    p = Path("adapters/novelphoenix.py")
     # read file to ensure getSelectors still returns div#chapter-content
     txt = p.read_text(encoding="utf-8")
     assert 'start="div#chapter-content"' in txt

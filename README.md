@@ -4,7 +4,7 @@ Convert any EPUB file into a spoken-word audiobook using Microsoft Edge's free n
 
 > **Attribution:** This is a new standalone project built on top of **Speak EPUB** by **Michael Sanford** (MIT, 2026).  
 > It is **not a GitHub fork** by design — the project is expected to diverge significantly — but it preserves the original MIT copyright notice.  
-> See [`NOTICE.md`](NOTICE.md) and [`LICENSE.md`](LICENSE.md) for details, and `Speak-EPUB-1.0.0/` for the preserved original snapshot.
+> See [`NOTICE.md`](NOTICE.md) and [`LICENSE.md`](LICENSE.md) for details. The original CLI snapshot is preserved at `docs/original-speak-epub-readme.md`.
 
 ## Features
 
@@ -13,7 +13,6 @@ Convert any EPUB file into a spoken-word audiobook using Microsoft Edge's free n
 - **Parallel generation** — several TTS requests run at the same time via a global queue (`--parallel`)
 - **Resume anywhere** — finished chapters and parts are skipped on re-run; if a run fails, just repeat the same command
 - **Single-file audiobooks** — optional M4B/M4A output with real chapter markers (requires FFmpeg)
-- **Interactive Windows launcher** — double-click `Run-SpeakEPUB.cmd`, no venv activation needed
 - **Desktop app** — full GUI (find → preview → filters → EPUB build → TTS queue → M4B) driving the same core pipeline through a Python sidecar — see [Desktop app](#desktop-app-tauri--python-sidecar)
 
 ## How it works
@@ -50,15 +49,6 @@ winget install ffmpeg
 ```
 
 > If you see a script execution policy error, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` first.
-
-#### Windows quick start (interactive)
-
-Prefer not to use the terminal? Double-click **`Run-SpeakEPUB.cmd`** (or run `Run-SpeakEPUB.ps1` from PowerShell). The launcher will:
-
-- Create `venv` and install requirements automatically on first run
-- Ask for the EPUB path and output format (MP3 / M4B / M4A)
-- Optionally let you set voice, chapter range, parallel jobs, retries, chunk size, output folder, and more
-- Warn you if FFmpeg is missing when M4B/M4A output is selected
 
 ### macOS
 
@@ -212,12 +202,12 @@ npm run build
 
 **Architecture**
 
-The GUI (`src/`) talks JSON-RPC over stdio to the Python sidecar (`Speak-EPUB-1.0.0/core/config.py:handle_rpc`), which orchestrates the core pipeline: `core/fetch.py` (polite fetching, resume cache, adaptive 429) → `core/clean.py` (selector isolation) → `core/filters.py` (plain/regex filters) → `core/epub.py` (assembly) → `core/tts.py` (chunking, PartJob queue, FFmpeg merge). The dependency direction (GUI → Core → Port → Adapter) is enforced by import-linter (`npm run lint:imports`). Tauri capabilities are least-privilege: shell permissions are removed and the opener is scoped to `**/*.epub` plus the output directory (`src-tauri/capabilities/default.json`).
+The GUI (`src/`) talks JSON-RPC over stdio to the Python sidecar (`core/config.py:handle_rpc`), which orchestrates the core pipeline: `core/fetch.py` (polite fetching, resume cache, adaptive 429) → `core/clean.py` (selector isolation) → `core/filters.py` (plain/regex filters) → `core/epub.py` (assembly) → `core/tts.py` (chunking, PartJob queue, FFmpeg merge). The dependency direction (GUI → Core → Port → Adapter) is enforced by import-linter (`npm run lint:imports`). Tauri capabilities are least-privilege: shell permissions are removed and the opener is scoped to `**/*.epub` plus the output directory (`src-tauri/capabilities/default.json`).
 
 Python sidecar path is OS-aware via `core/config.py:get_venv_python()`:
 
-- Windows: `Speak-EPUB-1.0.0/venv/Scripts/python.exe`
-- macOS/Linux: `Speak-EPUB-1.0.0/venv/bin/python`
+- Windows: `venv/Scripts/python.exe`
+- macOS/Linux: `venv/bin/python`
 
 Never use bare `python`; always spawn via that path (see `docs/sidecar-fallback.md` for the HTTP fallback on `http://localhost:17381` if stdin/stdout spawn fails).
 
@@ -227,11 +217,11 @@ Never use bare `python`; always spawn via that path (see `docs/sidecar-fallback.
 # frontend units (vitest)
 npm test
 # core + adapters + sidecar (pytest; always via the venv interpreter)
-Speak-EPUB-1.0.0/venv/Scripts/python.exe -m pytest Speak-EPUB-1.0.0/tests
+venv/Scripts/python.exe -m pytest tests
 # architecture contracts (import-linter)
 npm run lint:imports
 # sanity-check core contracts
-Speak-EPUB-1.0.0/venv/Scripts/python.exe -m py_compile Speak-EPUB-1.0.0/core/ports.py Speak-EPUB-1.0.0/core/config.py
+venv/Scripts/python.exe -m py_compile core/ports.py core/config.py
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 

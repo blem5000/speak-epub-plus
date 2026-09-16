@@ -3,8 +3,8 @@
 Primary transport is JSON-RPC over stdin/stdout via `tauri-plugin-shell` spawning the venv python
 resolved by `core/config.py:get_venv_python()`:
 
-- Windows: `Speak-EPUB-1.0.0/venv/Scripts/python.exe`
-- macOS/Linux: `Speak-EPUB-1.0.0/venv/bin/python`
+- Windows: `venv/Scripts/python.exe`
+- macOS/Linux: `venv/bin/python`
 
 Rust handler `python_sidecar_call` forwards `{"id","method","params"}` line-delimited JSON
 to the sidecar and returns the response. Spike requirement: `{"type":"hello"}` or
@@ -41,9 +41,9 @@ await fetch("http://localhost:17381/rpc", {
 Python sidecar alternative entry:
 
 ```bash
-Speak-EPUB-1.0.0/venv/Scripts/python.exe -m core.config --http 17381
+venv/Scripts/python.exe -m core.config --http 17381
 # or
-Speak-EPUB-1.0.0/venv/Scripts/python.exe -m http.server 17381  # mock
+venv/Scripts/python.exe -m http.server 17381  # mock
 ```
 
 `core/config.py:handle_rpc` is transport-agnostic — same `{"id","method","params"}` shape
@@ -59,7 +59,7 @@ sequential with 3–5s + jitter (10s safe) via `core/fetch.py` (Epic 2).
 
 ```bash
 # Tauri spawns venv python and ping round-trips
-Speak-EPUB-1.0.0/venv/Scripts/python.exe -c "import core.config, json; print(core.config.handle_rpc({'id':'1','method':'ping'}))"
+venv/Scripts/python.exe -c "import core.config, json; print(core.config.handle_rpc({'id':'1','method':'ping'}))"
 # expected: {"id":"1","result":"pong"}
 ```
 

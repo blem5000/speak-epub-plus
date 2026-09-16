@@ -1,7 +1,7 @@
 {
   "name": "speak-epub",
   "private": true,
-  "version": "0.1.3",
+  "version": "0.1.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",
-    "lint:imports": "\"Speak-EPUB-1.0.0\\venv\\Scripts\\lint-imports.exe\""
+    "lint:imports": "\"venv\\Scripts\\lint-imports.exe\""
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",
@@ -37,5 +37,9 @@
     "typescript": "5.8.3",
     "vite": "6.3.6",
     "vitest": "3.2.4"
+  },
+  "allowScripts": {
+    "@tailwindcss/oxide@4.1.13": true,
+    "esbuild@0.25.12": true
   }
 }

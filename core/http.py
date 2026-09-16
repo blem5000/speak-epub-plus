@@ -45,11 +45,11 @@ def _get(url: str, timeout: float = 12, retries: int = 2) -> requests.Response:
             if resp.status_code < 400:
                 return resp
             # Error status -> decide retry
-            # Treat 429 and 5xx as retryable
+            # Only 429 and 5xx are retryable; other 4xx (403/404) fail fast
+            # to avoid hammering bans — fetch.py already treats them as fatal.
             retryable = resp.status_code == 429 or 500 <= resp.status_code < 600
-            # For robustness, also retry other 4xx up to retries
             if not retryable and 400 <= resp.status_code < 500:
-                retryable = True
+                retryable = False
             if retryable and attempt < retries:
                 wait = min(20, 2 * (attempt + 1)) + random.uniform(0.2, 0.6)
                 time.sleep(wait)

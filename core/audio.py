@@ -25,13 +25,14 @@ from core.tts import (
     build_m4b,
     ffmpeg_available,
     finalize_chapter_audio,
+    resolve_output_dir,
     run_part_jobs,
     split_text_for_tts,
 )
 
 ChapterText = Tuple[int, str, str]  # (chapter_number, title, text)
 
-MAX_AUDIO_RANGE = 200
+MAX_AUDIO_RANGE = 500
 _HEARTBEAT_SEC = 20  # tests patch this down to ~0.2
 
 
@@ -365,26 +366,27 @@ def build_audio(
         to_i = from_i
     if from_i > to_i:
         from_i, to_i = to_i, from_i
-    if (to_i - from_i) > MAX_AUDIO_RANGE:
+    if (to_i - from_i + 1) > MAX_AUDIO_RANGE:
         raise ValueError(f"range too large (max {MAX_AUDIO_RANGE} chapters per run)")
 
     if isinstance(output_dir, (str, Path)) and str(output_dir).strip():
         od = str(output_dir).strip()
         if ".." in od or "\0" in od:
             raise ValueError("outputDir invalid")
-        out_base = Path(od)
     else:
-        out_base = Path("output")
-    # Absolute paths: the GUI opener scope + file:// fallback need them.
-    try:
-        out_base = out_base.resolve()
-    except Exception:
-        pass
+        od = None
+    # CWD-robust absolute path: when the GUI exe is launched with an
+    # unwritable CWD (e.g. C:\Windows\System32), ./output falls back to
+    # ~/Documents/speak-epub/output instead of dying with WinError 5.
+    # The GUI opener scope + file:// fallback need absolute paths anyway.
+    out_base = resolve_output_dir(od)
 
     filt = _load_filters(filters)
     logs: List[str] = []
 
     desired = _resolve_audio_urls(novel_url, from_i, to_i, chapter_urls, cache_dir)
+    if len(desired) > MAX_AUDIO_RANGE:
+        raise ValueError(f"range too large (max {MAX_AUDIO_RANGE} chapters per run)")
     chapters = _chapter_texts(desired, from_i, cache_dir, filt, start_selector, end_selector, logs, novel_url)
 
     # Auto-boilerplate (same detection as EPUB so listeners skip headers too)
@@ -489,6 +491,8 @@ def build_audio(
                 th = _th.Thread(target=_run_in_new_loop, daemon=True)
                 th.start()
                 th.join(timeout=1800)
+                if th.is_alive():
+                    raise TimeoutError("TTS timed out after 1800s; partial files kept, re-run to resume")
                 if "e" in exc_box:
                     raise exc_box["e"]
             else:

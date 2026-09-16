@@ -128,7 +128,7 @@ def run_epubcheck(epub_path: Path | str) -> Tuple[bool, List[str]]:
     # Try java -jar epubcheck.jar if java exists
     java_bin = shutil.which("java")
     if java_bin:
-        for cand in [Path("epubcheck.jar"), Path("tools/epubcheck.jar"), Path("Speak-EPUB-1.0.0/tools/epubcheck.jar")]:
+        for cand in [Path("epubcheck.jar"), Path("tools/epubcheck.jar")]:
             if cand.is_file():
                 try:
                     result = subprocess.run(
@@ -498,20 +498,31 @@ def build_epub(
         except Exception:
             auto_boilerplate = True
 
-    # Resolve output dir
-    if output_dir is None or (isinstance(output_dir, str) and not output_dir.strip()):
-        # canonical fallback: ./output under repo root if not supplied
-        # Use cwd / output
-        out_base = Path("output")
-    else:
-        out_base = Path(output_dir)
-    out_base = Path(out_base)
+    # Resolve output dir (CWD-robust absolute path: when the GUI exe is
+    # launched with an unwritable CWD such as C:\Windows\System32, ./output
+    # falls back to ~/Documents/speak-epub/output instead of WinError 5).
     # Absolute paths: the GUI opener scope + file:// fallback need them
     # (relative paths silently fail to open). Display shows the full path.
+    if output_dir is None or (isinstance(output_dir, str) and not output_dir.strip()):
+        # canonical fallback: ./output under cwd if writable, else user dir
+        out_base = None
+    else:
+        out_base = output_dir
     try:
-        out_base = out_base.resolve()
+        import importlib as _il_out
+
+        _tts_out = _il_out.import_module("core.tts")
+        out_base = getattr(_tts_out, "resolve_output_dir")(out_base)
+    except OSError:
+        raise
     except Exception:
-        pass
+        # resolve helper unavailable: legacy cwd-anchored behavior
+        out_base = Path(out_base) if out_base is not None else Path("output")
+        try:
+            out_base = out_base.resolve()
+        except Exception:
+            pass
+    out_base = Path(out_base)
     # If output_dir is file-like? ensure directory
     # out_base is directory for epub file
 
@@ -878,8 +889,40 @@ def build_epub(
         try:
             import requests
 
-            resp = requests.get(cover_url, timeout=8, headers={"User-Agent": "SpeakEPUB/1.0"})
-            if resp.status_code == 200 and resp.content:
+            resp = requests.get(cover_url, timeout=8, headers={"User-Agent": "SpeakEPUB/1.0"}, stream=True)
+            # Cap cover download at 8 MB (stream, don't buffer unbounded body).
+            # Falls back to resp.content for test doubles without iter_content.
+            cover_data = b""
+            try:
+                try:
+                    chunks = resp.iter_content(chunk_size=65536)
+                    # Mock doubles return a Mock, not bytes — fall back below
+                    if isinstance(chunks, (bytes, bytearray)):
+                        cover_data = bytes(chunks)
+                    else:
+                        for chunk in chunks:
+                            if not isinstance(chunk, (bytes, bytearray)):
+                                raise TypeError("non-bytes cover chunk")
+                            if not chunk:
+                                continue
+                            cover_data += chunk
+                            if len(cover_data) > 8 * 1024 * 1024:
+                                cover_messages.append("cover too large (>8MB), skipped")
+                                logs.append("no cover (too large)")
+                                cover_data = b""
+                                break
+                except TypeError:
+                    cover_data = getattr(resp, "content", b"") or b""
+                    if len(cover_data) > 8 * 1024 * 1024:
+                        cover_messages.append("cover too large (>8MB), skipped")
+                        logs.append("no cover (too large)")
+                        cover_data = b""
+            finally:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+            if resp.status_code == 200 and cover_data:
                 ctype = resp.headers.get("Content-Type", "").lower()
                 # guess extension
                 ext = "jpg"
@@ -894,7 +937,6 @@ def build_epub(
                     ext = "png"
                 elif cover_url.lower().endswith(".jpg") or cover_url.lower().endswith(".jpeg"):
                     ext = "jpg"
-                cover_data = resp.content
                 # data-url guard already
                 if len(cover_data) > 0:
                     # use set_cover which creates cover image and html
