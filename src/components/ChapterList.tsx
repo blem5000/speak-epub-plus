@@ -10,9 +10,11 @@ type ChapterListProps = {
   from: number;
   to: number;
   anchor: number | null;
+  busy: boolean;
   onSelectedChange: (next: Set<number>) => void;
   onRangeChange: (from: number, to: number) => void;
   onAnchorChange: (anchor: number | null) => void;
+  onStartFetch: (from: number, to: number) => void;
   onPreview?: (index: number) => void;
 };
 
@@ -22,14 +24,19 @@ export default function ChapterList({
   from,
   to,
   anchor,
+  busy,
   onSelectedChange,
   onRangeChange,
   onAnchorChange,
+  onStartFetch,
   onPreview,
 }: ChapterListProps): JSX.Element {
   const N = chapters.length;
   const [focusedIndex, setFocusedIndex] = useState<number>(0);
   const [showAll, setShowAll] = useState(false);
+  // The list itself is rarely used (ranges are typed, not clicked) —
+  // keep it collapsed by default, RangeBar stays visible.
+  const [expanded, setExpanded] = useState(false);
   const rowRefs = useRef<Array<HTMLTableRowElement | null>>([]);
   const displayChapters = N > 500 && !showAll ? chapters.slice(0, 100) : chapters;
 
@@ -56,7 +63,7 @@ export default function ChapterList({
     }
   };
 
-  const handleSelectRange = (rangeFrom: number, rangeTo: number): void => {
+  const handleStartRange = (rangeFrom: number, rangeTo: number): void => {
     if (N === 0) return;
     // Use the explicitly committed field values (never stale parent props).
     const set = rangeToSet(rangeFrom, rangeTo, N);
@@ -70,11 +77,7 @@ export default function ChapterList({
     if (a > b) [a, b] = [b, a];
     onAnchorChange(b);
     onRangeChange(a, b);
-  };
-
-  const handleClear = (): void => {
-    onSelectedChange(new Set());
-    onAnchorChange(null);
+    onStartFetch(a, b);
   };
 
   const handleKeyDownRow = (e: React.KeyboardEvent<HTMLTableRowElement>, rowPos: number, chapterIdx: number): void => {
@@ -150,13 +153,22 @@ export default function ChapterList({
           to={to}
           total={total}
           selectedCount={selectedCount}
+          busy={busy}
           onChangeRange={onRangeChange}
-          onSelectRange={handleSelectRange}
-          onClear={handleClear}
+          onStartRange={handleStartRange}
         />
+        <button
+          type="button"
+          data-testid="chapter-list-toggle"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          className="mt-2 rounded-md border bg-card px-3 py-1 text-body-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {expanded ? t("chapterList.collapse") : t("chapterList.expand", { total: N })}
+        </button>
       </div>
 
-      {isVirtualized ? (
+      {expanded && isVirtualized ? (
         <div
           className="bg-warning/10 px-4 py-2 text-body-sm text-warning flex items-center justify-between gap-2"
           data-testid="virtualized-warning"
@@ -179,6 +191,7 @@ export default function ChapterList({
         </div>
       ) : null}
 
+      {expanded ? (
       <div className="max-h-[480px] overflow-auto" role="grid" aria-rowcount={N} aria-colcount={3}>
         <table className="w-full border-collapse text-left">
           <thead className="sticky top-0 z-10 border-b bg-card backdrop-blur supports-[backdrop-filter]:bg-card/95">
@@ -269,6 +282,7 @@ export default function ChapterList({
           </tbody>
         </table>
       </div>
+      ) : null}
     </div>
   );
 }

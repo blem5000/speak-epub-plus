@@ -19,10 +19,12 @@
   "chapterList.retry": "Spróbuj ponownie",
   "chapterList.errorValue": "Nieprawidłowy URL",
   "chapterList.errorList": "Nie udało się pobrać listy",
+  "chapterList.expand": "Pokaż listę ({total})",
+  "chapterList.collapse": "Ukryj listę",
   "range.from": "Od",
   "range.to": "Do",
-  "range.select": "Zaznacz zakres",
-  "range.deselect": "Odznacz",
+  "range.start": "Start",
+  "range.starting": "Uruchamianie…",
   "preview.original": "Oryginał",
   "preview.cleaned": "Oczyszczone",
   "queue.title": "Kolejka",
@@ -128,5 +130,8 @@
   "audio.openFile": "Otwórz plik",
   "audio.openFolder": "Otwórz folder",
   "audio.chaptersCount": "{count} rozdziałów",
-  "audio.partsCount": "{count} fragmentów"
+  "audio.partsCount": "{count} fragmentów",
+  "updater.message": "Dostępna nowa wersja {latest} (masz {current}).",
+  "updater.download": "Pobierz",
+  "updater.later": "Później"
 }

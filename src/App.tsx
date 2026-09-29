@@ -9,6 +9,7 @@ import Filters from "./components/Filters";
 import FiltersWindow from "./components/FiltersWindow";
 import Result from "./components/Result";
 import Audiobook from "./components/Audiobook";
+import UpdaterBanner from "./components/UpdaterBanner";
 import Queue from "./components/Queue";
 import ThrottleBadge from "./components/ThrottleBadge";
 import ProgressTrack from "./components/ProgressTrack";
@@ -238,11 +239,20 @@ export default function App(): JSX.Element {
     // selection wins, else the range — never silently empty for sparse lists.
     return urlsForFetch(chapterList, selected, from, to);
   })();
-  const handleStartFetch = (): void => {
+  const handleStartFetchRange = (rangeFrom: number, rangeTo: number): void => {
+    // Single Start entry: fetch exactly the committed od–do range.
+    // URLs are computed from the explicit args (never stale state).
     if (!hasSelectedUrl || chapterLoading || N === 0 || fetching || audioBuilding) return;
-    const urls = selectedUrlsForFetch;
+    const urls = urlsForFetch(chapterList, new Set(), rangeFrom, rangeTo);
     if (urls.length === 0) return;
-    void startFetcher({ urls, novelUrl: selectedUrl ?? undefined, from, to });
+    const clampOne = (v: number, fallback: number): number =>
+      Number.isFinite(v) ? Math.max(1, Math.min(Math.trunc(v), N)) : fallback;
+    void startFetcher({
+      urls,
+      novelUrl: selectedUrl ?? undefined,
+      from: clampOne(rangeFrom, 1),
+      to: clampOne(rangeTo, N),
+    });
   };
 
   // EPUB build — Story 2.4
@@ -462,6 +472,7 @@ export default function App(): JSX.Element {
         })()}
         <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
         <FiltersWindow open={filtersWindowOpen} onClose={() => setFiltersWindowOpen(false)} />
+        <UpdaterBanner />
 
         {/* Find surface — FindInput + ResultsTable per spec 1.3 */}
         <section className="mt-6 rounded-lg border bg-card p-6 shadow-sm">
@@ -641,9 +652,11 @@ export default function App(): JSX.Element {
                   from={from}
                   to={to}
                   anchor={anchor}
+                  busy={fetching || audioBuilding}
                   onSelectedChange={setSelected}
                   onRangeChange={handleRangeChange}
                   onAnchorChange={setAnchor}
+                  onStartFetch={handleStartFetchRange}
                   onPreview={handlePreview}
                 />
               </div>
@@ -662,15 +675,6 @@ export default function App(): JSX.Element {
         {hasSelectedUrl && !chapterLoading ? (
           <>
             <div className="mt-4 flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                data-testid="fetch-start"
-                onClick={handleStartFetch}
-                disabled={chapterLoading || N === 0 || fetching || audioBuilding}
-                className="rounded-md bg-accent px-4 py-2 text-body font-medium text-accent-foreground hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                {fetching ? "Pobieranie…" : `Start (${selectedUrlsForFetch.length})`}
-              </button>
               {fetcherError ? (
                 <span className="ml-3 text-body-sm text-destructive" role="alert" data-testid="fetcher-error">
                   {fetcherError}

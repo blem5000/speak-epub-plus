@@ -7,11 +7,12 @@ type RangeBarProps = {
   to: number;
   total: number;
   selectedCount: number;
+  busy: boolean;
   onChangeRange: (from: number, to: number) => void;
   // Explicit committed range — never reads parent props, so type→Enter/click
   // always uses what is in the fields (no stale-closure after typing).
-  onSelectRange: (from: number, to: number) => void;
-  onClear: () => void;
+  // Start both selects the range and begins fetching it.
+  onStartRange: (from: number, to: number) => void;
 };
 
 export default function RangeBar({
@@ -19,12 +20,12 @@ export default function RangeBar({
   to,
   total,
   selectedCount,
+  busy,
   onChangeRange,
-  onSelectRange,
-  onClear,
+  onStartRange,
 }: RangeBarProps): JSX.Element {
   const N = total;
-  const disabled = N === 0;
+  const disabled = N === 0 || busy;
 
   // local string state to allow empty field while typing
   const [fromStr, setFromStr] = useState(String(from));
@@ -84,22 +85,22 @@ export default function RangeBar({
     setToStr(String(to));
   };
 
-  const handleSelectClick = (): void => {
-    // Commit the visible fields first, then select exactly that range —
+  const handleStartClick = (): void => {
+    // Commit the visible fields first, then start exactly that range —
     // parent props may still hold pre-typing values at this point.
     const committed = commitFields();
     if (!committed) {
       revertFields();
       return;
     }
-    onSelectRange(committed[0], committed[1]);
+    onStartRange(committed[0], committed[1]);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, kind: "from" | "to"): void => {
-    // P12: Enter confirms range like clicking Zaznacz — handle both inputs
+    // P12: Enter confirms range like clicking Start — handle both inputs
     if (e.key === "Enter") {
       e.preventDefault();
-      handleSelectClick();
+      handleStartClick();
       return;
     }
     // type="text" has no native spinner: ArrowUp/Down step by 1 and commit.
@@ -194,23 +195,13 @@ export default function RangeBar({
       <div className="flex items-center gap-2">
         <button
           type="button"
-          data-testid="range-select"
-          onClick={handleSelectClick}
+          data-testid="range-start"
+          onClick={handleStartClick}
           disabled={disabled}
           aria-disabled={disabled}
           className="rounded-md bg-accent px-4 py-2 text-body font-medium text-accent-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {t("range.select")}
-        </button>
-        <button
-          type="button"
-          data-testid="range-deselect"
-          onClick={onClear}
-          disabled={disabled && selectedCount === 0}
-          aria-disabled={disabled && selectedCount === 0}
-          className="rounded-md border bg-card px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {t("range.deselect")}
+          {busy ? t("range.starting") : t("range.start")}
         </button>
       </div>
 

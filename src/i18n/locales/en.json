@@ -19,10 +19,12 @@
   "chapterList.retry": "Retry",
   "chapterList.errorValue": "Invalid URL",
   "chapterList.errorList": "Failed to fetch list",
+  "chapterList.expand": "Show list ({total})",
+  "chapterList.collapse": "Hide list",
   "range.from": "From",
   "range.to": "To",
-  "range.select": "Select range",
-  "range.deselect": "Clear",
+  "range.start": "Start",
+  "range.starting": "Starting…",
   "preview.original": "Original",
   "preview.cleaned": "Cleaned",
   "queue.title": "Queue",
@@ -128,5 +130,8 @@
   "audio.openFile": "Open file",
   "audio.openFolder": "Open folder",
   "audio.chaptersCount": "{count} chapters",
-  "audio.partsCount": "{count} parts"
+  "audio.partsCount": "{count} parts",
+  "updater.message": "New version {latest} available (you have {current}).",
+  "updater.download": "Download",
+  "updater.later": "Later"
 }
