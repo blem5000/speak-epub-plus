@@ -121,4 +121,15 @@ describe("i18n auto-detect pl/en", () => {
     const mod2 = await import("./index");
     expect(mod2.detectLocale()).toBe("en");
   });
+
+  it("en/pl catalogs have identical key sets (no drift)", async () => {
+    vi.resetModules();
+    const mod = await import("./index");
+    expect(Object.keys(mod.catalogs.pl).sort()).toEqual(Object.keys(mod.catalogs.en).sort());
+    // newly adopted M4 keys must exist in both
+    for (const key of ["toast.ban", "ffmpeg.missing", "filters.close", "preview.close", "preview.rendered"]) {
+      expect(mod.catalogs.en).toHaveProperty(key);
+      expect(mod.catalogs.pl).toHaveProperty(key);
+    }
+  });
 });

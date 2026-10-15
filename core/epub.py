@@ -437,7 +437,8 @@ def build_epub(
             elif not re.match(r"^https?://", cover_url, re.I):
                 cover_url = None
             elif len(cover_url) > 500:
-                cover_url = cover_url[:500]
+                # H7: truncated URL would fetch the wrong resource — drop it.
+                cover_url = None
 
     # Parse from/to
     def _to_int(v, default=None):
@@ -887,6 +888,9 @@ def build_epub(
     cover_messages: List[str] = []
     if cover_url and not cover_url.lower().startswith("data:"):
         try:
+            # M5 note: single-shot streamed GET (not core.http._get) — the 8 MB
+            # cap below only bounds memory when the body streams; _get buffers
+            # the whole response first. Cover is best-effort, no retry.
             import requests
 
             resp = requests.get(cover_url, timeout=8, headers={"User-Agent": "SpeakEPUB/1.0"}, stream=True)
@@ -899,6 +903,10 @@ def build_epub(
                     # Mock doubles return a Mock, not bytes — fall back below
                     if isinstance(chunks, (bytes, bytearray)):
                         cover_data = bytes(chunks)
+                        if len(cover_data) > 8 * 1024 * 1024:
+                            cover_messages.append("cover too large (>8MB), skipped")
+                            logs.append("no cover (too large)")
+                            cover_data = b""
                     else:
                         for chunk in chunks:
                             if not isinstance(chunk, (bytes, bytearray)):

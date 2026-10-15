@@ -330,4 +330,29 @@ describe("Audiobook — Step 7 MP3/M4B/M4A", () => {
       delete (globalThis as Record<string, unknown>).__mergeCb;
     }
   }, 30000);
+
+  it("open file surfaces opener rejection as toast (no silent no-op)", async () => {
+    const user = userEvent.setup();
+    mockBuildAudio.mockResolvedValue({
+      id: "1",
+      result: {
+        audio_dir: "output/Book_audiobook",
+        chapter_count: 1,
+        part_count: 1,
+        chapters: [],
+        audiobook: { path: "output/Book_audiobook/Book.m4b", size: 10, format: "m4b" },
+        format: "m4b",
+        voice: "en-US-AndrewNeural",
+        ffmpeg: true,
+      },
+    });
+    mockInvoke.mockImplementation((cmd: unknown) =>
+      cmd === "plugin:opener|open_path" ? Promise.reject(new Error("opener failed")) : Promise.resolve(undefined)
+    );
+    render(<Audiobook {...baseProps} />);
+    await user.click(screen.getByTestId("audio-build"));
+    await waitFor(() => expect(screen.getByTestId("audio-open")).toBeInTheDocument());
+    await user.click(screen.getByTestId("audio-open"));
+    expect(await screen.findByTestId("audio-toast")).toHaveTextContent("opener failed");
+  });
 });

@@ -281,4 +281,29 @@ describe("useFetcher hook", () => {
     });
     await waitFor(() => expect(result.current.fetching).toBe(false));
   });
+
+  it("M2 sparse fetch from=36 marks only requested indices done", async () => {
+    const urls = [36, 37, 38, 39, 40].map((n) => `https://www.novelphoenix.com/novel/123/chapter/${n}`);
+    mockCallSidecar.mockResolvedValue({
+      id: "1",
+      result: {
+        chapters: urls.map((u, i) => ({ url: u, title: `Chapter ${36 + i}`, html: "<div>h</div>", text: "t" })),
+        skipped: 0,
+        total: 5,
+        badge: null,
+        logs: [],
+        throttles: [],
+      },
+    });
+    const { result } = renderHook(() => useFetcher());
+    await act(async () => {
+      await result.current.start({ urls, novelUrl: "https://www.novelphoenix.com/novel/123", from: 36, to: 40 });
+    });
+    await waitFor(() => expect(result.current.fetching).toBe(false));
+    // sparse-safe: unselected chapters must not light up
+    expect(result.current.statuses[1]).toBeUndefined();
+    expect(result.current.statuses[35]).toBeUndefined();
+    expect(result.current.statuses[36]).toBe("done");
+    expect(result.current.statuses[40]).toBe("done");
+  });
 });

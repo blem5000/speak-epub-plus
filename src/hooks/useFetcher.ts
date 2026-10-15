@@ -282,7 +282,7 @@ export function useFetcher(): UseFetcherReturn {
           setBadge(computed);
         }
 
-        // Mark done for fetched — cap logs, respect failed
+        // Mark done for fetched — cap logs, respect failed (M2: sparse-safe)
         const _failedSet = (() => {
           if (data && typeof data === "object") {
             const obj = data as Record<string, unknown>;
@@ -290,20 +290,46 @@ export function useFetcher(): UseFetcherReturn {
           }
           return new Set<string>();
         })();
+        // requested chapter indices for this run (sparse-safe: from+offset, not 1..N)
+        const _requestedIdx: number[] = (() => {
+          try {
+            if (params.urls && Array.isArray(params.urls) && params.urls.length > 0) {
+              const fromN = typeof params.from === "number" ? params.from : 1;
+              return params.urls.map((_, i) => fromN + i);
+            }
+          } catch {
+            // fall through
+          }
+          return [];
+        })();
+        const _failedIdx = new Set<number>();
+        try {
+          if (_failedSet.size > 0 && params.urls && Array.isArray(params.urls)) {
+            const fromN = typeof params.from === "number" ? params.from : 1;
+            params.urls.forEach((u, i) => {
+              if (_failedSet.has(u)) _failedIdx.add(fromN + i);
+            });
+          }
+        } catch {
+          // ignore mapping errors — failed stays error via statuses event
+        }
         if (fetchedCount > 0) {
           setLogs((prev) => [...prev, `fetched ${fetchedCount} chapters`].slice(-200));
           setStatuses((prev) => {
             const next = { ...prev };
-            for (let i = 1; i <= fetchedCount + skipped + _failedSet.size; i++) {
+            // M2: mark only requested indices done; never touch unselected chapters
+            const targets = _requestedIdx.length > 0
+              ? _requestedIdx
+              : Array.from({ length: fetchedCount + skipped }, (_, i) => i + 1);
+            for (const i of targets) {
+              if (_failedIdx.has(i)) {
+                next[i] = "error";
+                continue;
+              }
               if (next[i] === "error") continue; // keep failed as error
               if (!next[i] || next[i] === "queued" || next[i] === "fetching") {
                 next[i] = "done";
               }
-            }
-            // ensure failed urls map to error if we have indices — fallback via log
-            if (_failedSet.size > 0) {
-              // mark last known statuses that are not done as error if they were in failed
-              // simple: if any status still queued after done marking but failed exists, mark highest as error
             }
             return next;
           });

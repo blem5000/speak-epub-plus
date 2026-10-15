@@ -85,13 +85,38 @@ export async function callSidecar(
     if (msg === "aborted" || opts?.signal?.aborted) {
       return { id, error: { code: "ABORTED", message: "aborted" } };
     }
-    console.warn(`sidecar failed: ${msg} — falling back to http://localhost:17381`, err);
+    console.warn(`sidecar failed: ${msg} — http fallback gated`, err);
+    // H3: unauthenticated localhost fallback is a local-CSRF vector.
+    // Allow only with explicit opt-in (Vite flag or localStorage) and with
+    // a per-method timeout (long M4B encode needs 300s, not 2s).
+    const allowHttp =
+      (typeof import.meta !== "undefined" &&
+        (import.meta as unknown as Record<string, Record<string, string>>).env?.VITE_ALLOW_HTTP_FALLBACK === "1") ||
+      (() => {
+        try {
+          return typeof localStorage !== "undefined" && localStorage.getItem("SPEAK_ALLOW_HTTP_FALLBACK") === "1";
+        } catch {
+          // storage blocked (private mode / sandbox) -> fallback stays disabled
+          return false;
+        }
+      })();
+    if (!allowHttp) {
+      return {
+        id,
+        error: {
+          code: "SIDECAR_FAILED",
+          message: `sidecar failed: ${msg} (http fallback disabled — set VITE_ALLOW_HTTP_FALLBACK=1 for dev daemon)`,
+        },
+      };
+    }
+    const LONG_METHODS = new Set(["buildAudio", "build_audio", "buildAudiobook", "buildEpub", "build_epub"]);
+    const fallbackMs = LONG_METHODS.has(method) ? 300000 : 10000;
     // Attempt HTTP fallback (best-effort) with timeout and id check
     const ctl = new AbortController();
     let t: number | null = null;
     try {
       linkAbort(ctl);
-      t = (typeof window !== "undefined" ? window.setTimeout : setTimeout)(() => ctl.abort(), 2000) as unknown as number;
+      t = (typeof window !== "undefined" ? window.setTimeout : setTimeout)(() => ctl.abort(), fallbackMs) as unknown as number;
       // if external signal already aborted, abort immediately
       if (opts?.signal?.aborted) ctl.abort();
       const res = await fetch("http://localhost:17381/rpc", {
@@ -402,13 +427,26 @@ export async function buildEpub(
     const a = String(params.author).trim();
     payload.author = a.slice(0, 200);
   }
+  let droppedCover: string | null = null;
   if (params.coverUrl !== undefined && params.coverUrl !== null) {
     const c = String(params.coverUrl).trim();
-    if (c) payload.coverUrl = c.slice(0, 500);
+    if (c) {
+      // Best-effort like the backend (cover_url=None -> build without cover):
+      // never abort the whole EPUB build over one cover URL. Surface the drop
+      // in result.messages (shown in the Result panel), not just the console.
+      if (c.length > 500 || !/^(https?:\/\/|data:image\/)/i.test(c)) {
+        droppedCover = `cover dropped (unusable url, ${c.length} chars) — building without cover`;
+        console.warn(`buildEpub: ${droppedCover}`);
+      } else {
+        payload.coverUrl = c;
+      }
+    }
   }
   if (params.outputDir) {
     const od = String(params.outputDir).trim();
     if (od.includes("..") || od.includes("\0")) throw new Error("outputDir invalid");
+    if (/^[a-zA-Z]:[\\/]/.test(od) || od.startsWith("\\\\")) throw new Error("outputDir must be relative");
+    if (od.startsWith("/") || od.startsWith("~")) throw new Error("outputDir must be relative");
     payload.outputDir = od;
   }
   if (params.urls) {
@@ -419,7 +457,11 @@ export async function buildEpub(
     if (cleaned.length === 0) throw new Error("urls empty after trim");
     payload.urls = cleaned;
   }
-  return callSidecar("buildEpub", payload, opts);
+  const res = await callSidecar("buildEpub", payload, opts);
+  if (droppedCover && res.result && Array.isArray((res.result as { messages?: unknown }).messages)) {
+    (res.result as { messages: string[] }).messages.unshift(droppedCover);
+  }
+  return res;
 }
 
 export async function getEpubStatus(
@@ -493,23 +535,11 @@ export async function buildAudio(params: AudioParams, opts?: { signal?: AbortSig
   return callSidecar("buildAudio", payload, opts);
 }
 
-/** Open a file/folder via Tauri opener, with browser fallback. Shared by Result/Audiobook. */
+/** Open a file/folder via Tauri opener only (H3 — no shell|open, no file:// fallback). */
 export async function openPath(path: string): Promise<void> {
   if (!path || !path.trim()) return;
   const p = path.trim();
-  try {
-    await invoke("plugin:opener|open_path", { path: p });
-    return;
-  } catch {
-    try {
-      await invoke("plugin:shell|open", { path: p });
-      return;
-    } catch {
-      try {
-        window.open(`file://${p}`, "_blank");
-      } catch {}
-    }
-  }
+  await invoke("plugin:opener|open_path", { path: p });
 }
 
 /** Reveal a file (or folder) in the system file manager. Best UX for "Open folder". */

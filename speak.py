@@ -91,6 +91,8 @@ def extract_chapters(epub_path: str, start_chapter: int = 1, end_chapter: Option
     chapters: list[Chapter] = []
     items_by_id = {item.id: item for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT)}
     extracted_chapter_number = 0
+    skipped_near_empty = 0
+    saw_content = False
 
     for item_id, _ in book.spine:
         item = items_by_id.get(item_id)
@@ -108,12 +110,42 @@ def extract_chapters(epub_path: str, start_chapter: int = 1, end_chapter: Option
         text = re.sub(r"\s+", " ", text).strip()
 
         if len(text) > 100:
+            saw_content = True
             extracted_chapter_number += 1
             if extracted_chapter_number < start_chapter:
                 continue
             if end_chapter is not None and extracted_chapter_number > end_chapter:
                 break
             chapters.append((extracted_chapter_number, title, text))
+        else:
+            skipped_near_empty += 1
+
+    if skipped_near_empty:
+        print(f"skipped {skipped_near_empty} near-empty spine item(s) (<100 chars: cover/TOC)")
+    if not chapters and not saw_content:
+        # M3: never silently yield nothing — but only when the book itself has
+        # no usable content. When chapters exist yet the range excluded them
+        # (e.g. --start-chapter past the end), return [] instead of
+        # fabricating chapter 1 outside the requested range.
+        longest: Chapter | None = None
+        for item_id, _ in book.spine:
+            item = items_by_id.get(item_id)
+            if item is None:
+                continue
+            try:
+                soup2 = BeautifulSoup(item.get_content(), "lxml")
+                heading2 = soup2.find(["h1", "h2", "h3"])
+                title2 = heading2.get_text(strip=True) if heading2 else item.get_name()
+                for tag in soup2(["script", "style", "nav", "aside"]):
+                    tag.decompose()
+                text2 = re.sub(r"\s+", " ", soup2.get_text(separator=" ", strip=True)).strip()
+            except Exception:
+                continue
+            if longest is None or len(text2) > len(longest[2]):
+                longest = (1, title2, text2)
+        if longest is not None and longest[2].strip():
+            print(f"Warning: all spine items <100 chars — keeping longest ({len(longest[2])} chars) instead of empty output")
+            chapters.append(longest)
 
     return chapters
 
@@ -286,6 +318,11 @@ def main() -> None:
 
     if args.chunk_size < 500:
         print("Error: --chunk-size must be at least 500.")
+        sys.exit(1)
+
+    if args.chunk_size > 5000:
+        # M3: Edge truncates overlong requests — fail loudly instead of silent gaps.
+        print("Error: --chunk-size above 5000 truncates in Edge TTS (silent audio gaps). Use <=5000 (default 3500, try 2000 on truncation).")
         sys.exit(1)
 
     if args.parallel < 1:

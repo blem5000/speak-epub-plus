@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict
@@ -65,7 +66,18 @@ _CHAPTER_CACHE: Dict[str, Any] = {}
 
 
 def _normalize_cache_key(url: str) -> str:
-    """Normalize url for _CHAPTER_CACHE to avoid duplicate entries for same novel."""
+    """Normalize url for _CHAPTER_CACHE — delegates to core.fetch (M1 single source)."""
+    try:
+        if not isinstance(url, str):
+            return ""
+        import importlib as _il_nck
+
+        _fetch = _il_nck.import_module("core.fetch")
+        fn = getattr(_fetch, "_normalize_cache_key", None)
+        if callable(fn):
+            return str(fn(url))
+    except Exception:
+        pass
     try:
         from urllib.parse import urlparse, urlunparse
 
@@ -73,15 +85,70 @@ def _normalize_cache_key(url: str) -> str:
         host = (p.hostname or "").lower().rstrip(".")
         if not host:
             return url.strip().lower().rstrip("/.")
-        # include port if explicit (distinct resource)
-        netloc = host + (f":{p.port}" if p.port else "")
-        # normalize path: strip trailing slash/dot, keep case for path but host lower
-        # strip query/fragment for novel identity (same novel with ?page=2 should hit cache)
+        port = p.port
+        scheme = p.scheme.lower()
+        if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+            port = None
+        netloc = host + (f":{port}" if port else "")
         path = p.path.rstrip("/").rstrip(".")
-        normalized = urlunparse((p.scheme.lower(), netloc, path, "", "", ""))
+        normalized = urlunparse((scheme, netloc, path, "", "", ""))
         return normalized.rstrip("/.")
     except Exception:
-        return url.strip().lower().rstrip("/.")
+        try:
+            return url.strip().lower().rstrip("/.")
+        except Exception:
+            return ""
+
+
+def _exc_code(exc: BaseException | None) -> str:
+    """Best-effort machine code from exception chain (M1 — prefer attrs over message).
+
+    Climbs __cause__/__context__, returns .code/.status-like attribute when
+    present, else ''. Callers must not substring-match URLs/messages.
+    """
+    try:
+        seen: set[int] = set()
+        cur: BaseException | None = exc
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            for attr in ("code", "status", "status_code", "errno_name"):
+                try:
+                    v = getattr(cur, attr, None)
+                except Exception:
+                    v = None
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+                if isinstance(v, int) and not isinstance(v, bool):
+                    return str(v)
+            resp = getattr(cur, "response", None)
+            try:
+                sc = getattr(resp, "status_code", None)
+            except Exception:
+                sc = None
+            if isinstance(sc, int) and not isinstance(sc, bool):
+                return str(sc)
+            nxt = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+            cur = nxt if isinstance(nxt, BaseException) else None
+    except Exception:
+        pass
+    return ""
+
+
+def _is_code(exc: BaseException | None, *codes: str) -> bool:
+    """True when exception chain carries one of *codes (attr match) or message names it as a token."""
+    try:
+        c = _exc_code(exc).upper()
+        if c and any(x.upper() in c for x in codes):
+            return True
+    except Exception:
+        pass
+    try:
+        import re as _re_ic
+
+        msg = str(exc) if exc is not None else ""
+        return any(_re_ic.search(r"\b" + _re_ic.escape(x) + r"\b", msg) for x in codes)
+    except Exception:
+        return False
 
 
 def get_store_path() -> Path:
@@ -211,30 +278,8 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             results = search_all(title, adapters_list)
             if not isinstance(results, list):
                 results = []
-            # Fallback mock for offline/demo: when network empty and title looks like Lord, provide mock hit
-            # This keeps verification (python -c handle_rpc search Lord) showing non-empty and allows manual demo without network.
-            if not results and "lord" in title.lower():
-                from core.ports import SearchResult  # core->core, allowed
-
-                results = [
-                    SearchResult(
-                        site="novelphoenix.com",
-                        title="Lord of Mysteries",
-                        url="https://www.novelphoenix.com/novel/123-lord-of-mysteries",
-                        chapter_count=142,
-                        author="Cuttlefish That Loves Diving",
-                        cover_url="https://www.novelphoenix.com/covers/123.jpg",
-                    ),
-                    SearchResult(
-                        site="novelphoenix.com",
-                        title="Lord of Mysteries Fan",
-                        url="https://www.novelphoenix.com/novel/456-other",
-                        chapter_count=None,
-                    ),
-                ]
-            elif not results and "zzzz_no_match" in title.lower():
-                # explicit no-results mock for test string
-                results = []
+            # No demo mocks here — empty stays empty. Tests stub search_all
+            # directly; manual demo uses the network or recorded RPC fixtures.
         except Exception as e:
             # 4xx/5xx/timeout -> [] per spec, no crash — return empty result
             # but ValueError already handled above
@@ -354,7 +399,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
             except Exception as e:
                 code = getattr(e, "code", None)
-                if code in ("LIST_FAILED", "FETCH_FAILED") or "LIST_FAILED" in str(e) or "FETCH_FAILED" in str(e):
+                if code in ("LIST_FAILED", "FETCH_FAILED") or _is_code(e, "LIST_FAILED", "FETCH_FAILED"):
                     return {"id": rid, "error": {"code": "LIST_FAILED", "message": str(e)}}
                 msg = str(e)
                 if re.search(r"\b(4\d\d|5\d\d)\b", msg) or "timeout" in msg.lower() or "5xx" in msg.lower():
@@ -436,7 +481,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         except Exception as e:
             # Map AdapterError LIST_FAILED -> {"error":{"code":"LIST_FAILED",...}} not []
             code = getattr(e, "code", None)
-            if code == "LIST_FAILED" or "LIST_FAILED" in str(e):
+            if code == "LIST_FAILED" or _is_code(e, "LIST_FAILED"):
                 return {"id": rid, "error": {"code": "LIST_FAILED", "message": str(e)}}
             # Also handle requests HTTP errors as LIST_FAILED (403/429/5xx/timeout)
             msg = str(e)
@@ -531,7 +576,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
             except Exception as e:
                 code = getattr(e, "code", None)
-                if code == "LIST_FAILED" or "LIST_FAILED" in str(e) or "FETCH_FAILED" in str(e):
+                if code == "LIST_FAILED" or _is_code(e, "LIST_FAILED", "FETCH_FAILED"):
                     return {"id": rid, "error": {"code": "LIST_FAILED", "message": str(e)}}
                 msg = str(e)
                 if _re2.search(r"\b(4\d\d|5\d\d)\b", msg) or "timeout" in msg.lower() or "5xx" in msg.lower():
@@ -691,7 +736,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
             except Exception as e:
                 code = getattr(e, "code", None)
-                if code == "LIST_FAILED" or "LIST_FAILED" in str(e):
+                if code == "LIST_FAILED" or _is_code(e, "LIST_FAILED"):
                     return {"id": rid, "error": {"code": "LIST_FAILED", "message": str(e)}}
                 return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
 
@@ -808,7 +853,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
         except Exception as e:
             code = getattr(e, "code", None)
-            if code == "LIST_FAILED" or "LIST_FAILED" in str(e) or "FETCH_FAILED" in str(e):
+            if code == "LIST_FAILED" or _is_code(e, "LIST_FAILED", "FETCH_FAILED"):
                 return {"id": rid, "error": {"code": "LIST_FAILED", "message": str(e)}}
             msg = str(e)
             if _re2.search(r"\b(4\d\d|5\d\d)\b", msg) or "timeout" in msg.lower() or "5xx" in msg.lower():
@@ -1210,6 +1255,8 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             url_param = params
 
         # helper to resolve site — normalize www. strip for canonical overrides/<site>.json
+        # H7: strict hostname validation — rejects slash/dotdot/traversal payloads.
+        # NOTE: no `re.` here (see H8 note — `re` is function-local in handle_rpc).
         def _resolve_site() -> str | None:
             if isinstance(url_param, str) and url_param.strip():
                 s = _site_from_url(url_param.strip())
@@ -1219,12 +1266,29 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 host = site_param.strip().lower().rstrip(".")
                 if host.startswith("www."):
                     host = host[4:]
+                if not host or len(host) > 253 or ".." in host or "/" in host or "\\" in host:
+                    return None
+                labels = host.split(".")
+                if not all(
+                    len(lb) >= 1 and len(lb) <= 63
+                    and lb[0].isalnum() and lb[-1].isalnum()
+                    and all(ch.isalnum() or ch == "-" for ch in lb)
+                    for lb in labels
+                ):
+                    return None
                 return host
             return None
 
         if method == "getSelectors":
             site = _resolve_site()
             if not site:
+                # R3: explicit but unresolvable site/url must error — silently
+                # falling back to novelphoenix would read/save/clear the wrong
+                # site's overrides (data loss).
+                if (isinstance(site_param, str) and site_param.strip()) or (
+                    isinstance(url_param, str) and url_param.strip()
+                ):
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "invalid site or url"}}
                 # fallback to novelphoenix default
                 site = "novelphoenix.com"
             # validate host if url provided
@@ -1419,6 +1483,13 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         if method == "saveSelectors":
             site = _resolve_site()
             if not site:
+                # R3: explicit but unresolvable site/url must error — silently
+                # falling back to novelphoenix would overwrite the default
+                # site's overrides (data loss).
+                if (isinstance(site_param, str) and site_param.strip()) or (
+                    isinstance(url_param, str) and url_param.strip()
+                ):
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "invalid site or url"}}
                 site = "novelphoenix.com"
             # host allowlist even for site-only save (prevent arbitrary override)
             allowed_site = site == "novelphoenix.com" or site.endswith(".novelphoenix.com")
@@ -1459,6 +1530,13 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         if method == "clearSelectors":
             site = _resolve_site()
             if not site:
+                # R3: explicit but unresolvable site/url must error — silently
+                # falling back to novelphoenix would delete the default site's
+                # overrides (data loss).
+                if (isinstance(site_param, str) and site_param.strip()) or (
+                    isinstance(url_param, str) and url_param.strip()
+                ):
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "invalid site or url"}}
                 site = "novelphoenix.com"
             allowed_site = site == "novelphoenix.com" or site.endswith(".novelphoenix.com")
             if not allowed_site:
@@ -1986,7 +2064,9 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             if "VALUE_ERROR" in msg2:
                 return {"id": rid, "error": {"code": "VALUE_ERROR", "message": msg2}}
             if "CACHE_MISS" in msg2:
-                return {"id": rid, "error": {"code": "CACHE_MISS", "message": msg2}}
+                # H/M1: always attach missing list so GUI can highlight chapters
+                miss = getattr(e, "missing", None)
+                return {"id": rid, "error": {"code": "CACHE_MISS", "message": msg2, "missing": miss if isinstance(miss, list) else []}}
             return {"id": rid, "error": {"code": "EXCEPTION", "message": msg2}}
 
     if method in ("getEpubStatus", "get_epub_status"):
@@ -2025,9 +2105,66 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             if not candidates:
                 return {"id": rid, "result": {"exists": False, "path": None}}
             # filter by novelUrl slug if possible
-            # Use title slug? just return latest by mtime
+            def _novel_tokens(url: object) -> list[str]:
+                try:
+                    import re as _re_tok
+                    from urllib.parse import urlparse as _up_tok
+
+                    s = str(url or "").strip().lower()
+                    if not s:
+                        return []
+                    # last path segment, e.g. /novel/123-lord-of-mysteries -> lord of mysteries
+                    path = _up_tok(s).path or s
+                    seg = path.rstrip("/").rsplit("/", 1)[-1]
+                    seg = _re_tok.sub(r"[^a-z0-9]+", " ", seg).strip()
+                    toks = [t for t in seg.split() if t and not t.isdigit() and len(t) > 2]
+                    # drop generic words
+                    toks = [t for t in toks if t not in ("novel", "book", "html")]
+                    return toks[:4]
+                except Exception:
+                    return []
+
+            def _range_of(p_name: str) -> tuple[int | None, int | None]:
+                try:
+                    import re as _re_rng
+
+                    m = _re_rng.search(r"_chapters_(\d+)_to_(\d+)", p_name)
+                    if m:
+                        return int(m.group(1)), int(m.group(2))
+                    return None, None
+                except Exception:
+                    return None, None
+
             try:
-                latest = max(candidates, key=lambda p: p.stat().st_mtime)
+                pool = list(candidates)
+                toks = _novel_tokens(novelUrl)
+                if toks:
+                    scored: list[tuple[int, float, object]] = []
+                    for c in pool:
+                        try:
+                            stem = c.stem.lower()
+                            hits = sum(1 for t in toks if t in stem)
+                            scored.append((hits, c.stat().st_mtime, c))
+                        except OSError:
+                            continue
+                    best_hits = max((s[0] for s in scored), default=0)
+                    if best_hits > 0:
+                        pool = [c for h, _, c in scored if h == best_hits]
+                # optional range filter when from/to supplied and filename carries range
+                try:
+                    fp = int(from_p) if from_p is not None and str(from_p).strip() != "" else None
+                    tp = int(to_p) if to_p is not None and str(to_p).strip() != "" else None
+                except Exception:
+                    fp, tp = None, None
+                if fp is not None and tp is not None:
+                    ranged = []
+                    for c in pool:
+                        a, b = _range_of(c.name)
+                        if a is not None and b is not None and not (b < fp or a > tp):
+                            ranged.append(c)
+                    if ranged:
+                        pool = ranged
+                latest = max(pool, key=lambda p: p.stat().st_mtime)
                 size = latest.stat().st_size
             except OSError:
                 return {"id": rid, "result": {"exists": False, "path": None}}
@@ -2037,8 +2174,8 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 _epub_mod_stat = _il_stat.import_module("core.epub")
                 run_check = getattr(_epub_mod_stat, "run_epubcheck")
                 ok, msgs = run_check(latest)
-            except Exception:
-                ok, msgs = True, []
+            except Exception as e:
+                ok, msgs = False, [f"epubcheck failed: {e}"]
             return {"id": rid, "result": {"exists": True, "path": str(latest), "size": size, "epubcheck_ok": ok, "messages": msgs}}
         except Exception as e:
             return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
@@ -2119,6 +2256,14 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 chunk_p = (store_audio.get("chunk-size", 3500) if isinstance(store_audio, dict) else 3500)
             except Exception:
                 chunk_p = 3500
+        # R3: fail loudly on garbage/out-of-range chunk size — mirrors the CLI
+        # guard; Edge TTS truncates overlong requests (silent audio gaps).
+        try:
+            chunk_p = int(chunk_p)
+        except Exception:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid chunkSize {chunk_p!r}"}}
+        if chunk_p < 500 or chunk_p > 5000:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"chunkSize {chunk_p} out of range 500..5000 (Edge truncates above 5000)"}}
         try:
             keep_parts_bool = bool(keep_parts_p) if not isinstance(keep_parts_p, str) else keep_parts_p.strip().lower() in ("1", "true", "yes")
         except Exception:

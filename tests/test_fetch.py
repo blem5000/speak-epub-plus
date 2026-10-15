@@ -74,9 +74,16 @@ class TestCacheKey:
         assert k1 == k2 == k3
 
     def test_port_distinct(self):
+        # default ports are identical resources — same key (M1 review fix);
+        # non-default ports stay distinct.
         k1 = cache_key("https://www.novelphoenix.com/novel/123")
         k2 = cache_key("https://www.novelphoenix.com:443/novel/123")
-        assert k1 != k2
+        assert k1 == k2
+        k3 = cache_key("https://www.novelphoenix.com:8443/novel/123")
+        assert k1 != k3
+        k4 = cache_key("http://www.novelphoenix.com/novel/123")
+        k5 = cache_key("http://www.novelphoenix.com:80/novel/123")
+        assert k4 == k5
 
     def test_host_lower(self):
         k1 = cache_key("https://www.NovelPhoenix.com/novel/123")

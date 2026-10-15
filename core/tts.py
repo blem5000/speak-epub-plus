@@ -29,6 +29,101 @@ from typing import Any, Callable, List, Optional, Tuple
 Chapter = Tuple[int, str, str]
 AudioEntry = Tuple[int, str, str]
 
+RESUME_LOCK_NAME = ".tts_resume.lock"
+RESUME_LOCK_STALE_SEC = 600
+
+
+def _resume_root_for_jobs(jobs: List[PartJob]) -> Optional[Path]:
+    """Best-effort output root for the resume lock (handles _parts layout)."""
+    try:
+        if not jobs:
+            return None
+        raw = getattr(jobs[0], "output_path", None)
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        p = Path(raw)
+        # multi-part jobs live in <root>/_parts/ — lock the root, not _parts
+        if p.parent.name == "_parts":
+            return p.parent.parent
+        return p.parent
+    except Exception:
+        return None
+
+
+def acquire_resume_lock(root: Any, _attempt: int = 0) -> Optional[Path]:
+    """Best-effort inter-process guard against concurrent resume runs (H6).
+
+    Creates <root>/.tts_resume.lock with O_EXCL. Returns lock path on
+    success, None when the root cannot be determined. Raises RuntimeError
+    when a fresh lock already exists (another run is active). Stale locks
+    (>10 min) are reclaimed.
+    """
+    if _attempt > 3:
+        # a rival process is cycling the lock file — stop instead of recursing
+        raise RuntimeError("resume lock acquisition unstable (lockfile cycling)")
+    try:
+        base = Path(str(root)) if root is not None else None
+    except Exception:
+        return None
+    if base is None:
+        return None
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
+    lock = base / RESUME_LOCK_NAME
+    try:
+        import time as _time
+
+        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            os.write(fd, str(os.getpid()).encode("utf-8", "ignore"))
+        except Exception:
+            pass
+        finally:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        return lock
+    except FileExistsError:
+        try:
+            import time as _time
+
+            try:
+                age = _time.time() - lock.stat().st_mtime
+            except FileNotFoundError:
+                # lock vanished between open failure and stat (process exit
+                # race) — just retry the acquisition once.
+                return acquire_resume_lock(base, _attempt + 1)
+            if age > RESUME_LOCK_STALE_SEC:
+                try:
+                    lock.unlink(missing_ok=True)
+                except OSError:
+                    # unlink failed (permissions?) — do NOT recurse, or a
+                    # permanently undeletable lockfile becomes RecursionError.
+                    # Fall through to the concurrent-run error below.
+                    pass
+                else:
+                    return acquire_resume_lock(base, _attempt + 1)
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"concurrent resume detected: {lock} exists — "
+            "another conversion is already writing this output dir"
+        )
+    except OSError:
+        return None
+
+
+def release_resume_lock(lock: Any) -> None:
+    try:
+        if lock is None:
+            return
+        Path(str(lock)).unlink(missing_ok=True)
+    except Exception:
+        pass
+
 
 def sanitize_filename(value: str, fallback: str = "chapter", max_len: int = 60) -> str:
     """
@@ -276,6 +371,8 @@ def split_text_for_tts(text: str, max_chars: int = 3500) -> List[str]:
     """
     if not isinstance(max_chars, int) or max_chars < 1:
         raise ValueError("max_chars must be a positive integer")
+    if max_chars > 5000:
+        print(f"Warning: max_chars={max_chars} > 5000 truncates in Edge TTS — consider 2000-3500")
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return []
@@ -516,6 +613,36 @@ async def run_part_jobs(
                 pass
         return
 
+    _resume_lock: Any = None
+    try:
+        _resume_lock = acquire_resume_lock(_resume_root_for_jobs(jobs))
+    except RuntimeError as e:
+        print(str(e))
+        if on_log:
+            try:
+                on_log(str(e))
+            except Exception:
+                pass
+        raise
+
+    # R3: refresh lock mtime while the run is alive — without a heartbeat a
+    # conversion longer than RESUME_LOCK_STALE_SEC (600s) would look abandoned
+    # and a second process would reclaim (and later delete) the lock.
+    _lock_hb: Any = None
+    if _resume_lock is not None:
+        async def _lock_heartbeat(lock_path: Any) -> None:
+            while True:
+                await asyncio.sleep(60)
+                try:
+                    os.utime(lock_path, None)
+                except Exception:
+                    pass
+
+        try:
+            _lock_hb = asyncio.create_task(_lock_heartbeat(_resume_lock))
+        except Exception:
+            _lock_hb = None
+
     # emit queued for each job on enqueue (reading order)
     for job in jobs:
         if on_part_status:
@@ -616,6 +743,14 @@ async def run_part_jobs(
                     _emit_part(job, "fetching")
                     try:
                         await tts_text_to_mp3(job.text, job.output_path, voice, retries=retries)
+                    except asyncio.CancelledError:
+                        # cancelled mid-save: drop truncated file so resume heals (H6)
+                        try:
+                            Path(job.output_path).unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        _emit_part(job, "error")
+                        raise
                     except Exception as e:
                         # error path: emit error and re-raise to propagate via gather
                         err_msg = f"error Chapter {job.chapter_number:03d} part {job.part_number:03d}/{job.part_count:03d}: {e}"
@@ -668,6 +803,20 @@ async def run_part_jobs(
             await asyncio.wait_for(queue.join(), timeout=0.1)
         except asyncio.TimeoutError:
             pass
+    except asyncio.CancelledError:
+        for task in workers:
+            task.cancel()
+        # drop any partial file from the cancelled job is handled per-worker;
+        # here just drain + propagate so resume never reuses truncated output
+        while True:
+            try:
+                queue.get_nowait()
+                queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+            except Exception:
+                break
+        raise
     except Exception:
         for task in workers:
             task.cancel()
@@ -681,6 +830,13 @@ async def run_part_jobs(
             except Exception:
                 break
         raise
+    finally:
+        if _lock_hb is not None:
+            try:
+                _lock_hb.cancel()
+            except Exception:
+                pass
+        release_resume_lock(_resume_lock)
 
 
 def ffmpeg_available() -> bool:
@@ -880,6 +1036,13 @@ def finalize_chapter_audio(
             try:
                 concat_mp3_files(plan.part_paths, plan.chapter_mp3)
                 audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
+                if not keep_parts:
+                    for part_path in plan.part_paths:
+                        try:
+                            if os.path.exists(part_path):
+                                os.remove(part_path)
+                        except OSError:
+                            continue
             except Exception as e:
                 print(f"Warning: Chapter {plan.chapter_number:03d} merge failed ({e}); keeping available parts only.")
                 # cleanup partial output if created
@@ -894,14 +1057,8 @@ def finalize_chapter_audio(
                             audio_entries.append(entry)
                     except Exception:
                         continue
-
-            if not keep_parts:
-                for part_path in plan.part_paths:
-                    try:
-                        if os.path.exists(part_path):
-                            os.remove(part_path)
-                    except OSError:
-                        continue
+                # NOTE: do NOT delete part files on merge failure — fallback
+                # entries reference them (H1 fix).
         else:
             print(f"Chapter {plan.chapter_number:03d}: ffmpeg unavailable, keeping {len(plan.part_paths)} part files")
             for entry in (plan.marker_entries_if_unmerged or []):

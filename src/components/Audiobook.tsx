@@ -333,7 +333,12 @@ export default function Audiobook({
                 <button
                   type="button"
                   data-testid="audio-open"
-                  onClick={() => void openPath(openTarget)}
+                  onClick={() => {
+                    openPath(openTarget).catch((e: unknown) => {
+                      setToast(e instanceof Error ? e.message : String(e));
+                      window.setTimeout(() => setToast(null), 4000);
+                    });
+                  }}
                   className="rounded-md border bg-card px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   {t("audio.openFile")}

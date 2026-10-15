@@ -453,7 +453,7 @@ export default function App(): JSX.Element {
             data-testid="ban-hint"
             className="mb-3 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-body-sm text-destructive"
           >
-            Przerwa — wykryto ograniczenie. Wznów później. Dane w cache zachowane.
+            {t("toast.ban")}
           </div>
         ) : null}
         {/* FFmpeg missing warning */}
@@ -466,7 +466,7 @@ export default function App(): JSX.Element {
               data-testid="ffmpeg-warning"
               className="mb-3 rounded-md border border-warning/20 bg-warning/10 px-3 py-2 text-body-sm text-warning-foreground"
             >
-              FFmpeg nie znaleziono — części pozostaną niescalone. Sprawdź `ffmpeg -version`.
+              {t("ffmpeg.missing")}
             </div>
           ) : null;
         })()}

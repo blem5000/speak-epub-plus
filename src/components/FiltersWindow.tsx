@@ -102,7 +102,7 @@ export default function FiltersWindow({ open, onClose }: FiltersWindowProps): JS
             className="rounded-md border bg-card px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             data-testid="filters-window-close-footer"
           >
-            {t("preview.original") ? "Zamknij" : "Close"}
+            {t("filters.close")}
           </button>
         </div>
       </div>

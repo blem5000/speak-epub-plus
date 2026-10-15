@@ -104,25 +104,10 @@ async fn spawn_and_call(
     req: &RpcRequest,
     app: &tauri::AppHandle,
 ) -> Result<RpcResponse, String> {
-    // Spike: try to spawn python -m core.sidecar or handle_rpc echo
-    // We attempt `python -c "import json,sys; data=json.loads(sys.stdin.readline()); ..."`
-    // For now just do an in-process mock for hello/ping to satisfy <2s round-trip
-    if req.method == "hello" || req.method == "ping" {
-        // Simulate sidecar JSON-RPC stdin/stdout round-trip without real spawn
-        // Real implementation will spawn core/config.py:handle_rpc
-        let result = if req.method == "ping" {
-            serde_json::json!("pong")
-        } else {
-            serde_json::json!({"echo": req.params, "pong": true})
-        };
-        return Ok(RpcResponse {
-            id: req.id.clone(),
-            result: Some(result),
-            error: None,
-        });
-    }
+    // H4: no in-process mock — even ping/hello spawn the real interpreter so
+    // a green health-check proves the backend actually works.
 
-    // For other methods, attempt actual spawn with event streaming
+    // Spawn the interpreter with event streaming.
     // Inline python reads one JSON line, calls handle_rpc with emit hook that prints {"event", "payload"} lines before final {"id", "result/error"}
     let mut cmd = tokio::process::Command::new(venv_python);
     cmd.arg("-c")
@@ -184,6 +169,28 @@ except Exception as e:
     }
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
 
+    // H4: drain stderr so a chatty backend can never fill the pipe and deadlock.
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let mut err_reader = BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match err_reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let t = line.trim();
+                        if !t.is_empty() {
+                            let short: String = t.chars().take(500).collect();
+                            eprintln!("sidecar stderr: {short}");
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
     if let Some(mut stdin) = child.stdin.take() {
         let line = serde_json::to_string(req).map_err(|e| e.to_string())? + "\n";
         stdin.write_all(line.as_bytes()).await.map_err(|e| e.to_string())?;
@@ -201,10 +208,15 @@ except Exception as e:
     loop {
         let mut out = String::new();
         let read_fut = reader.read_line(&mut out);
-        let n = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), read_fut)
-            .await
-            .map_err(|_| "sidecar timeout".to_string())?
-            .map_err(|e| e.to_string())?;
+        let n = match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), read_fut).await {
+            Ok(inner) => inner.map_err(|e| e.to_string())?,
+            Err(_) => {
+                // H4: kill hung child explicitly instead of leaving it orphaned
+                // (start_kill is sync across tokio 1.x; kill_on_drop reaps on drop).
+                let _ = child.start_kill();
+                return Err("sidecar timeout".to_string());
+            }
+        };
         if n == 0 {
             break;
         }
@@ -217,8 +229,9 @@ except Exception as e:
             Err(_) => {
                 // The Python pipeline also writes human-readable progress
                 // prints to stdout (TTS/fetch logs). A non-JSON line must
-                // never kill the call — ignore it and keep streaming.
-                eprintln!("sidecar noise ignored: {trimmed}");
+                // never kill the call — forward truncated to stderr and keep streaming.
+                let short: String = trimmed.chars().take(300).collect();
+                eprintln!("sidecar noise ignored: {short}");
                 continue;
             }
         };
@@ -245,6 +258,7 @@ except Exception as e:
     if let Some(resp) = resp_opt {
         Ok(resp)
     } else {
+        let _ = child.start_kill();
         Err("empty response from sidecar".into())
     }
 }

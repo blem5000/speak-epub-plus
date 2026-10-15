@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import Preview from "./Preview";
+import Preview, { safePreviewHtml } from "./Preview";
 
 const mockPreviewChapter = vi.fn();
 const mockGetSelectors = vi.fn();
@@ -216,5 +216,33 @@ describe("Preview 2.2 — selector boundary + live re-parse", () => {
     const rendered = screen.getByTestId("preview-rendered");
     expect(rendered.textContent).toContain("cleaned");
     expect(rendered.querySelector("div")).not.toBeNull();
+  });
+});
+
+describe("R3 — safePreviewHtml URI/tag policy pins", () => {
+  it("strips javascript: hrefs (any case)", () => {
+    const out = safePreviewHtml('<a href="javascript:alert(1)">x</a>');
+    expect(out).not.toContain("javascript:");
+    const out2 = safePreviewHtml('<a href="JaVaScRiPt:alert(1)">x</a>');
+    expect(out2.toLowerCase()).not.toContain("javascript:");
+  });
+
+  it("blocks non-bitmap data: URIs on media tags, keeps bitmap data: images", () => {
+    // DOMPurify auto-allows ANY data: on img/source/video — hook vetoes non-bitmap
+    const svg = safePreviewHtml('<img src="data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=" alt="x">');
+    expect(svg.toLowerCase()).not.toContain("data:image/svg");
+    const html = safePreviewHtml('<img src="data:text/html;base64,PGI+" alt="x">');
+    expect(html.toLowerCase()).not.toContain("data:text/html");
+    const png = safePreviewHtml('<img src="data:image/png;base64,AAAA" alt="ok">');
+    expect(png).toContain("data:image/png");
+  });
+
+  it("forbids form/svg/script tags", () => {
+    const out = safePreviewHtml(
+      '<form action="https://evil"><input name="x"></form><svg><script>alert(1)</script></svg>'
+    );
+    expect(out).not.toContain("<form");
+    expect(out).not.toContain("<svg");
+    expect(out).not.toContain("<script");
   });
 });

@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 08-27-2026 07:30
-last_updated: 09-15-2026
+last_updated: 10-15-2026
 project: speak epub
 project_key: NOKEY
 tracking_system: file-system
@@ -150,7 +150,9 @@ action_items:
       env SPEAK_LORD_MOCK=1 (decided 09-02-2026 per triage D3; production path stays
       mock-free, offline/demo affordance preserved)"
     owner: "Core"
-    status: open
+    status: done
+    resolution: "Closed 10-15-2026: mock removed entirely from the search handler
+      (stronger than gating — empty stays empty); pinned by tests/test_review_fixes.py::test_h8_no_lord_mock_empty_stays_empty."
     ref: "C:/Users/admin/Documents/programowanie/speak epub/_bmad-output/implementation-artifacts/epic-2-retro-08-31-2026.md"
   - id: "epic-2-retro-item-13-map-rpc-error-codes-from-exception-code"
     epic: 2

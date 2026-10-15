@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import DOMPurify from "dompurify";
+import { t } from "@/i18n";
 import { previewChapter, getSelectors, saveSelectors, clearSelectors, isPreviewResult } from "@/lib/sidecar";
 
 type PreviewProps = {
@@ -9,6 +10,49 @@ type PreviewProps = {
   chapterTitle: string;
   chapterIndex: number;
 };
+
+export function truncateOnTagBoundary(html: string, maxLen = 20000): string {
+  if (html.length <= maxLen) return html;
+  const cut = html.slice(0, maxLen);
+  // nie tnij w środku tagu/atrybutu — cofnij do ostatniego '>'
+  const lastClose = cut.lastIndexOf(">");
+  const lastOpen = cut.lastIndexOf("<");
+  if (lastOpen > lastClose) return cut.slice(0, lastOpen);
+  return cut;
+}
+
+// DOMPurify v3 auto-allows ANY data: URI on media tags (DATA_URI_TAGS default:
+// img/video/audio/source/image/track) regardless of ALLOWED_URI_REGEXP, and its
+// check is case-sensitive (uppercase DATA: falls through to the regexp instead).
+// Enforce the bitmap-only policy for those attributes too.
+let _uriPolicyHookInstalled = false;
+
+function ensureUriPolicyHook(): void {
+  if (_uriPolicyHookInstalled) return;
+  _uriPolicyHookInstalled = true;
+  DOMPurify.addHook("uponSanitizeAttribute", (_node, data) => {
+    const name = (data.attrName || "").toLowerCase();
+    if (name !== "src" && name !== "href" && name !== "xlink:href") return;
+    const val = (data.attrValue || "").trim();
+    if (/^data:/i.test(val) && !/^data:image\/(?:png|jpe?g|gif|webp)(?:[;,]|$)/i.test(val)) {
+      data.keepAttr = false;
+    }
+  });
+}
+
+export function safePreviewHtml(html: string): string {
+  ensureUriPolicyHook();
+  return DOMPurify.sanitize(truncateOnTagBoundary(html), {
+    USE_PROFILES: { html: true },
+    FORBID_TAGS: ["svg", "math", "style", "script", "iframe", "object", "embed", "link", "meta", "form"],
+    FORBID_ATTR: ["onerror", "onload", "onclick", "onmouseover", "onfocus"],
+    // NOTE: keep the trailing `:` inside the negated class — without it the
+    // third branch matches `javascript:` (scheme + colon). Mirrors DOMPurify
+    // default, plus bitmap data: images only (no svg -> script vector).
+    // data: URIs use `;`/`,` after the MIME (not `:`), hence [;,].
+    ALLOWED_URI_REGEXP: /^(?:(?:(?:f|ht)tps?|mailto|tel):|data:image\/(?:png|jpe?g|gif|webp)[;,]|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+  });
+}
 
 export default function Preview({ open, onClose, chapterUrl, chapterTitle, chapterIndex }: PreviewProps): JSX.Element | null {
   const [tab, setTab] = useState<"original" | "cleaned">("cleaned");
@@ -339,11 +383,11 @@ export default function Preview({ open, onClose, chapterUrl, chapterTitle, chapt
             <span>{cleanedText.length} znaków • usunięto ~{diffCount > 0 ? diffCount : 0} znaków nav</span>
             {removedCount > 0 ? (
               <span className="rounded-full bg-warning/10 px-2 py-0.5 text-warning border border-warning/20" data-testid="filter-chip">
-                Usunięto {removedCount} {removedCount === 1 ? "linia" : removedCount < 5 ? "linie" : "linii"} przez filtry
+                {t("filters.chip").replace("{count}", String(removedCount))}
               </span>
             ) : (
               <span className="rounded-full bg-muted px-2 py-0.5 text-muted-foreground" data-testid="filter-chip">
-                Usunięto 0 linii
+                {t("filters.chip").replace("{count}", "0")}
               </span>
             )}
           </div>
@@ -419,12 +463,12 @@ export default function Preview({ open, onClose, chapterUrl, chapterTitle, chapt
             </div>
           </div>
           <div className="hidden w-[60%] flex-col overflow-auto border-l lg:flex" style={{ maxHeight: "50vh" }}>
-            <div className="border-b bg-muted/20 px-4 py-2 text-body-sm font-medium text-muted-foreground">Podgląd renderowany</div>
+            <div className="border-b bg-muted/20 px-4 py-2 text-body-sm font-medium text-muted-foreground">{t("preview.rendered")}</div>
             <div className="prose prose-sm max-w-none p-4 text-body" data-testid="preview-rendered">
               {tab === "original" ? (
-                <div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(originalHtml.slice(0, 20000)) }} />
+                <div dangerouslySetInnerHTML={{ __html: safePreviewHtml(originalHtml) }} />
               ) : (
-                <div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize((removedCount > 0 ? filteredHtml : cleanedHtml).slice(0, 20000)) }} />
+                <div dangerouslySetInnerHTML={{ __html: safePreviewHtml(removedCount > 0 ? filteredHtml : cleanedHtml) }} />
               )}
             </div>
           </div>
@@ -437,7 +481,7 @@ export default function Preview({ open, onClose, chapterUrl, chapterTitle, chapt
             onClick={onClose}
             className="rounded-md border bg-card px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
-            Zamknij
+            {t("preview.close")}
           </button>
         </div>
       </div>

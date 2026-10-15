@@ -108,14 +108,14 @@ describe("App 4.4 — state treatments + a11y + platform", () => {
     chapterErrorMock = "LIST_FAILED";
     render(<App />);
     expect(await screen.findByTestId("ban-hint")).toBeInTheDocument();
-    expect(screen.getByTestId("ban-hint").textContent).toMatch(/Przerwa|Wznów/);
+    expect(screen.getByTestId("ban-hint").textContent).toMatch(/Przerwa|Wznów|Paused|Resume/);
   });
 
   it("ffmpeg warning shows when logs contain ffmpeg", async () => {
     logsMock = ["checking ffmpeg -version", "ffmpeg not found"];
     render(<App />);
     expect(await screen.findByTestId("ffmpeg-warning")).toBeInTheDocument();
-    expect(screen.getByTestId("ffmpeg-warning").textContent).toMatch(/FFmpeg nie znaleziono.*ffmpeg -version/);
+    expect(screen.getByTestId("ffmpeg-warning").textContent).toMatch(/FFmpeg (nie znaleziono|not found).*ffmpeg -version/);
   });
 
   it("header has data-tauri-drag-region", async () => {

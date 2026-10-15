@@ -31,20 +31,32 @@ _FETCHING = False
 def _normalize_cache_key(url: str) -> str:
     """Normalize url for cache key to avoid duplicate entries for same novel.
 
-    Host lower + port distinct, trailing dot stripped, query/fragment stripped,
+    Host lower + port distinct (except default :80/:443 which are stripped),
+    trailing dot stripped, query/fragment stripped,
     path trailing slash/dot stripped, scheme lower.
+    Single source — core/config.py delegates here (M1 dedupe).
     """
     try:
+        if not isinstance(url, str):
+            return ""
         p = urlparse(url.strip())
         host = (p.hostname or "").lower().rstrip(".")
         if not host:
             return url.strip().lower().rstrip("/.")
-        netloc = host + (f":{p.port}" if p.port else "")
+        port = p.port
+        scheme = p.scheme.lower()
+        # default ports are identical resources — strip for stable keys
+        if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+            port = None
+        netloc = host + (f":{port}" if port else "")
         path = p.path.rstrip("/").rstrip(".")
-        normalized = urlunparse((p.scheme.lower(), netloc, path, "", "", ""))
+        normalized = urlunparse((scheme, netloc, path, "", "", ""))
         return normalized.rstrip("/.")
     except Exception:
-        return url.strip().lower().rstrip("/.")
+        try:
+            return url.strip().lower().rstrip("/.")
+        except Exception:
+            return ""
 
 
 def cache_key(url: str) -> str:
@@ -76,6 +88,8 @@ def read_cache(url: str, cache_dir: Path | str | None = None) -> str | None:
 
 def write_cache(url: str, html: str, cache_dir: Path | str | None = None) -> Path:
     """Write raw.html utf-8 atomically via tmp+replace, return Path."""
+    if not isinstance(html, str) or "<" not in html:
+        raise ValueError("not html — refusing to poison cache with repr/non-HTML")
     p = get_cache_path(url, cache_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
@@ -119,6 +133,88 @@ def write_cover(url: str, cover_url: str | None, cache_dir: Path | str | None = 
         tmp.replace(p)
     except Exception:
         pass
+
+
+def cache_size_bytes(cache_dir: Path | str | None = None) -> int:
+    """Total bytes under the cache root (best-effort, M5)."""
+    try:
+        base = Path(cache_dir) if cache_dir is not None else CACHE_ROOT
+        total = 0
+        if base.is_dir():
+            for f in base.rglob("raw.html"):
+                try:
+                    total += f.stat().st_size
+                except OSError:
+                    continue
+        return total
+    except Exception:
+        return 0
+
+
+def prune_cache(
+    cache_dir: Path | str | None = None,
+    max_mb: int = 500,
+    ttl_days: int = 30,
+) -> dict:
+    """Evict oldest raw.html entries over size/TTL budgets (M5, best-effort).
+
+    Returns {"removed": n, "freed_bytes": b}. Never raises.
+    """
+    removed = 0
+    freed = 0
+    try:
+        import time as _time
+
+        base = Path(cache_dir) if cache_dir is not None else CACHE_ROOT
+        if not base.is_dir():
+            return {"removed": 0, "freed_bytes": 0}
+        files: list[tuple[float, Path, int]] = []
+        now = _time.time()
+        for f in base.rglob("raw.html"):
+            try:
+                st = f.stat()
+                files.append((st.st_mtime, f, st.st_size))
+            except OSError:
+                continue
+        # TTL first
+        ttl_sec = max(0, ttl_days) * 86400
+        for mtime, f, size in files:
+            try:
+                if ttl_days >= 0 and (now - mtime) > ttl_sec:
+                    f.unlink(missing_ok=True)
+                    try:
+                        f.parent.rmdir()
+                    except OSError:
+                        pass
+                    removed += 1
+                    freed += size
+            except OSError:
+                continue
+        # size budget (oldest first)
+        try:
+            remaining = [(m, f, s) for (m, f, s) in files if f.exists()]
+            remaining.sort(key=lambda x: x[0])
+            budget = max(0, max_mb) * 1024 * 1024
+            total = sum(s for _, _, s in remaining)
+            for _, f, s in remaining:
+                if total <= budget:
+                    break
+                try:
+                    f.unlink(missing_ok=True)
+                    try:
+                        f.parent.rmdir()
+                    except OSError:
+                        pass
+                    removed += 1
+                    freed += s
+                    total -= s
+                except OSError:
+                    continue
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return {"removed": removed, "freed_bytes": freed}
 
 # ---------------------------------------------------------------------------
 # Politeness — delay tiers
@@ -164,29 +260,48 @@ def _http_status(exc: BaseException | None) -> int | str | None:
     if exc is None:
         return None
     seen: set[int] = set()
-    cur: BaseException | None = exc
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        resp = getattr(cur, "response", None)
-        status = getattr(resp, "status_code", None)
-        if isinstance(status, int) and not isinstance(status, bool):
-            return status
-        cname = type(cur).__name__
-        if "Timeout" in cname or "ConnectionError" in cname:
-            return "timeout"
-        code = getattr(cur, "code", None)
-        if isinstance(code, str) and code:
-            low = code.lower()
-            if "timeout" in low:
+    # climb both __cause__ and __context__ chains (M1 — 429 via context was fatal)
+    stack: list[BaseException | None] = [exc]
+    while stack:
+        cur = stack.pop()
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            resp = getattr(cur, "response", None)
+            status = getattr(resp, "status_code", None)
+            if isinstance(status, int) and not isinstance(status, bool):
+                return status
+            cname = type(cur).__name__
+            if "Timeout" in cname or "ConnectionError" in cname:
                 return "timeout"
-            if "429" in code:
-                return 429
-            m = re.search(r"\b5\d\d\b", code)
-            if m:
-                return int(m.group(0))
-            if "5xx" in low:
-                return "5xx"
-        cur = getattr(cur, "__cause__", None)
+            code = getattr(cur, "code", None)
+            # int code attribute (e.g. code=429) — M1
+            if isinstance(code, int) and not isinstance(code, bool):
+                if code == 429:
+                    return 429
+                if 500 <= code < 600:
+                    return code
+                if code in (408, 425):
+                    return "timeout"
+            if isinstance(code, str) and code:
+                low = code.lower()
+                if "timeout" in low:
+                    return "timeout"
+                if "429" in code:
+                    return 429
+                m = re.search(r"\b5\d\d\b", code)
+                if m:
+                    return int(m.group(0))
+                if "5xx" in low:
+                    return "5xx"
+            # also accept .status attribute (aiohttp-style)
+            st = getattr(cur, "status", None)
+            if isinstance(st, int) and not isinstance(st, bool):
+                return st
+            nxt_cause = getattr(cur, "__cause__", None)
+            nxt_ctx = getattr(cur, "__context__", None)
+            if nxt_ctx is not None and nxt_ctx is not cur and id(nxt_ctx) not in seen:
+                stack.append(nxt_ctx)
+            cur = nxt_cause
     return None
 
 
