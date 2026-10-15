@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { t, getLocale, setLocale } from "./i18n";
-import { buildEpub, callSidecar, isEpubResult, type EpubResult } from "./lib/sidecar";
+import { buildEpub, callSidecar, getStore, isEpubResult, setStore, type EpubResult } from "./lib/sidecar";
 import FindInput from "./components/FindInput";
 import ResultsTable from "./components/ResultsTable";
 import ChapterList from "./components/ChapterList";
@@ -60,6 +60,27 @@ export default function App(): JSX.Element {
         }
       })
       .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Restore persisted UI locale from Core on mount ("" = auto-detect from system)
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await getStore();
+        if (!alive) return;
+        const saved = (res?.result as Record<string, unknown> | undefined)?.locale;
+        if (saved === "en" || saved === "pl") {
+          setLocale(saved);
+          setLocaleState(saved);
+        }
+      } catch {
+        // silent — falls back to system detection
+      }
+    })();
     return () => {
       alive = false;
     };
@@ -161,6 +182,19 @@ export default function App(): JSX.Element {
     const next = locale === "en" ? "pl" : "en";
     setLocale(next);
     setLocaleState(next);
+    // best-effort persist with one retry (P8 pattern) — UI never waits on the store
+    const persistLocale = (): Promise<unknown> => setStore({ locale: next });
+    try {
+      void persistLocale().catch(() => {
+        window.setTimeout(() => {
+          void persistLocale().catch(() => {
+            if (import.meta.env.DEV) console.warn("setLocale persist failed after retry");
+          });
+        }, 1000);
+      });
+    } catch {
+      // sidecar unavailable (tests/dev)
+    }
   };
 
   const trimmedQuery = query.trim();

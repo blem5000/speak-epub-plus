@@ -280,3 +280,27 @@ def test_setStore_update_keys(tmp_path, monkeypatch):
     # persistence roundtrip
     r7 = handle_rpc({"id": "7", "method": "getStore", "params": {}})
     assert r7["result"]["updateSkipped"] == "v1.2.3"
+
+
+def test_setStore_locale(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    r = handle_rpc({"id": "1", "method": "getStore", "params": {}})
+    # "" = auto-detect from system language
+    assert r["result"]["locale"] == ""
+    r2 = handle_rpc({"id": "2", "method": "setStore", "params": {"locale": "PL"}})
+    assert r2["result"]["locale"] == "pl"
+    r3 = handle_rpc({"id": "3", "method": "setStore", "params": {"language": "en"}})
+    assert r3["result"]["locale"] == "en"
+    r4 = handle_rpc({"id": "4", "method": "setStore", "params": {"lang": " pl "}})
+    assert r4["result"]["locale"] == "pl"
+    r5 = handle_rpc({"id": "5", "method": "setStore", "params": {"locale": ""}})
+    assert r5["result"]["locale"] == ""
+    r6 = handle_rpc({"id": "6", "method": "setStore", "params": {"locale": "de"}})
+    assert r6["error"]["code"] == "VALUE_ERROR"
+    r7 = handle_rpc({"id": "7", "method": "setStore", "params": {"locale": 3}})
+    assert r7["error"]["code"] == "VALUE_ERROR"
+    # persistence roundtrip
+    r8 = handle_rpc({"id": "8", "method": "setStore", "params": {"locale": "pl"}})
+    assert r8["result"]["locale"] == "pl"
+    r9 = handle_rpc({"id": "9", "method": "getStore", "params": {}})
+    assert r9["result"]["locale"] == "pl"

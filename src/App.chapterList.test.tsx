@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import App from "./App";
 
 vi.mock("@/lib/sidecar", () => ({
@@ -19,10 +19,13 @@ vi.mock("@/hooks/useChapterList", async () => {
 });
 
 import { useChapterList } from "@/hooks/useChapterList";
-import { callSidecar } from "@/lib/sidecar";
+import { callSidecar, getStore, setStore } from "@/lib/sidecar";
+import * as i18n from "@/i18n";
 
 const mockUseChapterList = vi.mocked(useChapterList);
 const mockCallSidecar = vi.mocked(callSidecar);
+const mockGetStore = vi.mocked(getStore);
+const mockSetStore = vi.mocked(setStore);
 
 function setChapterListReturn(over: Partial<ReturnType<typeof useChapterList>> = {}) {
   mockUseChapterList.mockReturnValue({
@@ -38,7 +41,12 @@ describe("App chapter-list integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockCallSidecar.mockResolvedValue({ id: "0", result: "pong" });
+    mockGetStore.mockImplementation(async () => ({ id: "0", result: { keepEPUB: true } }));
     setChapterListReturn();
+  });
+
+  afterEach(() => {
+    i18n.__resetLocaleForTest();
   });
 
   it("shows 6-row skeleton when hasSelectedUrl && loading", async () => {
@@ -72,5 +80,30 @@ describe("App chapter-list integration", () => {
       const calls = mockCallSidecar.mock.calls.map((c) => c[0]);
       expect(calls).toContain("getSelection");
     });
+  });
+
+  it("restores persisted locale on mount and persists language toggles", async () => {
+    mockGetStore.mockImplementation(async () => ({
+      id: "0",
+      result: { updateAuto: true, locale: "pl" },
+    }));
+    render(<App />);
+    await waitFor(() => {
+      expect(i18n.getLocale()).toBe("pl");
+      expect(screen.getByLabelText("Toggle locale").textContent).toContain("PL");
+    });
+    fireEvent.click(screen.getByLabelText("Toggle locale"));
+    expect(i18n.getLocale()).toBe("en");
+    await waitFor(() => {
+      expect(mockSetStore).toHaveBeenCalledWith({ locale: "en" });
+    });
+  });
+
+  it("keeps system-detected locale when store has no saved value", async () => {
+    render(<App />);
+    await waitFor(() => {
+      expect(mockGetStore).toHaveBeenCalled();
+    });
+    expect(i18n.getLocale()).toBe("en");
   });
 });

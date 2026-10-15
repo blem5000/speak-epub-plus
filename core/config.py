@@ -59,6 +59,7 @@ DEFAULT_STORE: Dict[str, Any] = {
     "selection_url": None,
     "updateAuto": True,
     "updateSkipped": "",
+    "locale": "",
 }
 
 # Simple in-memory cache for listChapters url -> serialized list (FR2) — KEEP per re-review decision
@@ -2442,6 +2443,8 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     return "updateAuto"
                 if low in ("updateskipped", "update_skipped"):
                     return "updateSkipped"
+                if low in ("locale", "language", "lang"):
+                    return "locale"
                 # direct canonicals keep case
                 if k in ("chunk-size", "chunk_size", "chunkSize"):
                     return "chunk-size"
@@ -2555,6 +2558,13 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     if not isinstance(v, str):
                         return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "updateSkipped must be string"}}
                     sanitized[ck] = v.strip()[:64]
+                elif ck == "locale":
+                    if not isinstance(v, str):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "locale must be string"}}
+                    vv = v.strip().lower()
+                    if vv not in ("en", "pl", ""):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid locale {v}"}}
+                    sanitized[ck] = vv
                 elif ck == "filters":
                     # keep filters as-is but validate basic shape to avoid corrupt store
                     if not isinstance(v, list):
