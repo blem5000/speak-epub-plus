@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getStore, setStore } from "@/lib/sidecar";
 
 export const GITHUB_OWNER = "blem5000";
 export const GITHUB_REPO = "speak-epub-plus";
 export const RELEASES_LATEST_URL = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
-export const DISMISS_KEY = "speakepub.dismissed-update";
+export const PORTABLE_ASSET_PATTERN = /-x64-portable\.zip$/i;
 
 export type UpdateInfo = {
   current: string;
@@ -11,9 +12,22 @@ export type UpdateInfo = {
   url: string;
   notes: string;
   available: boolean;
+  /** browser_download_url of the portable ZIP asset ("" when release has none). */
+  zipUrl: string;
+  /** asset size in bytes (0 when unknown). */
+  zipSize: number;
 };
 
-type LatestRelease = { tag: string; url: string; notes: string };
+export type UpdatePrefs = { auto: boolean; skipped: string };
+export type DownloadProgress = { received: number; total: number };
+
+type LatestRelease = {
+  tag: string;
+  url: string;
+  notes: string;
+  zipUrl: string;
+  zipSize: number;
+};
 
 /** Strip leading `v`, whitespace and build metadata for semver compare. */
 export function normalizeVersion(v: string): string {
@@ -55,12 +69,25 @@ export async function fetchLatestRelease(
       tag_name?: unknown;
       html_url?: unknown;
       body?: unknown;
+      assets?: unknown;
     };
     if (typeof json.tag_name !== "string" || typeof json.html_url !== "string") return null;
+    const assets = Array.isArray(json.assets)
+      ? (json.assets as Array<Record<string, unknown>>)
+      : [];
+    const pick =
+      assets.find(
+        (a) => typeof a.name === "string" && PORTABLE_ASSET_PATTERN.test(a.name as string)
+      ) ?? assets.find((a) => typeof a.name === "string" && (a.name as string).endsWith(".zip"));
+    const zipUrl =
+      pick && typeof pick.browser_download_url === "string" ? pick.browser_download_url : "";
+    const zipSize = pick && typeof pick.size === "number" ? pick.size : 0;
     return {
       tag: json.tag_name,
       url: json.html_url,
       notes: typeof json.body === "string" ? json.body.slice(0, 2000) : "",
+      zipUrl,
+      zipSize,
     };
   } catch {
     return null;
@@ -87,6 +114,8 @@ export async function checkForUpdates(
     url: latest.url,
     notes: latest.notes,
     available: true,
+    zipUrl: latest.zipUrl,
+    zipSize: latest.zipSize,
   };
 }
 
@@ -104,21 +133,157 @@ export async function getCurrentVersion(): Promise<string | null> {
   }
 }
 
-export function isDismissed(latest: string): boolean {
+/** Update prefs persisted in the Python store (`updateAuto`, `updateSkipped`). */
+export async function getUpdatePrefs(opts?: { signal?: AbortSignal }): Promise<UpdatePrefs> {
   try {
-    if (typeof window === "undefined" || !window.localStorage) return false;
-    return window.localStorage.getItem(DISMISS_KEY) === normalizeVersion(latest);
+    const res = await getStore(opts);
+    const store = (res?.result ?? {}) as Record<string, unknown>;
+    return {
+      auto: store.updateAuto !== false,
+      skipped:
+        typeof store.updateSkipped === "string" && store.updateSkipped.trim()
+          ? normalizeVersion(store.updateSkipped)
+          : "",
+    };
   } catch {
-    return false;
+    return { auto: true, skipped: "" };
   }
 }
 
-export function dismissVersion(latest: string): void {
+export async function setAutoUpdate(on: boolean): Promise<void> {
   try {
-    if (typeof window === "undefined" || !window.localStorage) return;
-    window.localStorage.setItem(DISMISS_KEY, normalizeVersion(latest));
+    await setStore({ updateAuto: on });
   } catch {
-    // ignore quota/private-mode errors
+    // pref write is best-effort; default stays "auto on"
+  }
+}
+
+/** "Skip this version" — remembered across sessions until that tag is outrun. */
+export async function skipVersion(latest: string): Promise<void> {
+  try {
+    await setStore({ updateSkipped: normalizeVersion(latest) });
+  } catch {
+    // ignore
+  }
+}
+
+type UpdateFoundListener = (info: UpdateInfo) => void;
+const updateFoundListeners = new Set<UpdateFoundListener>();
+
+export function onUpdateFound(fn: UpdateFoundListener): () => void {
+  updateFoundListeners.add(fn);
+  return () => {
+    updateFoundListeners.delete(fn);
+  };
+}
+
+export function announceUpdateFound(info: UpdateInfo): void {
+  for (const fn of Array.from(updateFoundListeners)) {
+    try {
+      fn(info);
+    } catch {
+      // listener errors never break the checker
+    }
+  }
+}
+
+/** Settings-triggered check: ignores auto/skip prefs and surfaces the banner. */
+export async function manualCheck(): Promise<UpdateInfo | null> {
+  const current = await getCurrentVersion();
+  if (!current) return null;
+  const info = await checkForUpdates(current);
+  if (info) announceUpdateFound(info);
+  return info;
+}
+
+/** Install is disabled on vite dev servers — only real builds can self-update. */
+export function canInstallUpdates(): boolean {
+  return import.meta.env.PROD || import.meta.env.MODE === "test";
+}
+
+const CHUNK_FLUSH_BYTES = 512 * 1024;
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  const STEP = 0x8000;
+  for (let i = 0; i < bytes.length; i += STEP) {
+    bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + STEP)));
+  }
+  return btoa(bin);
+}
+
+/**
+ * Stream the portable ZIP asset into a Rust-managed temp file (base64 chunks).
+ * Cancellable via AbortSignal; a failed/aborted download is discarded.
+ */
+export async function downloadUpdate(
+  info: UpdateInfo,
+  opts: {
+    signal?: AbortSignal;
+    onProgress?: (p: DownloadProgress) => void;
+    fetchFn?: typeof fetch;
+  } = {}
+): Promise<{ bytes: number }> {
+  if (!info.zipUrl) throw new Error("release has no portable package");
+  const fetchFn = opts.fetchFn ?? globalThis.fetch;
+  await invoke<string>("update_download_path", { tag: info.latest });
+  try {
+    const res = await fetchFn(info.zipUrl, { signal: opts.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const headerTotal = Number(res.headers.get("Content-Length") ?? 0);
+    const total = headerTotal > 0 ? headerTotal : info.zipSize || 0;
+    const reader = res.body?.getReader?.();
+    if (!reader) throw new Error("response has no stream");
+    let received = 0;
+    let buf: Uint8Array[] = [];
+    let bufLen = 0;
+    const flush = async (): Promise<void> => {
+      if (bufLen <= 0) return;
+      const merged = new Uint8Array(bufLen);
+      let off = 0;
+      for (const b of buf) {
+        merged.set(b, off);
+        off += b.length;
+      }
+      await invoke("update_write_chunk", { chunkB64: bytesToBase64(merged) });
+      buf = [];
+      bufLen = 0;
+    };
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.length > 0) {
+        buf.push(value);
+        bufLen += value.length;
+        received += value.length;
+        opts.onProgress?.({ received, total });
+        if (bufLen >= CHUNK_FLUSH_BYTES) await flush();
+      }
+    }
+    await flush();
+    opts.onProgress?.({ received, total: total || received });
+    return { bytes: received };
+  } catch (err) {
+    try {
+      await invoke("update_discard");
+    } catch {
+      // ignore cleanup errors
+    }
+    throw err;
+  }
+}
+
+/** Hand the downloaded ZIP to Rust: write .bat, spawn it, exit the app. */
+export async function applyUpdate(info: UpdateInfo): Promise<void> {
+  await invoke("apply_update", { tag: info.latest });
+}
+
+/** Drop the pending download (banner cancel). */
+export async function discardUpdate(): Promise<void> {
+  try {
+    await invoke("update_discard");
+  } catch {
+    // ignore
   }
 }
 

@@ -45,6 +45,8 @@ describe("Settings 4.2 — form + persist + i18n", () => {
   it("renders groups + data-testid + helper muted", async () => {
     render(<Settings open={true} onClose={vi.fn()} />);
     await waitFor(() => expect(mockGetStore).toHaveBeenCalled());
+    // wait for the async store load to flush before asserting the form
+    await screen.findByTestId("settings-audio-voice");
     // dialog
     expect(screen.getByTestId("settings-dialog")).toBeInTheDocument();
     expect(screen.getByTestId("settings-dialog")).toHaveAttribute("role", "dialog");

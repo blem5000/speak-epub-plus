@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { t } from "@/i18n";
 import { getStore, setStore } from "@/lib/sidecar";
+import { getCurrentVersion, manualCheck } from "@/lib/updater";
 
 type SettingsProps = {
   open: boolean;
@@ -41,6 +42,9 @@ export default function Settings({ open, onClose }: SettingsProps): JSX.Element 
   const [keepEPUB, setKeepEPUB] = useState<boolean>(true);
   const [keepMP3, setKeepMP3] = useState<boolean>(true);
   const [keepM4B, setKeepM4B] = useState<boolean>(true);
+  const [updateAuto, setUpdateAuto] = useState<boolean>(true);
+  // "" = idle, "checking" = in flight, anything else = final message to show
+  const [checkStatus, setCheckStatus] = useState<string>("");
 
   // prev for revert
   const prevRef = useRef<Record<string, unknown>>({});
@@ -137,6 +141,10 @@ export default function Settings({ open, onClose }: SettingsProps): JSX.Element 
         prevRef.current["keepMP3"] = typeof data.keepMP3 === "boolean" ? data.keepMP3 : true;
         setKeepM4B(typeof data.keepM4B === "boolean" ? (data.keepM4B as boolean) : true);
         prevRef.current["keepM4B"] = typeof data.keepM4B === "boolean" ? data.keepM4B : true;
+        // updates
+        const ua = data.updateAuto !== false;
+        setUpdateAuto(ua);
+        prevRef.current["updateAuto"] = ua;
         // audio bitrate
         const bv = typeof data.audioBitrate === "string" ? (data.audioBitrate as string).trim().toLowerCase() : "32k";
         const bitrateVal = BITRATE_OPTIONS.includes(bv) ? bv : "32k";
@@ -240,6 +248,7 @@ export default function Settings({ open, onClose }: SettingsProps): JSX.Element 
           else if (revertKey === "keepEPUB") setKeepEPUB(Boolean(revertVal));
           else if (revertKey === "keepMP3") setKeepMP3(Boolean(revertVal));
           else if (revertKey === "keepM4B") setKeepM4B(Boolean(revertVal));
+          else if (revertKey === "updateAuto") setUpdateAuto(Boolean(revertVal));
           else if (revertKey === "audioBitrate") setAudioBitrate(String(revertVal));
         }
         return;
@@ -272,6 +281,7 @@ export default function Settings({ open, onClose }: SettingsProps): JSX.Element 
         else if (revertKey === "keepEPUB") setKeepEPUB(Boolean(revertVal));
         else if (revertKey === "keepMP3") setKeepMP3(Boolean(revertVal));
         else if (revertKey === "keepM4B") setKeepM4B(Boolean(revertVal));
+        else if (revertKey === "updateAuto") setUpdateAuto(Boolean(revertVal));
         else if (revertKey === "audioBitrate") setAudioBitrate(String(revertVal));
       }
     }
@@ -479,6 +489,34 @@ export default function Settings({ open, onClose }: SettingsProps): JSX.Element 
     else if (key === "keepMP3") setKeepMP3(checked);
     else setKeepM4B(checked);
     void persist({ [key]: checked }, key, prev);
+  };
+
+  const handleUpdateAutoChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    const prev = prevRef.current["updateAuto"];
+    const checked = e.target.checked;
+    setUpdateAuto(checked);
+    void persist({ updateAuto: checked }, "updateAuto", prev);
+  };
+
+  const handleCheckNow = (): void => {
+    setCheckStatus("checking");
+    void (async () => {
+      try {
+        const info = await manualCheck();
+        if (info && info.available) {
+          setCheckStatus(t("settings.updates.found", { version: info.latest }));
+          return;
+        }
+        const current = await getCurrentVersion();
+        setCheckStatus(
+          current
+            ? t("settings.updates.latest", { version: current })
+            : t("settings.updates.unavailable")
+        );
+      } catch {
+        setCheckStatus(t("settings.updates.unavailable"));
+      }
+    })();
   };
 
   if (!open) return null;
@@ -784,6 +822,41 @@ export default function Settings({ open, onClose }: SettingsProps): JSX.Element 
                       aria-checked={keepM4B}
                     />
                   </label>
+                </div>
+              </section>
+
+              {/* Updates */}
+              <section className="rounded-lg border bg-card p-6 shadow-sm" aria-label={t("settings.updates.title") as string}>
+                <h3 className="text-heading font-semibold">{t("settings.updates.title")}</h3>
+                <div className="mt-4 space-y-3">
+                  <label className="flex items-center justify-between gap-4">
+                    <span className="text-body-sm font-medium">{t("settings.updates.auto")}</span>
+                    <input
+                      data-testid="settings-updates-auto"
+                      type="checkbox"
+                      checked={updateAuto}
+                      onChange={handleUpdateAutoChange}
+                      className="h-4 w-4 rounded border-input"
+                      role="switch"
+                      aria-checked={updateAuto}
+                    />
+                  </label>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      data-testid="settings-updates-check"
+                      onClick={handleCheckNow}
+                      disabled={checkStatus === "checking"}
+                      className="rounded-md border bg-card px-3 py-1.5 text-body-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                    >
+                      {t("settings.updates.check")}
+                    </button>
+                    {checkStatus ? (
+                      <span data-testid="settings-updates-status" className="text-body-sm text-muted-foreground">
+                        {checkStatus === "checking" ? t("settings.updates.checking") : checkStatus}
+                      </span>
+                    ) : null}
+                  </div>
                 </div>
               </section>
             </>

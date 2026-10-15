@@ -4,6 +4,8 @@ use std::process::Stdio;
 use tauri::{Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+mod updater;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RpcRequest {
     pub id: String,
@@ -269,7 +271,15 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![python_sidecar_call, emit_event])
+        .manage(updater::UpdateState::default())
+        .invoke_handler(tauri::generate_handler![
+            python_sidecar_call,
+            emit_event,
+            updater::update_download_path,
+            updater::update_write_chunk,
+            updater::update_discard,
+            updater::apply_update
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

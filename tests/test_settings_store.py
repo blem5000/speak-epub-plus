@@ -260,3 +260,23 @@ def test_setStore_unknown_key_passthrough(tmp_path, monkeypatch):
     r = handle_rpc({"id": "1", "method": "setStore", "params": {"customKey": "customValue"}})
     assert "result" in r
     assert r["result"]["customKey"] == "customValue"
+
+
+def test_setStore_update_keys(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    r = handle_rpc({"id": "1", "method": "getStore", "params": {}})
+    assert r["result"]["updateAuto"] is True
+    assert r["result"]["updateSkipped"] == ""
+    r2 = handle_rpc({"id": "2", "method": "setStore", "params": {"updateAuto": False}})
+    assert r2["result"]["updateAuto"] is False
+    r3 = handle_rpc({"id": "3", "method": "setStore", "params": {"update_auto": "true"}})
+    assert r3["result"]["updateAuto"] is True
+    r4 = handle_rpc({"id": "4", "method": "setStore", "params": {"updateSkipped": "0.3.1"}})
+    assert r4["result"]["updateSkipped"] == "0.3.1"
+    r5 = handle_rpc({"id": "5", "method": "setStore", "params": {"update_skipped": " v1.2.3 "}})
+    assert r5["result"]["updateSkipped"] == "v1.2.3"
+    r6 = handle_rpc({"id": "6", "method": "setStore", "params": {"updateSkipped": 5}})
+    assert r6["error"]["code"] == "VALUE_ERROR"
+    # persistence roundtrip
+    r7 = handle_rpc({"id": "7", "method": "getStore", "params": {}})
+    assert r7["result"]["updateSkipped"] == "v1.2.3"

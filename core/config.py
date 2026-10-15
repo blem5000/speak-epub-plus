@@ -57,6 +57,8 @@ DEFAULT_STORE: Dict[str, Any] = {
     "selection_from": 1,
     "selection_to": 30,
     "selection_url": None,
+    "updateAuto": True,
+    "updateSkipped": "",
 }
 
 # Simple in-memory cache for listChapters url -> serialized list (FR2) — KEEP per re-review decision
@@ -2436,6 +2438,10 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     return "keepMP3"
                 if low in ("keepm4b", "keep_m4b"):
                     return "keepM4B"
+                if low in ("updateauto", "update_auto"):
+                    return "updateAuto"
+                if low in ("updateskipped", "update_skipped"):
+                    return "updateSkipped"
                 # direct canonicals keep case
                 if k in ("chunk-size", "chunk_size", "chunkSize"):
                     return "chunk-size"
@@ -2543,6 +2549,12 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     sanitized[ck] = f"{int(m.group(1))}k"
                 elif ck in ("keepEPUB", "keepMP3", "keepM4B"):
                     sanitized[ck] = _to_bool_store(v)
+                elif ck == "updateAuto":
+                    sanitized[ck] = _to_bool_store(v)
+                elif ck == "updateSkipped":
+                    if not isinstance(v, str):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "updateSkipped must be string"}}
+                    sanitized[ck] = v.strip()[:64]
                 elif ck == "filters":
                     # keep filters as-is but validate basic shape to avoid corrupt store
                     if not isinstance(v, list):

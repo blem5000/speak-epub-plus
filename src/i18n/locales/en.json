@@ -136,5 +136,19 @@
   "audio.partsCount": "{count} parts",
   "updater.message": "New version {latest} available (you have {current}).",
   "updater.download": "Download",
-  "updater.later": "Later"
+  "updater.install": "Install now",
+  "updater.skip": "Skip this version",
+  "updater.later": "Later",
+  "updater.cancel": "Cancel",
+  "updater.downloading": "Downloading {percent}%…",
+  "updater.applying": "Restarting to finish the update…",
+  "updater.error": "Update failed: {message}",
+  "updater.devBlocked": "Updates are disabled in development builds.",
+  "settings.updates.title": "Updates",
+  "settings.updates.auto": "Check for updates automatically",
+  "settings.updates.check": "Check now",
+  "settings.updates.checking": "Checking…",
+  "settings.updates.latest": "You are up to date ({version}).",
+  "settings.updates.found": "Update {version} is available.",
+  "settings.updates.unavailable": "Update check unavailable in this build."
 }

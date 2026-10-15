@@ -136,5 +136,19 @@
   "audio.partsCount": "{count} fragmentów",
   "updater.message": "Dostępna nowa wersja {latest} (masz {current}).",
   "updater.download": "Pobierz",
-  "updater.later": "Później"
+  "updater.install": "Zainstaluj teraz",
+  "updater.skip": "Pomiń tę wersję",
+  "updater.later": "Później",
+  "updater.cancel": "Anuluj",
+  "updater.downloading": "Pobieranie {percent}%…",
+  "updater.applying": "Restart, aby dokończyć aktualizację…",
+  "updater.error": "Aktualizacja nie powiodła się: {message}",
+  "updater.devBlocked": "Aktualizacje są wyłączone w buildach deweloperskich.",
+  "settings.updates.title": "Aktualizacje",
+  "settings.updates.auto": "Sprawdzaj aktualizacje automatycznie",
+  "settings.updates.check": "Sprawdź teraz",
+  "settings.updates.checking": "Sprawdzanie…",
+  "settings.updates.latest": "Masz najnowszą wersję ({version}).",
+  "settings.updates.found": "Dostępna aktualizacja {version}.",
+  "settings.updates.unavailable": "Sprawdzanie aktualizacji niedostępne w tym buildzie."
 }
