@@ -32,13 +32,16 @@ jobs:
 
       - name: Prepare bundled Python sidecar runtime
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
           $runtime = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/sidecar-runtime'
           New-Item -ItemType Directory -Force -Path $runtime | Out-Null
 
           # Resolve the latest self-contained CPython 3.11 build (includes pip).
-          $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest' -Headers @{ 'User-Agent' = 'speak-epub-release' }
+          # Authenticated so shared runner IPs never hit the anonymous API rate limit.
+          $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest' -Headers @{ 'User-Agent' = 'speak-epub-release'; 'Authorization' = "Bearer $env:GH_TOKEN" }
           $asset = $release.assets | Where-Object { $_.name -match '^cpython-3\.11\..*x86_64-pc-windows-msvc-install_only\.tar\.gz$' } | Select-Object -First 1
           if (-not $asset) { throw 'No matching python-build-standalone asset found' }
           Write-Host "Downloading $($asset.name)"
