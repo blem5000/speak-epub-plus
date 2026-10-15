@@ -866,6 +866,7 @@ def test_concat_mp3_files_success(tmp_path):
     input_paths = [str(p1), str(p2)]
 
     concat_file = str(output.with_suffix(".concat.txt"))
+    tmp_output = str(output) + ".tmp"
 
     captured = {}
 
@@ -878,19 +879,21 @@ def test_concat_mp3_files_success(tmp_path):
         for p in input_paths:
             safe = os.path.abspath(p).replace("\\", "/").replace("'", "\\'")
             assert f"file '{safe}'\n" in content
-        # simulate ffmpeg creating output
-        Path(output).write_bytes(b"merged")
+        # simulate ffmpeg creating the temp output (atomic publish on success)
+        Path(args[-1]).write_bytes(b"merged")
         return MagicMock(returncode=0)
 
     with patch("core.tts.shutil.which", return_value="/usr/bin/ffmpeg"):
         with patch("core.tts.subprocess.run", side_effect=fake_run) as mock_run:
             concat_mp3_files(input_paths, str(output))
 
-    assert captured["args"] == ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file, "-c", "copy", str(output)]
+    assert captured["args"] == ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file, "-c", "copy", tmp_output]
     mock_run.assert_called_once()
-    # concat_file cleaned up
+    # concat_file cleaned up, temp published atomically, no stray .tmp left
     assert not os.path.exists(concat_file)
+    assert not os.path.exists(tmp_output)
     assert output.exists()
+    assert output.read_bytes() == b"merged"
 
 
 def test_concat_mp3_files_no_ffmpeg_raises(tmp_path):
@@ -1388,7 +1391,8 @@ def test_concat_mp3_files_parent_makedirs(tmp_path):
     assert not out.parent.exists()
 
     def fake_run(args, check=True, stdout=None, stderr=None, **kwargs):
-        Path(out).write_bytes(b"merged")
+        # ffmpeg writes the temp target; the function publishes it atomically
+        Path(args[-1]).write_bytes(b"merged")
         return MagicMock(returncode=0)
 
     with patch("core.tts.shutil.which", return_value="/usr/bin/ffmpeg"):
@@ -1396,6 +1400,7 @@ def test_concat_mp3_files_parent_makedirs(tmp_path):
             concat_mp3_files([str(p1)], str(out))
     assert out.exists()
     assert out.parent.exists()
+    assert not (tmp_path / "newdir" / "sub" / "040_C40.mp3.tmp").exists()
 
 
 def test_get_duration_ms_broad_exceptions(tmp_path):

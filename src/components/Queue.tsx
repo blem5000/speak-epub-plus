@@ -100,7 +100,7 @@ export default function Queue({
               onClick={onAbort}
               className="rounded-md border bg-card px-3 py-1 text-body-sm hover:bg-muted"
             >
-              Anuluj
+              {t("queue.stop")}
             </button>
           ) : null}
         </div>

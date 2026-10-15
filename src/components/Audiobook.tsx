@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { t } from "@/i18n";
 import {
   buildAudio,
+  CANCEL_METHODS_AUDIO,
+  cancelSidecarJob,
   getStore,
   isAudioResult,
   onMergeProgress,
@@ -68,7 +70,10 @@ export default function Audiobook({
   const [result, setResult] = useState<AudioResult | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [now, setNow] = useState(0);
+  const [stopped, setStopped] = useState(false);
   const startRef = useRef<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const stopRequestedRef = useRef(false);
   const [merge, setMerge] = useState<MergeProgressEvent | null>(null);
   const mergeStartRef = useRef<number | null>(null);
 
@@ -163,13 +168,18 @@ export default function Audiobook({
     setMerge(null);
     setNow(Date.now());
     setBuilding(true);
+    setStopped(false);
     setError(null);
     setMissing(null);
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      const res = await buildAudio({ novelUrl, from, to, title, urls, format });
+      const res = await buildAudio({ novelUrl, from, to, title, urls, format }, { signal: controller.signal });
       if (res.error) {
         const code = res.error.code;
         const msg = res.error.message;
+        // User pressed Stop — detached UI, backend process killed. Not an error.
+        if (code === "ABORTED" || stopRequestedRef.current) return;
         if (code === "CACHE_MISS") {
           const miss = (res.error as unknown as { missing?: string[] }).missing ?? [];
           setMissing(miss);
@@ -186,11 +196,25 @@ export default function Audiobook({
         setError("unknown audio result");
       }
     } catch (e) {
+      if (stopRequestedRef.current) return;
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
     } finally {
+      stopRequestedRef.current = false;
+      abortRef.current = null;
       setBuilding(false);
     }
+  };
+
+  const handleStop = (): void => {
+    if (!building) return;
+    stopRequestedRef.current = true;
+    setStopped(true);
+    abortRef.current?.abort();
+    abortRef.current = null;
+    // Hard-stop the Python sidecar (fresh interpreter per call); without this
+    // the backend would keep generating in the background after the UI aborts.
+    void cancelSidecarJob([...CANCEL_METHODS_AUDIO]);
   };
 
   const openTarget = result?.audiobook?.path ?? result?.audio_dir ?? null;
@@ -241,6 +265,16 @@ export default function Audiobook({
         >
           {building ? t("audio.building") : t("audio.build")}
         </button>
+        {building ? (
+          <button
+            type="button"
+            data-testid="audio-stop"
+            onClick={handleStop}
+            className="rounded-md border border-destructive/40 bg-card px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {t("audio.stop")}
+          </button>
+        ) : null}
         {building && !inMerge && !inMultiplex && !inProbing ? (
           <ProgressTrack done={progress.done} total={progress.total} />
         ) : null}
@@ -368,6 +402,16 @@ export default function Audiobook({
         </p>
       ) : null}
 
+      {!building && stopped && !error ? (
+        <div
+          className="mt-3 text-body-sm text-muted-foreground"
+          role="status"
+          aria-live="polite"
+          data-testid="audio-stopped"
+        >
+          {t("audio.stopped")}
+        </div>
+      ) : null}
       {error ? (
         <div role="alert" className="mt-3 text-body-sm text-destructive" data-testid="audio-error">
           {error}{" "}

@@ -872,6 +872,11 @@ def concat_mp3_files(input_paths: List[str], output_path: str) -> None:
         pass
 
     concat_file = str(Path(output_path).with_suffix(".concat.txt"))
+    # Atomic publish: ffmpeg writes a sidecar .tmp and we os.replace it into
+    # place on success. A hard kill (GUI Stop / crash) mid-encode then leaves
+    # at worst a stray .tmp, never a truncated chapter MP3 that resume would
+    # mistake for a finished merge (size+duration gates can pass on partials).
+    tmp_output = output_path + ".tmp"
     try:
         with open(concat_file, "w", encoding="utf-8") as f:
             for p in input_paths:
@@ -881,16 +886,22 @@ def concat_mp3_files(input_paths: List[str], output_path: str) -> None:
                 f.write(f"file '{safe}'\n")
 
         subprocess.run(
-            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file, "-c", "copy", output_path],
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file, "-c", "copy", tmp_output],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             **subprocess_kwargs(),
         )
+        os.replace(tmp_output, output_path)
     finally:
         try:
             if os.path.exists(concat_file):
                 os.remove(concat_file)
+        except OSError:
+            pass
+        try:
+            if os.path.exists(tmp_output):
+                os.remove(tmp_output)
         except OSError:
             pass
 

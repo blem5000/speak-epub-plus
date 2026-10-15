@@ -535,6 +535,26 @@ export async function buildAudio(params: AudioParams, opts?: { signal?: AbortSig
   return callSidecar("buildAudio", payload, opts);
 }
 
+/** RPC method names the GUI can hard-stop (must match Rust CANCELABLE_METHODS). */
+export const CANCEL_METHODS_AUDIO = ["buildAudio", "build_audio", "buildAudiobook"];
+export const CANCEL_METHODS_FETCH = ["fetchChapters"];
+
+/**
+ * Hard-stop running backend jobs (Stop buttons). Kills the Python sidecar
+ * process tree for the given RPC methods via Rust `cancel_sidecar_job`;
+ * omitted methods = all cancelable. Resume is safe: the pipeline
+ * re-verifies/regenerates existing artifacts on the next run.
+ * Returns the number of killed processes (best-effort, never throws).
+ */
+export async function cancelSidecarJob(methods?: string[]): Promise<number> {
+  try {
+    return await invoke<number>("cancel_sidecar_job", { methods });
+  } catch (e) {
+    console.warn("cancel_sidecar_job failed", e);
+    return 0;
+  }
+}
+
 /** Open a file/folder via Tauri opener only (H3 — no shell|open, no file:// fallback). */
 export async function openPath(path: string): Promise<void> {
   if (!path || !path.trim()) return;

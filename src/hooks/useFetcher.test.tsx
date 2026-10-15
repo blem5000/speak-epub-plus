@@ -7,9 +7,12 @@ const mockOnThrottleChanged = vi.fn();
 const mockOnLogLine = vi.fn();
 const mockOnChapterStatus = vi.fn();
 const mockOnPartStatus = vi.fn();
+const mockCancelSidecarJob = vi.fn();
 
 vi.mock("@/lib/sidecar", () => ({
   callSidecar: (...args: unknown[]) => mockCallSidecar(...args),
+  cancelSidecarJob: (...args: unknown[]) => mockCancelSidecarJob(...args),
+  CANCEL_METHODS_FETCH: ["fetchChapters"],
   onThrottleChanged: (cb: (p: unknown) => void) => {
     mockOnThrottleChanged(cb);
     return Promise.resolve(() => {});
@@ -37,6 +40,7 @@ describe("useFetcher hook", () => {
       void _cb;
       return Promise.resolve(() => {}) as unknown as Promise<() => void>;
     });
+    mockCancelSidecarJob.mockResolvedValue(1);
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -280,6 +284,8 @@ describe("useFetcher hook", () => {
       result.current.abort();
     });
     await waitFor(() => expect(result.current.fetching).toBe(false));
+    // Stop must hard-kill the Python sidecar job, not just detach the UI
+    expect(mockCancelSidecarJob).toHaveBeenCalledWith(["fetchChapters"]);
   });
 
   it("M2 sparse fetch from=36 marks only requested indices done", async () => {

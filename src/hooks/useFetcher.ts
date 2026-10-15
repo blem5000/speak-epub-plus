@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   callSidecar,
+  CANCEL_METHODS_FETCH,
+  cancelSidecarJob,
   onChapterStatus,
   onLogLine,
   onPartStatus,
@@ -165,6 +167,9 @@ export function useFetcher(): UseFetcherReturn {
       abortRef.current = null;
     }
     setFetching(false);
+    // Aborting the JS wait only detaches the UI — the Python sidecar keeps
+    // fetching in its own process. Hard-stop it so Stop actually stops.
+    void cancelSidecarJob([...CANCEL_METHODS_FETCH]);
     // timer cleanup handled by effect watching fetching
   }, []);
 

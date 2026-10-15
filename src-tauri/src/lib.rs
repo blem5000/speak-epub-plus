@@ -30,9 +30,93 @@ pub struct RpcError {
     pub retryable: Option<bool>,
 }
 
+/// Registry of live sidecar child processes so the UI can hard-stop a
+/// long-running job (audio build / chapter fetch). Each RPC call spawns a
+/// fresh interpreter (see `spawn_and_call`); killing the tree (`taskkill /T`)
+/// also reaps ffmpeg children it spawned. Resume is safe because the Python
+/// pipeline re-verifies existing artifacts on the next run.
+#[derive(Default)]
+pub struct SidecarJobs(pub std::sync::Mutex<Vec<(u32, String)>>);
+
+/// Removes its pid from the registry on every exit path (Ok, Err, drop).
+struct JobGuard<'a> {
+    jobs: &'a SidecarJobs,
+    pid: u32,
+}
+
+impl Drop for JobGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.jobs.0.lock() {
+            guard.retain(|(pid, _)| *pid != self.pid);
+        }
+    }
+}
+
+/// Methods long enough that a user-visible Stop must hard-kill the backend
+/// process (short RPCs finish in well under a second and stay untouchable).
+const CANCELABLE_METHODS: &[&str] = &[
+    "buildAudio",
+    "build_audio",
+    "buildAudiobook",
+    "fetchChapters",
+    "buildEpub",
+    "build_epub",
+];
+
+fn kill_process_tree(pid: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = std::process::Command::new("taskkill");
+        cmd.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+/// Hard-stop running sidecar jobs (GUI Stop buttons). `methods` narrows the
+/// kill to specific RPC methods; omitted = all cancelable methods.
+#[tauri::command]
+async fn cancel_sidecar_job(
+    jobs: tauri::State<'_, SidecarJobs>,
+    methods: Option<Vec<String>>,
+) -> Result<usize, String> {
+    let targets: Vec<u32> = {
+        let mut guard = jobs.0.lock().map_err(|e| e.to_string())?;
+        let mut take = Vec::new();
+        guard.retain(|(pid, method)| {
+            let cancelable = CANCELABLE_METHODS.contains(&method.as_str());
+            let selected = methods
+                .as_ref()
+                .map(|list| list.iter().any(|m| m == method))
+                .unwrap_or(true);
+            if cancelable && selected {
+                take.push(*pid);
+                false
+            } else {
+                true
+            }
+        });
+        take
+    };
+    for pid in &targets {
+        kill_process_tree(*pid);
+    }
+    Ok(targets.len())
+}
+
 #[tauri::command]
 async fn python_sidecar_call(
     app: tauri::AppHandle,
+    jobs: tauri::State<'_, SidecarJobs>,
     payload: RpcRequest,
 ) -> Result<RpcResponse, String> {
     // Resolve the Python backend: prefer the bundled runtime shipped with the
@@ -41,7 +125,7 @@ async fn python_sidecar_call(
 
     // Attempt to spawn sidecar as JSON-RPC over stdin/stdout
     // For spike we implement a minimal echo: if spawn fails, return error for JS fallback
-    match spawn_and_call(&venv_python, cwd.as_deref(), &payload, &app).await {
+    match spawn_and_call(&venv_python, cwd.as_deref(), &payload, &app, &jobs).await {
         Ok(resp) => {
             // Also emit via event bus for AD-6 compliance
             let _ = app.emit("python_sidecar_response", &resp);
@@ -105,6 +189,7 @@ async fn spawn_and_call(
     cwd: Option<&Path>,
     req: &RpcRequest,
     app: &tauri::AppHandle,
+    jobs: &SidecarJobs,
 ) -> Result<RpcResponse, String> {
     // H4: no in-process mock — even ping/hello spawn the real interpreter so
     // a green health-check proves the backend actually works.
@@ -170,6 +255,15 @@ except Exception as e:
         cmd.current_dir(dir);
     }
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+
+    // Track the pid so the UI can hard-stop long jobs (cancel_sidecar_job).
+    // The guard unregisters on every exit path, including early `?` returns.
+    let _job_guard = child.id().map(|pid| {
+        if let Ok(mut guard) = jobs.0.lock() {
+            guard.push((pid, req.method.clone()));
+        }
+        JobGuard { jobs, pid }
+    });
 
     // H4: drain stderr so a chatty backend can never fill the pipe and deadlock.
     if let Some(stderr) = child.stderr.take() {
@@ -272,9 +366,11 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .manage(updater::UpdateState::default())
+        .manage(SidecarJobs::default())
         .invoke_handler(tauri::generate_handler![
             python_sidecar_call,
             emit_event,
+            cancel_sidecar_job,
             updater::update_download_path,
             updater::update_write_chunk,
             updater::update_discard,

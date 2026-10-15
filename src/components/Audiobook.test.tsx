@@ -7,6 +7,7 @@ const mockBuildAudio = vi.fn();
 const mockGetStore = vi.fn();
 const mockInvoke = vi.fn();
 const mockOnMergeProgress = vi.fn();
+const mockCancelSidecarJob = vi.fn();
 
 vi.mock("@/lib/sidecar", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
@@ -15,6 +16,7 @@ vi.mock("@/lib/sidecar", async (importOriginal) => {
     buildAudio: (...args: unknown[]) => mockBuildAudio(...args),
     getStore: (...args: unknown[]) => mockGetStore(...args),
     onMergeProgress: (...args: unknown[]) => mockOnMergeProgress(...args),
+    cancelSidecarJob: (...args: unknown[]) => mockCancelSidecarJob(...args),
   };
 });
 
@@ -42,6 +44,7 @@ describe("Audiobook — Step 7 MP3/M4B/M4A", () => {
       result: { voice: "en-US-AndrewNeural", parallel: 3, "chunk-size": 3500, retries: 5 },
     });
     mockInvoke.mockResolvedValue(undefined);
+    mockCancelSidecarJob.mockResolvedValue(1);
   });
 
   it("renders empty state with format radio default m4b", async () => {
@@ -97,7 +100,8 @@ describe("Audiobook — Step 7 MP3/M4B/M4A", () => {
         novelUrl: baseProps.novelUrl,
         urls: baseProps.urls,
         format: "m4b",
-      })
+      }),
+      expect.objectContaining({ signal: expect.anything() })
     );
     await waitFor(() => {
       expect(screen.getByTestId("audio-result")).toBeInTheDocument();
@@ -330,6 +334,41 @@ describe("Audiobook — Step 7 MP3/M4B/M4A", () => {
       delete (globalThis as Record<string, unknown>).__mergeCb;
     }
   }, 30000);
+
+  it("build passes an AbortSignal and shows Stop while building", async () => {
+    mockBuildAudio.mockReturnValue(new Promise(() => {}));
+    render(<Audiobook {...baseProps} />);
+    expect(screen.queryByTestId("audio-stop")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("audio-build"));
+    expect(mockBuildAudio).toHaveBeenCalledWith(
+      expect.objectContaining({ novelUrl: baseProps.novelUrl }),
+      expect.objectContaining({ signal: expect.anything() })
+    );
+    expect(screen.getByTestId("audio-stop")).toBeInTheDocument();
+  });
+
+  it("Stop aborts the build, hard-stops the backend process and shows stopped note", async () => {
+    const user = userEvent.setup();
+    const seen: { signal: AbortSignal | null } = { signal: null };
+    mockBuildAudio.mockImplementation((_params: unknown, opts: { signal?: AbortSignal }) => {
+      seen.signal = opts?.signal ?? null;
+      return new Promise((resolve) => {
+        opts?.signal?.addEventListener("abort", () => {
+          resolve({ id: "1", error: { code: "ABORTED", message: "aborted" } });
+        });
+      });
+    });
+    render(<Audiobook {...baseProps} />);
+    await user.click(screen.getByTestId("audio-build"));
+    await user.click(screen.getByTestId("audio-stop"));
+    expect(seen.signal?.aborted).toBe(true);
+    expect(mockCancelSidecarJob).toHaveBeenCalledWith(["buildAudio", "build_audio", "buildAudiobook"]);
+    await waitFor(() => {
+      expect(screen.getByTestId("audio-stopped")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("audio-error")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("audio-stop")).not.toBeInTheDocument();
+  });
 
   it("open file surfaces opener rejection as toast (no silent no-op)", async () => {
     const user = userEvent.setup();
