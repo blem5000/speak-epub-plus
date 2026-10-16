@@ -126,6 +126,47 @@ describe("App wizard — single Start orchestration", () => {
     expect(screen.queryByTestId("wizard-no-targets")).not.toBeInTheDocument();
   });
 
+  it("single search result auto-selects without clicking (no persisted url)", async () => {
+    // no persisted selection: getSelection returns no url, so only the
+    // auto-select of the single result can reveal the wizard options
+    mockCallSidecar.mockImplementation(async (method: unknown) => {
+      if (method === "hello") return { id: "0", result: { pong: true } };
+      if (method === "getSelection") return { id: "0", result: { selection: [], from: 1, to: 30, url: null } };
+      return { id: "0", result: {} };
+    });
+    render(<App />);
+    const options = await screen.findByTestId("wizard-options");
+    expect(options).toBeInTheDocument();
+  });
+
+  it("multiple search results do not auto-select (click still required)", async () => {
+    mockCallSidecar.mockImplementation(async (method: unknown) => {
+      if (method === "hello") return { id: "0", result: { pong: true } };
+      if (method === "getSelection") return { id: "0", result: { selection: [], from: 1, to: 30, url: null } };
+      return { id: "0", result: {} };
+    });
+    resultsMock = [
+      {
+        url: "https://www.novelphoenix.com/novel/123",
+        site: "novelphoenix.com",
+        title: "Test Book",
+        chapters: 2,
+        author: "Author",
+      },
+      {
+        url: "https://www.novelphoenix.com/novel/456",
+        site: "novelphoenix.com",
+        title: "Other Book",
+        chapters: 5,
+        author: "Author",
+      },
+    ];
+    render(<App />);
+    // wait a tick for effects + the (absent) selection restore to settle
+    await waitFor(() => expect(mockCallSidecar).toHaveBeenCalledWith("getSelection", expect.anything()));
+    expect(screen.queryByTestId("wizard-options")).not.toBeInTheDocument();
+  });
+
   it("single Start runs fetch → epub → audio in order and renders both results", async () => {
     const user = userEvent.setup();
     render(<App />);

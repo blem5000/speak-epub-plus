@@ -122,6 +122,15 @@ export default function App(): JSX.Element {
     }
   }, [results, selectedUrl]);
 
+  // auto-select when the search yields exactly one site — no click needed
+  useEffect(() => {
+    if (results.length !== 1) return;
+    const only = results[0]?.url;
+    if (only && selectedUrl !== only) {
+      setSelectedUrl(only);
+    }
+  }, [results, selectedUrl]);
+
   // reset selection when selectedUrl changes (FR1→FR2 discovery standalone demo)
   useEffect(() => {
     if (skipNextClearRef.current) {
