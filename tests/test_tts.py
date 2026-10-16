@@ -1734,6 +1734,36 @@ def test_convert_wiring(tmp_path, monkeypatch):
     assert called["build_plan"][2] == "+25%"
 
 
+def test_convert_ffmpeg_missing_warns_and_local_errors(tmp_path, monkeypatch, capsys):
+    """Troubleshooter policy: ffmpeg is checked before any synthesis; the local
+    engine fails fast, other engines proceed with a warning."""
+    import speak as speak_mod
+
+    fake_epub = tmp_path / "B.epub"
+    fake_epub.write_bytes(b"fake")
+    chapters = [(36, "Ch36", "text" * 100)]
+    ran = {}
+
+    async def fake_run_jobs(*a, **k):
+        ran["jobs"] = True
+
+    monkeypatch.setattr(speak_mod, "extract_chapters", lambda *a, **k: chapters)
+    monkeypatch.setattr(speak_mod, "build_generation_plan", lambda *a, **k: ([], []))
+    monkeypatch.setattr(speak_mod, "run_part_jobs", fake_run_jobs)
+    monkeypatch.setattr(speak_mod, "finalize_chapter_audio", lambda plans, keep_parts=False: [])
+    monkeypatch.setattr(speak_mod, "_core_ffmpeg", lambda: False)
+
+    asyncio.run(speak_mod.convert(str(fake_epub), str(tmp_path / "o1"), voice="v", m4b=False, m4a=False))
+    assert "ffmpeg not found" in capsys.readouterr().out
+    assert ran.get("jobs") is True  # warning only: the build proceeds
+
+    ran.clear()
+    asyncio.run(speak_mod.convert(str(fake_epub), str(tmp_path / "o2"), voice="v", m4b=False, m4a=False,
+                                  engine="local", local_voice="pl_PL-darkman-medium"))
+    assert "requires ffmpeg" in capsys.readouterr().out
+    assert "jobs" not in ran  # hard stop before any synthesis
+
+
 # ---------------------------------------------------------------------------
 # Story 4.1 — run_part_jobs callbacks: on_part_status sequence, skipped, error, progress/log
 # ---------------------------------------------------------------------------
@@ -2082,11 +2112,13 @@ def test_tts_truncated_auto_splits_and_heals(tmp_path, capsys):
     assert "auto-splitting" in capsys.readouterr().out
 
 
-def test_tts_truncated_below_floor_raises_immediately(tmp_path):
-    """Deterministic truncation at/below the split floor: nothing to split, raise."""
+def test_tts_truncated_normal_rate_retries_then_raises(tmp_path):
+    """Below-floor truncation at a normal rate: suspect transient cut, so the
+    troubleshooter retries the part instead of aborting — and surfaces the
+    actionable error only after exhausting retries."""
     out = tmp_path / "trunc.mp3"
     calls = {"save": 0}
-    short_text = "word " * 80  # 400 chars <= TRUNC_SPLIT_FLOOR
+    short_text = "word " * 80  # 400 chars <= TRUNC_SPLIT_FLOOR: nothing to split
 
     class FakeCommunicate:
         def __init__(self, text, voice_arg):
@@ -2096,19 +2128,113 @@ def test_tts_truncated_below_floor_raises_immediately(tmp_path):
             calls["save"] += 1
             Path(path).write_bytes(b"x" * 4096)
 
+    async def fake_sleep(seconds):
+        pass
+
     async def _run():
         with patch("edge_tts.Communicate", FakeCommunicate):
             with patch("core.tts.verify_part_audio", return_value=(False, "truncated")):
-                with patch("core.tts.concat_mp3_files") as mock_concat:
-                    with patch("core.tts.ffmpeg_available", return_value=True):
+                with patch("core.tts.ffmpeg_available", return_value=True):
+                    with patch("core.tts.asyncio.sleep", new=fake_sleep):
                         with pytest.raises(RuntimeError, match="even after automatic splitting"):
                             await tts_text_to_mp3(short_text, str(out), "v", retries=5)
-                    mock_concat.assert_not_called()
 
     asyncio.run(_run())
 
-    assert calls["save"] == 1  # no retries, no splits for deterministic truncation
+    assert calls["save"] == 5  # initial + 4 plain re-saves, no pointless splitting
     assert not out.exists()  # invalid file removed, resume will regenerate
+
+
+def test_tts_truncated_extreme_rate_raises_immediately(tmp_path):
+    """At extreme rates the scaled floor is trustworthy: fail fast, no retries."""
+    out = tmp_path / "trunc.mp3"
+    calls = {"save": 0}
+    short_text = "word " * 80  # 400 chars
+
+    class FakeCommunicate:
+        def __init__(self, text, voice_arg, **kwargs):
+            pass
+
+        async def save(self, path):
+            calls["save"] += 1
+            Path(path).write_bytes(b"x" * 4096)
+
+    async def _run():
+        with patch("edge_tts.Communicate", FakeCommunicate):
+            with patch("core.tts.verify_part_audio", return_value=(False, "truncated")):
+                with patch("core.tts.ffmpeg_available", return_value=True):
+                    with pytest.raises(RuntimeError, match="even after automatic splitting"):
+                        await tts_text_to_mp3(short_text, str(out), "v", retries=5, rate="+80%")
+
+    asyncio.run(_run())
+
+    assert calls["save"] == 1
+    assert not out.exists()
+
+
+def test_tts_truncated_normal_rate_heals_on_resave(tmp_path):
+    """Demotion path: when auto-split cannot help but the cut was transient,
+    a plain re-save heals the part without aborting."""
+    out = tmp_path / "trunc.mp3"
+    calls = {"save": 0}
+    long_text = "word " * 700  # 3500 chars
+
+    class FakeCommunicate:
+        def __init__(self, text, voice_arg):
+            pass
+
+        async def save(self, path):
+            calls["save"] += 1
+            Path(path).write_bytes(b"x" * 4096)
+
+    async def fake_sleep(seconds):
+        pass
+
+    async def no_split(*a, **k):
+        return False
+
+    async def _run():
+        with patch("edge_tts.Communicate", FakeCommunicate):
+            # auto-split disabled for isolation; first save truncated, resave ok
+            with patch("core.tts._autosplit_truncated", new=no_split):
+                with patch("core.tts.verify_part_audio", side_effect=[(False, "truncated"), (True, "ok")]):
+                    with patch("core.tts.asyncio.sleep", new=fake_sleep):
+                        await tts_text_to_mp3(long_text, str(out), "v", retries=5)
+
+    asyncio.run(_run())
+
+    assert calls["save"] == 2
+    assert out.is_file()
+
+
+def test_tts_truncated_exhaustion_prefers_actionable_error(tmp_path):
+    """All retries truncated: surface the truncation error, not the generic wrapper."""
+    out = tmp_path / "trunc.mp3"
+    long_text = "word " * 700  # 3500 chars
+
+    class FakeCommunicate:
+        def __init__(self, text, voice_arg):
+            pass
+
+        async def save(self, path):
+            Path(path).write_bytes(b"x" * 4096)
+
+    async def fake_sleep(seconds):
+        pass
+
+    async def no_split(*a, **k):
+        return False
+
+    async def _run():
+        with patch("edge_tts.Communicate", FakeCommunicate):
+            with patch("core.tts._autosplit_truncated", new=no_split):
+                with patch("core.tts.verify_part_audio", return_value=(False, "truncated")):
+                    with patch("core.tts.asyncio.sleep", new=fake_sleep):
+                        with pytest.raises(RuntimeError, match="even after automatic splitting"):
+                            await tts_text_to_mp3(long_text, str(out), "v", retries=2)
+
+    asyncio.run(_run())
+    assert not out.exists()
 
 
 def test_tts_truncated_without_ffmpeg_raises(tmp_path):
@@ -2123,20 +2249,27 @@ def test_tts_truncated_without_ffmpeg_raises(tmp_path):
         async def save(self, path):
             Path(path).write_bytes(b"x" * 4096)
 
+    async def fake_sleep(seconds):
+        pass
+
     async def _run():
         with patch("edge_tts.Communicate", FakeCommunicate):
             with patch("core.tts.verify_part_audio", return_value=(False, "truncated")):
                 with patch("core.tts.ffmpeg_available", return_value=False):
-                    with pytest.raises(RuntimeError, match="even after automatic splitting"):
-                        await tts_text_to_mp3(long_text, str(out), "v", retries=5)
+                    with patch("core.tts.asyncio.sleep", new=fake_sleep):
+                        with pytest.raises(RuntimeError, match="even after automatic splitting"):
+                            await tts_text_to_mp3(long_text, str(out), "v", retries=5)
 
     asyncio.run(_run())
     assert not out.exists()
 
 
 def test_tts_truncated_heal_failure_raises_and_cleans(tmp_path):
-    """Reassembled output still invalid: raise, remove everything temp."""
+    """Persistently truncated everywhere: recursion bottoms out at the floor,
+    nested recovery fails fast (no attempt multiplication), and exhaustion
+    surfaces the actionable truncation error with temp cleanup."""
     out = tmp_path / "trunc.mp3"
+    calls = {"save": 0}
     long_text = "word " * 700  # 3500 chars
 
     class FakeCommunicate:
@@ -2144,22 +2277,29 @@ def test_tts_truncated_heal_failure_raises_and_cleans(tmp_path):
             pass
 
         async def save(self, path):
+            calls["save"] += 1
             Path(path).write_bytes(b"x" * 4096)
 
-    def fake_concat(inputs, output):
-        Path(output).write_bytes(b"x" * 64)  # too small: still invalid
+    def broken_concat(inputs, output):
+        raise RuntimeError("concat boom")
+
+    async def fake_sleep(seconds):
+        pass
 
     async def _run():
         with patch("edge_tts.Communicate", FakeCommunicate):
-            with patch("core.tts.verify_part_audio", side_effect=[
-                (False, "truncated"), (True, "ok"), (True, "ok"), (False, "too_small"),
-            ]):
-                with patch("core.tts.concat_mp3_files", side_effect=fake_concat):
+            with patch("core.tts.verify_part_audio", return_value=(False, "truncated")):
+                with patch("core.tts.concat_mp3_files", side_effect=broken_concat):
                     with patch("core.tts.ffmpeg_available", return_value=True):
-                        with pytest.raises(RuntimeError, match="even after automatic splitting"):
-                            await tts_text_to_mp3(long_text, str(out), "v", retries=5)
+                        with patch("core.tts.asyncio.sleep", new=fake_sleep):
+                            with pytest.raises(RuntimeError, match="even after automatic splitting"):
+                                await tts_text_to_mp3(long_text, str(out), "v", retries=2)
 
     asyncio.run(_run())
+    # full + first-half chain (halves fail fast, second halves never run once
+    # the first raises) + 1 top-level resave; nested levels never demote
+    # (that would multiply attempts exponentially)
+    assert calls["save"] == 5
     assert not out.exists()
     assert not list(tmp_path.glob("*.autosplit*.mp3"))
 

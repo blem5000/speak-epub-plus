@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -423,6 +425,35 @@ class TestBuildAudioRpc:
                           "params": {**base, "force": "yes"}})
         assert "error" not in res
         assert seen["force"] is True
+
+    def test_build_audio_ffmpeg_missing_warns_upfront(self, tmp_path, monkeypatch):
+        # troubleshooter policy: know before hours of synthesis that merging
+        # and truncation auto-repair are unavailable
+        _seed(tmp_path)
+        kwargs = dict(
+            from_idx=1, to_idx=1, title="T", cache_dir=tmp_path,
+            chapter_urls=[CH1], audio_format="mp3",
+        )
+        monkeypatch.setattr("core.audio.ffmpeg_available", lambda: False)
+        with patch("core.audio.run_part_jobs", side_effect=_fake_run):
+            res = build_audio("https://www.novelphoenix.com/novel/123",
+                              output_dir=tmp_path / "out_ff", **kwargs)
+        assert any("ffmpeg not found" in line for line in res["logs"])
+
+    def test_build_audio_local_engine_requires_ffmpeg(self, tmp_path, monkeypatch):
+        # local synthesis can never work without ffmpeg: fail fast, not on the
+        # first part after minutes of queueing
+        _seed(tmp_path)
+        kwargs = dict(
+            from_idx=1, to_idx=1, title="T", cache_dir=tmp_path,
+            chapter_urls=[CH1], audio_format="mp3", engine="local",
+            local_voice="pl_PL-darkman-medium",
+        )
+        monkeypatch.setattr("core.audio.ffmpeg_available", lambda: False)
+        with patch("core.audio.run_part_jobs", side_effect=_fake_run):
+            with pytest.raises(RuntimeError, match="requires ffmpeg"):
+                build_audio("https://www.novelphoenix.com/novel/123",
+                            output_dir=tmp_path / "out_ff2", **kwargs)
 
     def test_output_falls_back_when_cwd_unwritable(self, tmp_path, monkeypatch, capsys):
         """System32-CWD regression: default output lands in user docs, no WinError 5."""

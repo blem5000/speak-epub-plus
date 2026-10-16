@@ -550,6 +550,7 @@ async def tts_text_to_mp3(
     retries: int = 5,
     rate: Optional[str] = None,
     on_retry: Optional[Callable[[int, Exception], None]] = None,
+    _demote_truncated: bool = True,
 ) -> None:
     """
     Core-owned Edge TTS execution (ratyfikacja speak.py:116).
@@ -562,9 +563,15 @@ async def tts_text_to_mp3(
     - after each save verify_part_audio: invalid file is deleted and the
       attempt counts as failed (empty/partial writes are retried; a
       "truncated" verdict triggers the built-in troubleshooter —
-      _autosplit_truncated regenerates the part in halves — and raises
-      only when splitting cannot help, since Edge cuts overlong requests
-      deterministically and retries can't help)
+      _autosplit_truncated regenerates the part in halves — and, at normal
+      rates, is then retried like any transient failure since Edge cuts
+      overlong requests deterministically but also flakes occasionally;
+      the retry demotion applies to the top-level call only — nested
+      recovery fails fast to bound total work; extreme rates fail fast,
+      and exhausted retries surface the actionable truncation error)
+    - `_demote_truncated=False` (used by the troubleshooter itself for
+      sub-parts) disables the retry demotion: nested calls raise the
+      truncation error immediately instead of multiplying attempts
     - wait = min(20, 2*attempt) + asyncio.sleep + log retry {attempt}/{retries-1} for {name}
     - raise RuntimeError after exhausting retries with last_error chained
 
@@ -572,8 +579,12 @@ async def tts_text_to_mp3(
     truncation auto-split concat).
     """
     last_error: Optional[Exception] = None
+    truncated_error: Optional[_TruncatedPartError] = None
+    last_failure_truncated = False
+    split_attempted = False
 
     for attempt in range(1, retries + 1):
+        last_failure_truncated = False
         try:
             import edge_tts  # lazy — keep core importable without edge-tts
 
@@ -591,18 +602,30 @@ async def tts_text_to_mp3(
             except Exception:
                 pass
             if reason == "truncated":
+                last_failure_truncated = True
+                if truncated_error is None:
+                    truncated_error = _TruncatedPartError(
+                        f"TTS output truncated for {Path(output_path).name} "
+                        f"({len(text)} chars) even after automatic splitting — "
+                        f"try a lower --rate, a different voice, or --chunk-size 2000 and re-run"
+                    )
                 # built-in troubleshooter: Edge cuts overlong requests
                 # deterministically, so instead of aborting the whole build,
                 # split the part and regenerate it in halves (recursively).
-                if await _autosplit_truncated(
-                    text, output_path, voice, retries, rate, on_retry
-                ):
-                    return
-                raise _TruncatedPartError(
-                    f"TTS output truncated for {Path(output_path).name} "
-                    f"({len(text)} chars) even after automatic splitting — "
-                    f"try a lower --rate, a different voice, or --chunk-size 2000 and re-run"
-                )
+                if not split_attempted:
+                    split_attempted = True
+                    if await _autosplit_truncated(
+                        text, output_path, voice, retries, rate, on_retry
+                    ):
+                        return
+                if _rate_is_normal(rate) and _demote_truncated:
+                    # at normal rates a truncated verdict is suspect (likely a
+                    # transient Edge cut): retry like any invalid file instead
+                    # of aborting the build
+                    raise RuntimeError(
+                        f"TTS saved truncated audio for {Path(output_path).name} — retrying"
+                    )
+                raise truncated_error
             # non-truncated but invalid (empty/partial/unprobed): reuse the
             # generic retry path below so it gets backoff logging + sleep
             raise RuntimeError(
@@ -631,6 +654,10 @@ async def tts_text_to_mp3(
                         pass
                 await asyncio.sleep(wait_seconds)
 
+    # retries exhausted: prefer the actionable truncation error when the last
+    # attempt failed truncated (auto-split + plain retries all tried)
+    if last_failure_truncated and truncated_error is not None:
+        raise truncated_error from last_error
     raise RuntimeError(f"TTS failed after {retries} attempts for {output_path}: {last_error}") from last_error
 
 
@@ -638,6 +665,21 @@ async def tts_text_to_mp3(
 #: this size are synthesized as-is; persistent truncation below it raises
 #: instead of recursing forever.
 TRUNC_SPLIT_FLOOR = 500
+
+
+def _rate_is_normal(rate: Optional[str]) -> bool:
+    """True when |rate| is within the UI slider range (±50%).
+
+    At normal rates short audio is suspect — most likely a transient Edge
+    cut — so the troubleshooter retries instead of aborting. At extreme
+    rates the duration floor is already scaled, and a truncated verdict is
+    trustworthy enough to fail fast.
+    """
+    try:
+        num = int(normalize_tts_rate(rate).rstrip("%"))
+    except Exception:
+        return True
+    return abs(num) <= 50
 
 
 async def _autosplit_truncated(
@@ -671,7 +713,12 @@ async def _autosplit_truncated(
     tmp_paths = [f"{output_path}.autosplit{i}.mp3" for i in range(len(sub_texts))]
     try:
         for sub_text, tmp in zip(sub_texts, tmp_paths):
-            await tts_text_to_mp3(sub_text, tmp, voice, retries=retries, rate=rate, on_retry=on_retry)
+            # nested recovery fails fast (no demotion retries): the top-level
+            # call already provides the retry breadth for transient cuts
+            await tts_text_to_mp3(
+                sub_text, tmp, voice, retries=retries, rate=rate,
+                on_retry=on_retry, _demote_truncated=False,
+            )
         concat_mp3_files(tmp_paths, output_path)
     except Exception as e:
         print(f"        auto-split regenerate failed for {name}: {e}")

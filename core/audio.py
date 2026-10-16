@@ -461,6 +461,13 @@ def build_audio(
     audio_dir = out_base / f"{slug}_audiobook"
     audio_dir.mkdir(parents=True, exist_ok=True)
 
+    # fail fast / warn upfront: truncation auto-repair, chapter merging and
+    # M4B/M4A all need ffmpeg — better to know before hours of synthesis
+    if not ffmpeg_available():
+        if str(engine or "").strip().lower() == "local":
+            raise RuntimeError("local TTS engine requires ffmpeg on PATH — install it and re-run")
+        logs.append("warning: ffmpeg not found on PATH — chapter merging, M4B/M4A and truncation auto-repair are disabled")
+
     plans, jobs = build_generation_plan(chapters, str(audio_dir), chunk_size, rate=rate)
     logs.append(f"queued {len(jobs)} TTS part job(s) for {len(chapters)} chapter(s)")
 

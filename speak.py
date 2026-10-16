@@ -278,6 +278,14 @@ async def convert(
         print(f"TTS engine: {engine}{suffix}")
     print(f"Output folder: {output_dir}\n")
 
+    # fail fast / warn upfront: truncation auto-repair, chapter merging and
+    # M4B/M4A all need ffmpeg — better to know before hours of synthesis
+    if not _core_ffmpeg():
+        if str(engine or "").strip().lower() == "local":
+            print("Error: the local TTS engine requires ffmpeg on PATH — install it and re-run.")
+            return
+        print("Warning: ffmpeg not found on PATH — chapter merging, M4B/M4A and truncation auto-repair are disabled.")
+
     for chapter_number, title, text in chapters:
         chunks = split_text_for_tts(text, max_chars=chunk_size)
         display_title = title[:60] if title else f"Chapter {chapter_number}"
