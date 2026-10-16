@@ -204,11 +204,19 @@ def build_generation_plan(chapters: list[Chapter], output_dir: str, chunk_size: 
 
 
 async def run_part_jobs(
-    jobs: list[PartJob], voice: str, parallel: int, retries: int, rate: str | None = None
+    jobs: list[PartJob],
+    voice: str,
+    parallel: int,
+    retries: int,
+    rate: str | None = None,
+    engine: str = "edge",
+    local_voice: str | None = None,
 ) -> None:
     # Delegates to core/tts.py — single source, no duplication (Story 3.2).
     # adaptive=True: concurrency self-tunes (grow on clean streaks, halve on retries).
-    return await _core_run(jobs, voice, parallel, retries, rate=rate, adaptive=True)
+    return await _core_run(
+        jobs, voice, parallel, retries, rate=rate, adaptive=True, engine=engine, local_voice=local_voice
+    )
 
 
 def finalize_chapter_audio(plans: list[ChapterPlan], keep_parts: bool) -> list[AudioEntry]:
@@ -233,6 +241,8 @@ async def convert(
     retries: int = 5,
     bitrate: str = "32k",
     rate: str = "+0%",
+    engine: str = "auto",
+    local_voice: str | None = None,
 ) -> None:
     try:
         chapters = extract_chapters(epub_path, start_chapter=start_chapter, end_chapter=end_chapter)
@@ -257,6 +267,9 @@ async def convert(
     print(f"Parallel TTS part jobs: {parallel} (auto-tunes 1\u201312 while running)")
     print(f"Retries per part: {retries}")
     print(f"Speech rate: {_core_norm_rate(rate)}")
+    if engine and engine != "edge":
+        suffix = f" ({local_voice})" if local_voice else ""
+        print(f"TTS engine: {engine}{suffix}")
     print(f"Output folder: {output_dir}\n")
 
     for chapter_number, title, text in chapters:
@@ -268,7 +281,10 @@ async def convert(
     print(f"\nQueued {len(jobs)} new TTS part job(s).")
 
     try:
-        await run_part_jobs(jobs, voice=voice, parallel=parallel, retries=retries, rate=_core_norm_rate(rate))
+        await run_part_jobs(
+            jobs, voice=voice, parallel=parallel, retries=retries,
+            rate=_core_norm_rate(rate), engine=engine, local_voice=local_voice,
+        )
     except Exception as e:
         print(f"\nERROR: generation failed: {e}")
         print("Already generated MP3 files are kept. Re-run the same command to resume.")
@@ -304,6 +320,8 @@ def main() -> None:
     parser.add_argument("--parallel", type=int, default=3, help="Starting number of TTS parts generated at the same time (1-6). The pool auto-scales up to 12 while Edge TTS is not throttling, and backs off on retries. Default: 3.")
     parser.add_argument("--retries", type=int, default=5, help="Retries per TTS request/chunk. Default: 5.")
     parser.add_argument("--rate", default="+0%", help="Speech rate adjustment like +25%% or -10%% (clamped to ±100%%). Default: +0%%.")
+    parser.add_argument("--engine", choices=["auto", "edge", "local"], default="auto", help="TTS engine: auto (local Piper on fast CPUs when the model is downloaded, else Edge), edge (cloud), local (offline Piper). Default: auto.")
+    parser.add_argument("--local-voice", default="", help="Piper voice for the local engine, e.g. pl_PL-darkman-medium. Empty: default voice.")
     parser.add_argument("--bitrate", default="32k", help="M4B/M4A audio bitrate like 32k (16k-128k, speech default: 32k).")
 
     args = parser.parse_args()
@@ -349,6 +367,14 @@ def main() -> None:
         print("Error: --rate must look like +0%, +25% or -10%.")
         sys.exit(1)
 
+    local_voice_arg = (args.local_voice or "").strip() or None
+    if local_voice_arg is not None:
+        from core.tts_local import LOCAL_VOICES
+
+        if local_voice_arg not in LOCAL_VOICES:
+            print(f"Error: unknown --local-voice {local_voice_arg!r}. Available: {', '.join(LOCAL_VOICES)}")
+            sys.exit(1)
+
     _bitrate_match = re.match(r"^(\d+)\s*k$", (args.bitrate or "").strip(), re.IGNORECASE)
     if not _bitrate_match or not (16 <= int(_bitrate_match.group(1)) <= 128):
         print("Error: --bitrate must be like 32k (16k-128k).")
@@ -371,6 +397,8 @@ def main() -> None:
             retries=args.retries,
             bitrate=f"{int(_bitrate_match.group(1))}k",
             rate=_core_norm_rate(args.rate),
+            engine=args.engine,
+            local_voice=local_voice_arg,
         )
     )
 

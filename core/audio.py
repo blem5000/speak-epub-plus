@@ -278,6 +278,8 @@ def build_audio(
     end_selector: str | None = None,
     voice: str = "en-US-AndrewNeural",
     rate: str | None = None,
+    engine: str | None = None,
+    local_voice: str | None = None,
     parallel: int = 3,
     retries: int = 5,
     chunk_size: int = 3500,
@@ -339,6 +341,25 @@ def build_audio(
     from core.tts import normalize_tts_rate
 
     rate = normalize_tts_rate(rate)
+    if engine is None or local_voice is None:
+        _store_engine: dict = {}
+        try:
+            from core.config import load_store  # dynamic, no cycles
+
+            _store_engine = load_store() or {}
+        except Exception:
+            _store_engine = {}
+        if engine is None:
+            engine = _store_engine.get("engine", "auto") if isinstance(_store_engine, dict) else "auto"
+        if local_voice is None:
+            local_voice = _store_engine.get("localVoice") if isinstance(_store_engine, dict) else None
+    engine = engine.strip().lower() if isinstance(engine, str) else "auto"
+    if engine not in ("auto", "edge", "local"):
+        engine = "auto"
+    if isinstance(local_voice, str):
+        local_voice = local_voice.strip() or None
+    else:
+        local_voice = None
     try:
         parallel = max(1, min(6, int(parallel)))  # type: ignore[arg-type]
     except Exception:
@@ -467,7 +488,7 @@ def build_audio(
         await run_part_jobs(
             jobs, voice, parallel, retries,
             on_part_status=on_part_status, on_log=_emit_log, on_progress=on_progress,
-            rate=rate, adaptive=True,
+            rate=rate, adaptive=True, engine=engine, local_voice=local_voice,
         )
 
     try:

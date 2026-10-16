@@ -706,8 +706,8 @@ def test_speak_delegation_parity(monkeypatch, tmp_path):
         called["tts"] = (text, output_path, voice, retries, rate)
         Path(output_path).write_text("ok", encoding="utf-8")
 
-    async def fake_core_run(jobs, voice, parallel, retries, rate=None, adaptive=False, parallel_max=None):
-        called["run"] = (jobs, voice, parallel, retries, rate, adaptive)
+    async def fake_core_run(jobs, voice, parallel, retries, rate=None, adaptive=False, parallel_max=None, engine="edge", local_voice=None):
+        called["run"] = (jobs, voice, parallel, retries, rate, adaptive, engine, local_voice)
 
     monkeypatch.setattr(core_mod, "tts_text_to_mp3", fake_core_tts)
     # Need to also patch the alias that speak imported at import time: _core_tts
@@ -731,6 +731,12 @@ def test_speak_delegation_parity(monkeypatch, tmp_path):
         assert called["run"][1] == "en-US-AriaNeural"
         assert called["run"][4] == "+25%"  # rate forwarded
         assert called["run"][5] is True  # adaptive enabled by the wrapper
+        assert called["run"][6] == "edge"  # engine default
+        await speak_mod.run_part_jobs(
+            jobs, voice="en-US-AriaNeural", parallel=3, retries=5, engine="local", local_voice="pl_PL-darkman-medium"
+        )
+        assert called["run"][6] == "local"
+        assert called["run"][7] == "pl_PL-darkman-medium"
 
     asyncio.run(_run())
 
@@ -1679,8 +1685,8 @@ def test_convert_wiring(tmp_path, monkeypatch):
         jobs = []
         return plans, jobs
 
-    async def fake_run_jobs(jobs, voice, parallel, retries, rate=None):
-        called["run_jobs"] = (voice, parallel, retries, len(jobs), rate)
+    async def fake_run_jobs(jobs, voice, parallel, retries, rate=None, engine="edge", local_voice=None):
+        called["run_jobs"] = (voice, parallel, retries, len(jobs), rate, engine, local_voice)
 
     def fake_finalize(plans, keep_parts):
         called["finalize"] = (len(plans), keep_parts)

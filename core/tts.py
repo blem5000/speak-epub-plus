@@ -696,6 +696,8 @@ async def run_part_jobs(
     rate: Optional[str] = None,
     adaptive: bool = False,
     parallel_max: Optional[int] = None,
+    engine: str = "edge",
+    local_voice: Optional[str] = None,
 ) -> None:
     """
     Global parallel PartJob queue — deterministyczny reading-order.
@@ -704,6 +706,9 @@ async def run_part_jobs(
     - workers pool = asyncio.create_task(worker(i+1))
     - worker while True: job=await queue.get(); if job is None: task_done/break
     - rate like '+25%' forwarded to tts_text_to_mp3 (omit = Edge default)
+    - engine 'auto'|'edge'|'local': 'auto' uses local Piper when the machine is
+      fast enough (>= LOCAL_MIN_CORES) and the model is downloaded, else Edge;
+      'local' runs fully offline (pool = cpu cores capped at 8, no adaptive gate)
     - adaptive=True: concurrency starts at `parallel` (clamp 1–6) and self-tunes
       via AdaptiveGate up to ADAPTIVE_MAX_PARALLEL (override: parallel_max) —
       +1 after ADAPTIVE_GROW_AFTER clean parts, halved on any retry
@@ -740,6 +745,40 @@ async def run_part_jobs(
             except Exception:
                 pass
         return
+
+    # Engine resolution: 'auto' falls back to Edge when the local model is
+    # missing or the machine is below the local-synthesis CPU threshold.
+    engine_used = "edge"
+    local_voice_eff: Optional[str] = None
+    if isinstance(engine, str) and engine.strip().lower() not in ("", "edge"):
+        from core.tts_local import DEFAULT_LOCAL_VOICE, effective_local_parallel, resolve_engine
+
+        try:
+            engine_used = resolve_engine(engine, local_voice)
+        except ValueError as e:
+            print(str(e))
+            if on_log:
+                try:
+                    on_log(str(e))
+                except Exception:
+                    pass
+            raise
+        if engine_used == "local":
+            local_voice_eff = (
+                local_voice if isinstance(local_voice, str) and local_voice.strip() else DEFAULT_LOCAL_VOICE
+            )
+            if isinstance(engine, str) and engine.strip().lower() == "local":
+                _engine_msg = f"engine: local Piper {local_voice_eff} (offline synthesis)"
+            else:
+                _engine_msg = f"engine: auto -> local Piper {local_voice_eff} (fast CPU, offline synthesis)"
+        else:
+            _engine_msg = "engine: auto -> Edge TTS (local model not downloaded or CPU below threshold)"
+        print(_engine_msg)
+        if on_log:
+            try:
+                on_log(_engine_msg)
+            except Exception:
+                pass
 
     _resume_lock: Any = None
     try:
@@ -793,9 +832,12 @@ async def run_part_jobs(
 
     # Worker pool size = concurrency ceiling; the AdaptiveGate throttles
     # actual concurrency (and can raise it up to parallel_max while running).
+    # Local (Piper) runs are CPU-bound: pool = cpu cores (capped), no gate.
     gate: Optional[AdaptiveGate] = None
     pool_size = parallel
-    if adaptive:
+    if engine_used == "local":
+        pool_size = effective_local_parallel()
+    elif adaptive:
         max_par = ADAPTIVE_MAX_PARALLEL
         try:
             if parallel_max is not None:
@@ -904,10 +946,17 @@ async def run_part_jobs(
                     tts_kwargs: dict = {"retries": retries}
                     if rate:
                         tts_kwargs["rate"] = rate
-                    if gate is not None:
-                        tts_kwargs["on_retry"] = _on_retry
                     try:
-                        await tts_text_to_mp3(job.text, job.output_path, voice, **tts_kwargs)
+                        if engine_used == "local":
+                            from core.tts_local import tts_text_to_mp3_local
+
+                            await asyncio.to_thread(
+                                tts_text_to_mp3_local, job.text, job.output_path, local_voice_eff, **tts_kwargs
+                            )
+                        else:
+                            if gate is not None:
+                                tts_kwargs["on_retry"] = _on_retry
+                            await tts_text_to_mp3(job.text, job.output_path, voice, **tts_kwargs)
                     except asyncio.CancelledError:
                         # cancelled mid-save: drop truncated file so resume heals (H6)
                         try:

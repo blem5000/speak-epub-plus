@@ -61,6 +61,8 @@ DEFAULT_STORE: Dict[str, Any] = {
     "updateAuto": True,
     "updateSkipped": "",
     "locale": "",
+    "engine": "auto",
+    "localVoice": "",
 }
 
 # Simple in-memory cache for listChapters url -> serialized list (FR2) — KEEP per re-review decision
@@ -2184,6 +2186,42 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         except Exception as e:
             return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
 
+    if method in ("localVoices", "local_voices", "listLocalVoices"):
+        try:
+            from core.tts_local import list_local_voices
+
+            return {"id": rid, "result": list_local_voices()}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+    if method in ("downloadLocalVoice", "download_local_voice"):
+        params = request.get("params") or {}
+        if not isinstance(params, dict):
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "params must be object"}}
+        voice_p = params.get("voice", params.get("id"))
+        voice_p = voice_p.strip() if isinstance(voice_p, str) else ""
+        if not voice_p:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "voice must be non-empty"}}
+
+        def _emit_voice_log(line: str) -> None:
+            if emit_fn:
+                try:
+                    emit_fn("logLine", {"line": line})
+                except Exception:
+                    pass
+
+        try:
+            from core.tts_local import download_local_voice
+
+            result = download_local_voice(voice_p, on_log=_emit_voice_log)
+            return {"id": rid, "result": result}
+        except ValueError as e:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+        except RuntimeError as e:
+            return {"id": rid, "error": {"code": "DOWNLOAD_FAILED", "message": str(e)}}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
     if method in ("buildAudio", "build_audio", "buildAudiobook"):
         import re as _re_audio
         from urllib.parse import urlparse as _up_audio
@@ -2199,6 +2237,8 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         urls_p = params.get("urls", params.get("chapterUrls", params.get("chapter_urls")))
         voice_p = params.get("voice", params.get("voiceName"))
         rate_p = params.get("rate")
+        engine_p = params.get("engine")
+        local_voice_p = params.get("localVoice", params.get("local_voice"))
         bitrate_p = params.get("audioBitrate", params.get("audio_bitrate", params.get("bitrate")))
         parallel_p = params.get("parallel")
         retries_p = params.get("retries")
@@ -2271,6 +2311,34 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid rate {rate_p}"}}
         _rate_num = max(-100, min(100, _rate_num))
         rate_p = f"{_rate_num:+d}%"
+        if engine_p is None:
+            try:
+                engine_p = store_audio.get("engine", "auto") if isinstance(store_audio, dict) else "auto"
+            except Exception:
+                engine_p = "auto"
+        engine_p = engine_p.strip().lower() if isinstance(engine_p, str) else "auto"
+        if engine_p not in ("auto", "edge", "local"):
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid engine {engine_p}"}}
+        if local_voice_p is None:
+            try:
+                local_voice_p = store_audio.get("localVoice") if isinstance(store_audio, dict) else None
+            except Exception:
+                local_voice_p = None
+        local_voice_p = local_voice_p.strip() if isinstance(local_voice_p, str) else None
+        if local_voice_p == "":
+            local_voice_p = None
+        if local_voice_p is not None:
+            from core.tts_local import LOCAL_VOICES as _LOCAL_VOICES
+
+            if local_voice_p not in _LOCAL_VOICES:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"unknown local voice {local_voice_p}"}}
+        if engine_p == "local":
+            # fail fast: download is a deliberate Settings action, not a build side effect
+            from core.tts_local import DEFAULT_LOCAL_VOICE as _DEFAULT_LOCAL_VOICE, local_voice_ready as _local_voice_ready
+
+            _check_voice = local_voice_p or _DEFAULT_LOCAL_VOICE
+            if not _local_voice_ready(_check_voice):
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"local voice not downloaded: {_check_voice} (download it in Settings first)"}}
         if chunk_p is None:
             try:
                 chunk_p = (store_audio.get("chunk-size", 3500) if isinstance(store_audio, dict) else 3500)
@@ -2380,6 +2448,8 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 chapter_urls=desired_urls_norm,
                 voice=voice_p,
                 rate=rate_p,
+                engine=engine_p,
+                local_voice=local_voice_p,
                 parallel=parallel_p,
                 retries=retries_p,
                 chunk_size=chunk_p,
@@ -2465,6 +2535,10 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     return "updateSkipped"
                 if low in ("locale", "language", "lang"):
                     return "locale"
+                if low in ("engine", "tts_engine", "tts-engine"):
+                    return "engine"
+                if low in ("localvoice", "local_voice", "local-voice"):
+                    return "localVoice"
                 # direct canonicals keep case
                 if k in ("chunk-size", "chunk_size", "chunkSize"):
                     return "chunk-size"
@@ -2512,6 +2586,31 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                         return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid rate number {vv}"}}
                     num = max(-100, min(100, num))
                     sanitized[ck] = f"+{num}%" if num >= 0 else f"{num}%"
+                elif ck == "engine":
+                    if not isinstance(v, str):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "engine must be string"}}
+                    vv = v.strip().lower()
+                    if vv not in ("auto", "edge", "local"):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid engine {vv}"}}
+                    sanitized[ck] = vv
+                elif ck == "localVoice":
+                    if v is None:
+                        sanitized[ck] = ""
+                    elif isinstance(v, str):
+                        vv = v.strip()
+                        if not vv:
+                            sanitized[ck] = ""
+                        else:
+                            try:
+                                from core.tts_local import LOCAL_VOICES as _LOCAL_VOICES
+
+                                if vv not in _LOCAL_VOICES:
+                                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"unknown local voice {vv}"}}
+                            except ImportError:
+                                pass
+                            sanitized[ck] = vv
+                    else:
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "localVoice must be string"}}
                 elif ck == "parallel":
                     if isinstance(v, bool):
                         return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "parallel must be integer"}}

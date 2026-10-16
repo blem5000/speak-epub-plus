@@ -30,7 +30,7 @@ def _seed(tmp_path, url=CH1, title="Chapter 1", body="Short text one."):
 
 
 async def _fake_run(jobs, voice, parallel, retries, on_part_status=None, on_log=None, on_progress=None,
-                    rate=None, adaptive=False, parallel_max=None):
+                    rate=None, adaptive=False, parallel_max=None, engine="edge", local_voice=None):
     for j in jobs:
         Path(j.output_path).parent.mkdir(parents=True, exist_ok=True)
         Path(j.output_path).write_bytes(b"FAKEMP3" * 100)
@@ -149,7 +149,7 @@ class TestBuildAudio:
         seen_texts = []
 
         async def _capture(jobs, voice, parallel, retries, on_part_status=None, on_log=None, on_progress=None,
-                           rate=None, adaptive=False, parallel_max=None):
+                           rate=None, adaptive=False, parallel_max=None, engine="edge", local_voice=None):
             for j in jobs:
                 seen_texts.append(j.text)
             await _fake_run(jobs, voice, parallel, retries, on_part_status, on_log, on_progress)
@@ -236,7 +236,8 @@ class TestBuildAudioRpc:
         captured = {}
 
         async def _capture(jobs, voice, parallel, retries, on_part_status=None, on_log=None,
-                           on_progress=None, rate=None, adaptive=False, parallel_max=None):
+                           on_progress=None, rate=None, adaptive=False, parallel_max=None,
+                           engine="edge", local_voice=None):
             captured["rate"] = rate
             captured["adaptive"] = adaptive
             await _fake_run(jobs, voice, parallel, retries, on_part_status, on_log, on_progress)
@@ -284,6 +285,80 @@ class TestBuildAudioRpc:
             "urls": [CH1], "format": "mp3", "rate": "25"}})
         assert "error" not in res, res
         assert seen["rate"] == "+25%"  # normalized with an explicit sign
+
+    def test_engine_forwarded_and_store_fallback(self, tmp_path, monkeypatch):
+        _seed(tmp_path)
+        captured = {}
+
+        async def _capture(jobs, voice, parallel, retries, on_part_status=None, on_log=None,
+                           on_progress=None, rate=None, adaptive=False, parallel_max=None,
+                           engine="edge", local_voice=None):
+            captured["engine"] = engine
+            captured["localVoice"] = local_voice
+            await _fake_run(jobs, voice, parallel, retries, on_part_status, on_log, on_progress)
+
+        kwargs = dict(
+            from_idx=1, to_idx=1, title="T", cache_dir=tmp_path,
+            chapter_urls=[CH1], audio_format="mp3",
+        )
+        with patch("core.audio.run_part_jobs", side_effect=_capture):
+            build_audio("https://www.novelphoenix.com/novel/123",
+                        output_dir=tmp_path / "out_e1", engine="edge", local_voice=None, **kwargs)
+        assert captured == {"engine": "edge", "localVoice": None}
+
+        monkeypatch.setattr("core.config.load_store",
+                            lambda: {"engine": "local", "localVoice": "pl_PL-darkman-medium"})
+        with patch("core.audio.run_part_jobs", side_effect=_capture):
+            build_audio("https://www.novelphoenix.com/novel/123",
+                        output_dir=tmp_path / "out_e2", engine=None, local_voice=None, **kwargs)
+        assert captured == {"engine": "local", "localVoice": "pl_PL-darkman-medium"}
+
+        # garbage engine normalizes to auto (never crashes the build)
+        with patch("core.audio.run_part_jobs", side_effect=_capture):
+            build_audio("https://www.novelphoenix.com/novel/123",
+                        output_dir=tmp_path / "out_e3", engine="bogus", local_voice=None, **kwargs)
+        assert captured["engine"] == "auto"
+
+    def test_rpc_engine_validation(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("SPEAK_EPUB_MODELS_DIR", str(tmp_path / "models"))
+        base = {"novelUrl": "https://www.novelphoenix.com/novel/123", "urls": [CH1], "format": "mp3"}
+
+        res = handle_rpc({"id": "1", "method": "buildAudio", "params": {**base, "engine": "bogus"}})
+        assert res["error"]["code"] == "VALUE_ERROR"
+        assert "engine" in res["error"]["message"]
+
+        res = handle_rpc({"id": "1", "method": "buildAudio",
+                          "params": {**base, "engine": "local", "localVoice": "xx_XX-evil-voice"}})
+        assert res["error"]["code"] == "VALUE_ERROR"
+        assert "unknown local voice" in res["error"]["message"]
+
+        res = handle_rpc({"id": "1", "method": "buildAudio",
+                          "params": {**base, "engine": "local", "localVoice": "pl_PL-darkman-medium"}})
+        assert res["error"]["code"] == "VALUE_ERROR"
+        assert "not downloaded" in res["error"]["message"]
+
+    def test_rpc_local_voices_and_download(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SPEAK_EPUB_MODELS_DIR", str(tmp_path / "models"))
+        res = handle_rpc({"id": "1", "method": "localVoices"})
+        assert "error" not in res
+        ids = [v["id"] for v in res["result"]["voices"]]
+        assert "pl_PL-darkman-medium" in ids
+        assert res["result"]["default"]
+
+        res = handle_rpc({"id": "1", "method": "downloadLocalVoice", "params": {"voice": "nope"}})
+        assert res["error"]["code"] == "VALUE_ERROR"
+
+        def _fake_download(voice, on_log=None):
+            if on_log:
+                on_log(f"downloading {voice}...")
+            return {"id": voice, "path": str(tmp_path / "models" / f"{voice}.onnx")}
+
+        monkeypatch.setattr("core.tts_local.download_local_voice", _fake_download)
+        res = handle_rpc({"id": "1", "method": "downloadLocalVoice",
+                          "params": {"voice": "pl_PL-darkman-medium"}})
+        assert "error" not in res
+        assert res["result"]["id"] == "pl_PL-darkman-medium"
 
     def test_output_falls_back_when_cwd_unwritable(self, tmp_path, monkeypatch, capsys):
         """System32-CWD regression: default output lands in user docs, no WinError 5."""

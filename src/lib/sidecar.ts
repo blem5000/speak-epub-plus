@@ -590,6 +590,8 @@ export async function revealPath(path: string): Promise<void> {
  * - `safeMode` / `safe_mode` bool
  * - `keepEPUB` / `keepMP3` / `keepM4B` bool
  * - `outputDir` / `output_dir` string ≤260 ("" = backend default; no `..`/NUL)
+ * - `engine` "auto" | "edge" | "local" (auto = local Piper on fast CPUs once downloaded)
+ * - `localVoice` curated Piper voice id ("" = default voice)
  * Persist via atomic `.tmp` replace — no polling, no direct frontend file write.
  */
 export async function getStore(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
@@ -601,6 +603,19 @@ export async function setStore(
   opts?: { signal?: AbortSignal }
 ): Promise<RpcResponse> {
   return callSidecar("setStore", patch, opts);
+}
+
+/** Local (Piper) TTS status: curated voices, download state, models dir. */
+export async function localVoices(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
+  return callSidecar("localVoices", {}, opts);
+}
+
+/** Download a curated Piper voice (~63–115 MB) into the models directory. */
+export async function downloadLocalVoice(
+  voice: string,
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  return callSidecar("downloadLocalVoice", { voice }, opts);
 }
 
 // Type guards for fetchChapter(s) responses — strict shape

@@ -10,6 +10,8 @@ import path from "node:path";
 
 const mockGetStore = vi.fn();
 const mockSetStore = vi.fn();
+const mockLocalVoices = vi.fn();
+const mockDownloadLocalVoice = vi.fn();
 
 vi.mock("@/lib/sidecar", async (importOriginal) => {
   const actual = await importOriginal() as Record<string, unknown>;
@@ -17,8 +19,25 @@ vi.mock("@/lib/sidecar", async (importOriginal) => {
     ...actual,
     getStore: (...args: unknown[]) => mockGetStore(...args),
     setStore: (...args: unknown[]) => mockSetStore(...args),
+    localVoices: (...args: unknown[]) => mockLocalVoices(...args),
+    downloadLocalVoice: (...args: unknown[]) => mockDownloadLocalVoice(...args),
   };
 });
+
+function defaultLocalVoices() {
+  return {
+    id: "1",
+    result: {
+      modelsDir: "C:/docs/models/piper",
+      default: "en_US-lessac-medium",
+      piperAvailable: true,
+      voices: [
+        { id: "pl_PL-darkman-medium", lang: "pl", quality: "medium", sizeMb: 63, downloaded: false },
+        { id: "en_US-lessac-medium", lang: "en", quality: "medium", sizeMb: 63, downloaded: true },
+      ],
+    },
+  };
+}
 
 function defaultStore() {
   return {
@@ -40,6 +59,8 @@ describe("Settings 4.2 — form + persist + i18n", () => {
     vi.clearAllMocks();
     mockGetStore.mockResolvedValue({ id: "1", result: defaultStore() });
     mockSetStore.mockResolvedValue({ id: "1", result: defaultStore() });
+    mockLocalVoices.mockResolvedValue(defaultLocalVoices());
+    mockDownloadLocalVoice.mockResolvedValue({ id: "1", result: { id: "pl_PL-darkman-medium", path: "x" } });
   });
 
   it("renders groups + data-testid + helper muted", async () => {
@@ -55,6 +76,12 @@ describe("Settings 4.2 — form + persist + i18n", () => {
     expect(screen.getByTestId("settings-audio-voice")).toBeInTheDocument();
     expect(screen.getByTestId("settings-audio-rate")).toBeInTheDocument();
     expect(screen.getByTestId("settings-audio-rate-slider")).toBeInTheDocument();
+    // TTS engine
+    expect(screen.getByTestId("settings-engine-auto")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-engine-edge")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-engine-local")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-local-voice")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-local-download")).toBeInTheDocument();
     // performance
     expect(screen.getByTestId("settings-perf-parallel")).toBeInTheDocument();
     expect(screen.getByTestId("settings-perf-chunk")).toBeInTheDocument();
@@ -100,6 +127,38 @@ describe("Settings 4.2 — form + persist + i18n", () => {
     expect(sel.value).toBe("32k");
     await user.selectOptions(sel, "48k");
     await waitFor(() => expect(mockSetStore).toHaveBeenCalledWith({ audioBitrate: "48k" }));
+  });
+
+  it("engine segmented: auto active by default, clicking local persists", async () => {
+    const user = userEvent.setup();
+    render(<Settings open={true} onClose={vi.fn()} />);
+    await waitFor(() => expect(mockGetStore).toHaveBeenCalled());
+    expect(screen.getByTestId("settings-engine-auto")).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByTestId("settings-engine-local"));
+    await waitFor(() => expect(mockSetStore).toHaveBeenCalledWith({ engine: "local" }));
+    expect(screen.getByTestId("settings-engine-local")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("settings-engine-auto")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("local voice select persists and download uses the selection", async () => {
+    const user = userEvent.setup();
+    render(<Settings open={true} onClose={vi.fn()} />);
+    await waitFor(() => expect(mockLocalVoices).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByText(/pl_PL-darkman-medium/)).toBeInTheDocument());
+    const sel = screen.getByTestId("settings-local-voice") as HTMLSelectElement;
+    await user.selectOptions(sel, "pl_PL-darkman-medium");
+    await waitFor(() => expect(mockSetStore).toHaveBeenCalledWith({ localVoice: "pl_PL-darkman-medium" }));
+    await user.click(screen.getByTestId("settings-local-download"));
+    await waitFor(() => expect(mockDownloadLocalVoice).toHaveBeenCalledWith("pl_PL-darkman-medium"));
+  });
+
+  it("download defaults to en_US-lessac-medium and refreshes voice status", async () => {
+    render(<Settings open={true} onClose={vi.fn()} />);
+    await waitFor(() => expect(mockLocalVoices).toHaveBeenCalled());
+    fireEvent.click(screen.getByTestId("settings-local-download"));
+    await waitFor(() => expect(mockDownloadLocalVoice).toHaveBeenCalledWith("en_US-lessac-medium"));
+    await waitFor(() => expect(mockLocalVoices.mock.calls.length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(screen.getByTestId("settings-local-status").textContent).toMatch(/Pobrano|Downloaded/));
   });
 
   it("onBlur parallel 3→2 calls setStore and toast Zapisano", async () => {    const user = userEvent.setup();

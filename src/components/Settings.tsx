@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { t } from "@/i18n";
-import { getStore, setStore } from "@/lib/sidecar";
+import { getStore, setStore, localVoices, downloadLocalVoice } from "@/lib/sidecar";
 import { getCurrentVersion, manualCheck } from "@/lib/updater";
 
 type SettingsProps = {
@@ -51,6 +51,14 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
   const [updateAuto, setUpdateAuto] = useState<boolean>(true);
   // "" = idle, "checking" = in flight, anything else = final message to show
   const [checkStatus, setCheckStatus] = useState<string>("");
+  // local (Piper) TTS
+  const [engine, setEngine] = useState<string>("auto");
+  const [localVoice, setLocalVoice] = useState<string>("");
+  const [localVoiceList, setLocalVoiceList] = useState<
+    Array<{ id: string; lang: string; quality: string; sizeMb: number; downloaded: boolean }>
+  >([]);
+  const [localBusy, setLocalBusy] = useState<boolean>(false);
+  const [localMsg, setLocalMsg] = useState<string>("");
 
   // prev for revert
   const prevRef = useRef<Record<string, unknown>>({});
@@ -59,6 +67,25 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
     setToast(msg);
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
     toastTimerRef.current = window.setTimeout(() => setToast(null), 1500) as unknown as number;
+  };
+
+  const refreshLocalVoices = async (): Promise<void> => {
+    try {
+      const res = await localVoices();
+      const r = (res.result as Record<string, unknown>) ?? {};
+      const arr = Array.isArray(r.voices) ? (r.voices as Array<Record<string, unknown>>) : [];
+      setLocalVoiceList(
+        arr.map((v) => ({
+          id: String(v.id ?? ""),
+          lang: String(v.lang ?? ""),
+          quality: String(v.quality ?? ""),
+          sizeMb: Number(v.sizeMb ?? 0),
+          downloaded: Boolean(v.downloaded),
+        }))
+      );
+    } catch {
+      // status is best-effort — the engine still works with defaults
+    }
   };
 
   // load on open (inline variant loads on mount)
@@ -156,6 +183,15 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
         const bitrateVal = BITRATE_OPTIONS.includes(bv) ? bv : "32k";
         setAudioBitrate(bitrateVal);
         prevRef.current["audioBitrate"] = bitrateVal;
+        // TTS engine + local voice
+        const engRaw = typeof data.engine === "string" ? (data.engine as string).trim().toLowerCase() : "auto";
+        const engVal = ["auto", "edge", "local"].includes(engRaw) ? engRaw : "auto";
+        setEngine(engVal);
+        prevRef.current["engine"] = engVal;
+        const lvVal = typeof data.localVoice === "string" ? (data.localVoice as string).trim() : "";
+        setLocalVoice(lvVal);
+        prevRef.current["localVoice"] = lvVal;
+        void refreshLocalVoices();
         setLoading(false);
       } catch {
         if (alive) setLoading(false);
@@ -256,6 +292,8 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
           else if (revertKey === "keepM4B") setKeepM4B(Boolean(revertVal));
           else if (revertKey === "updateAuto") setUpdateAuto(Boolean(revertVal));
           else if (revertKey === "audioBitrate") setAudioBitrate(String(revertVal));
+          else if (revertKey === "engine") setEngine(String(revertVal));
+          else if (revertKey === "localVoice") setLocalVoice(String(revertVal));
         }
         return;
       }
@@ -289,6 +327,8 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
         else if (revertKey === "keepM4B") setKeepM4B(Boolean(revertVal));
         else if (revertKey === "updateAuto") setUpdateAuto(Boolean(revertVal));
         else if (revertKey === "audioBitrate") setAudioBitrate(String(revertVal));
+        else if (revertKey === "engine") setEngine(String(revertVal));
+        else if (revertKey === "localVoice") setLocalVoice(String(revertVal));
       }
     }
   };
@@ -348,6 +388,41 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
     const prev = prevRef.current["audioBitrate"];
     setAudioBitrate(val);
     void persist({ audioBitrate: val }, "audioBitrate", prev);
+  };
+
+  const handleEngineChange = (val: string): void => {
+    if (!["auto", "edge", "local"].includes(val) || val === engine) return;
+    const prev = prevRef.current["engine"];
+    setEngine(val);
+    void persist({ engine: val }, "engine", prev);
+  };
+
+  const handleLocalVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>): void => {
+    const val = e.target.value;
+    const prev = prevRef.current["localVoice"];
+    setLocalVoice(val);
+    setLocalMsg("");
+    void persist({ localVoice: val }, "localVoice", prev);
+  };
+
+  const handleDownloadLocalVoice = async (): Promise<void> => {
+    const target = localVoice || "en_US-lessac-medium";
+    setLocalBusy(true);
+    setLocalMsg(t("settings.localVoice.downloading") as string);
+    try {
+      const res = await downloadLocalVoice(target);
+      if (res.error) {
+        setLocalMsg(String((res.error as { message?: string }).message ?? res.error));
+      } else {
+        setLocalMsg(t("settings.localVoice.downloaded") as string);
+        showToast(t("settings.localVoice.downloaded") as string);
+      }
+    } catch (e) {
+      setLocalMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLocalBusy(false);
+      void refreshLocalVoices();
+    }
   };
 
   const handleRateSlider = (e: React.ChangeEvent<HTMLInputElement>): void => {
@@ -620,6 +695,70 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                     </select>
                     <span className="text-body-sm text-muted-foreground">{t("settings.helper.bitrate")}</span>
                   </label>
+                </div>
+              </section>
+
+              {/* TTS engine (local Piper) */}
+              <section className="rounded-lg border bg-card p-6 shadow-sm" aria-label={t("settings.engine.title") as string}>
+                <h3 className="text-heading font-semibold">{t("settings.engine.title")}</h3>
+                <div className="mt-4 space-y-4">
+                  <div className="flex flex-col gap-2">
+                    <span className="text-body-sm font-medium">{t("settings.engine.label")}</span>
+                    <div className="flex flex-wrap gap-2" role="group" aria-label={t("settings.engine.label") as string}>
+                      {(["auto", "edge", "local"] as const).map((opt) => (
+                        <button
+                          key={opt}
+                          type="button"
+                          data-testid={`settings-engine-${opt}`}
+                          onClick={() => handleEngineChange(opt)}
+                          aria-pressed={engine === opt}
+                          className={`h-9 rounded-md border px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                            engine === opt
+                              ? "border-accent bg-accent/10 font-medium text-accent"
+                              : "border-input bg-card text-muted-foreground hover:text-foreground"
+                          }`}
+                        >
+                          {t(`settings.engine.${opt}`)}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="text-body-sm text-muted-foreground">{t("settings.engine.helper")}</span>
+                  </div>
+
+                  <label className="flex flex-col gap-1">
+                    <span className="text-body-sm font-medium">{t("settings.localVoice.label")}</span>
+                    <select
+                      data-testid="settings-local-voice"
+                      value={localVoice}
+                      onChange={handleLocalVoiceChange}
+                      className="h-9 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <option value="">{t("settings.localVoice.default")}</option>
+                      {localVoiceList.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {`${v.id} — ${v.lang.toUpperCase()} · ${v.quality} · ${v.sizeMb} MB${v.downloaded ? " ✓" : ""}`}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-body-sm text-muted-foreground">{t("settings.localVoice.helper")}</span>
+                  </label>
+
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      data-testid="settings-local-download"
+                      disabled={localBusy}
+                      onClick={() => void handleDownloadLocalVoice()}
+                      className="h-9 rounded-md border border-input bg-card px-3 text-body hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {localBusy ? t("settings.localVoice.downloading") : t("settings.localVoice.download")}
+                    </button>
+                    <span data-testid="settings-local-status" className="text-body-sm text-muted-foreground">
+                      {localMsg || (localVoiceList.find((v) => v.id === (localVoice || "en_US-lessac-medium"))?.downloaded
+                        ? t("settings.localVoice.ready")
+                        : t("settings.localVoice.notDownloaded"))}
+                    </span>
+                  </div>
                 </div>
               </section>
 

@@ -334,3 +334,38 @@ def test_setStore_outputDir(tmp_path, monkeypatch):
     assert r9["result"]["outputDir"] == "D:\\Books"
     r10 = handle_rpc({"id": "10", "method": "getStore", "params": {}})
     assert r10["result"]["outputDir"] == "D:\\Books"
+
+
+def test_setStore_engine_and_local_voice(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    r = handle_rpc({"id": "1", "method": "getStore", "params": {}})
+    assert r["result"]["engine"] == "auto"
+    assert r["result"]["localVoice"] == ""
+
+    r2 = handle_rpc({"id": "2", "method": "setStore", "params": {"engine": " LOCAL "}})
+    assert r2["result"]["engine"] == "local"
+    r3 = handle_rpc({"id": "3", "method": "setStore", "params": {"tts_engine": "edge"}})
+    assert r3["result"]["engine"] == "edge"
+    r4 = handle_rpc({"id": "4", "method": "setStore", "params": {"engine": "auto"}})
+    assert r4["result"]["engine"] == "auto"
+    r5 = handle_rpc({"id": "5", "method": "setStore", "params": {"engine": "cloud"}})
+    assert r5["error"]["code"] == "VALUE_ERROR"
+    r5b = handle_rpc({"id": "5b", "method": "setStore", "params": {"engine": 3}})
+    assert r5b["error"]["code"] == "VALUE_ERROR"
+
+    r6 = handle_rpc({"id": "6", "method": "setStore", "params": {"localVoice": " pl_PL-darkman-medium "}})
+    assert r6["result"]["localVoice"] == "pl_PL-darkman-medium"
+    r7 = handle_rpc({"id": "7", "method": "setStore", "params": {"local_voice": "xx_XX-evil-voice"}})
+    assert r7["error"]["code"] == "VALUE_ERROR"
+    r8 = handle_rpc({"id": "8", "method": "setStore", "params": {"localVoice": ""}})
+    assert r8["result"]["localVoice"] == ""
+    r9 = handle_rpc({"id": "9", "method": "setStore", "params": {"localVoice": 42}})
+    assert r9["error"]["code"] == "VALUE_ERROR"
+
+    # persistence roundtrip
+    r10 = handle_rpc({"id": "10", "method": "setStore",
+                      "params": {"engine": "local", "localVoice": "en_US-lessac-medium"}})
+    assert r10["result"]["engine"] == "local"
+    r11 = handle_rpc({"id": "11", "method": "getStore", "params": {}})
+    assert r11["result"]["engine"] == "local"
+    assert r11["result"]["localVoice"] == "en_US-lessac-medium"
