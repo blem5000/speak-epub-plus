@@ -57,6 +57,9 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
   const [localVoiceList, setLocalVoiceList] = useState<
     Array<{ id: string; lang: string; quality: string; sizeMb: number; downloaded: boolean }>
   >([]);
+  // backend-reported availability + default (release builds always bundle piper)
+  const [piperAvailable, setPiperAvailable] = useState<boolean>(true);
+  const [defaultLocalVoice, setDefaultLocalVoice] = useState<string>("en_US-lessac-medium");
   const [localBusy, setLocalBusy] = useState<boolean>(false);
   const [localMsg, setLocalMsg] = useState<string>("");
 
@@ -83,8 +86,11 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
           downloaded: Boolean(v.downloaded),
         }))
       );
+      setPiperAvailable(r.piperAvailable !== false);
+      if (typeof r.default === "string" && r.default.trim()) setDefaultLocalVoice(r.default.trim());
     } catch {
-      // status is best-effort — the engine still works with defaults
+      // surface backend failure as a failed load, not as a missing model
+      setLocalMsg(t("settings.localVoice.loadError") as string);
     }
   };
 
@@ -392,6 +398,7 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
 
   const handleEngineChange = (val: string): void => {
     if (!["auto", "edge", "local"].includes(val) || val === engine) return;
+    if (val === "local" && !piperAvailable) return; // button is disabled, belt and braces
     const prev = prevRef.current["engine"];
     setEngine(val);
     void persist({ engine: val }, "engine", prev);
@@ -406,13 +413,21 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
   };
 
   const handleDownloadLocalVoice = async (): Promise<void> => {
-    const target = localVoice || "en_US-lessac-medium";
+    const target = localVoice || defaultLocalVoice;
     setLocalBusy(true);
     setLocalMsg(t("settings.localVoice.downloading") as string);
     try {
       const res = await downloadLocalVoice(target);
       if (res.error) {
-        setLocalMsg(String((res.error as { message?: string }).message ?? res.error));
+        const err = res.error as { code?: string; message?: string };
+        const code = typeof err.code === "string" ? err.code : "";
+        const prefix =
+          code === "DOWNLOAD_FAILED"
+            ? (t("settings.localVoice.downloadFailed") as string)
+            : code === "VALUE_ERROR"
+              ? (t("settings.localVoice.invalidVoice") as string)
+              : null;
+        setLocalMsg(prefix ? `${prefix}: ${String(err.message ?? res.error)}` : String(err.message ?? res.error));
       } else {
         setLocalMsg(t("settings.localVoice.downloaded") as string);
         showToast(t("settings.localVoice.downloaded") as string);
@@ -712,7 +727,8 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                           data-testid={`settings-engine-${opt}`}
                           onClick={() => handleEngineChange(opt)}
                           aria-pressed={engine === opt}
-                          className={`h-9 rounded-md border px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                          disabled={opt === "local" && !piperAvailable}
+                          className={`h-9 rounded-md border px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60 ${
                             engine === opt
                               ? "border-accent bg-accent/10 font-medium text-accent"
                               : "border-input bg-card text-muted-foreground hover:text-foreground"
@@ -723,6 +739,11 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                       ))}
                     </div>
                     <span className="text-body-sm text-muted-foreground">{t("settings.engine.helper")}</span>
+                    {!piperAvailable && (
+                      <span data-testid="settings-engine-nopiper" className="text-body-sm text-muted-foreground">
+                        {t("settings.engine.noPiper")}
+                      </span>
+                    )}
                   </div>
 
                   <label className="flex flex-col gap-1">
@@ -747,14 +768,14 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                     <button
                       type="button"
                       data-testid="settings-local-download"
-                      disabled={localBusy}
+                      disabled={localBusy || !piperAvailable}
                       onClick={() => void handleDownloadLocalVoice()}
                       className="h-9 rounded-md border border-input bg-card px-3 text-body hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       {localBusy ? t("settings.localVoice.downloading") : t("settings.localVoice.download")}
                     </button>
                     <span data-testid="settings-local-status" className="text-body-sm text-muted-foreground">
-                      {localMsg || (localVoiceList.find((v) => v.id === (localVoice || "en_US-lessac-medium"))?.downloaded
+                      {localMsg || (localVoiceList.find((v) => v.id === (localVoice || defaultLocalVoice))?.downloaded
                         ? t("settings.localVoice.ready")
                         : t("settings.localVoice.notDownloaded"))}
                     </span>

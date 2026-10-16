@@ -160,3 +160,8 @@
 - [Review][Defer] Header comment drift — core/tts.py:14 "Pure: no subprocess" a dodano shutil/subprocess [`Speak-EPUB-1.0.0/core/tts.py:14`] — deferred, pre-existing — evidence: acceptance-auditor info; fix: zaktualizować komentarz nagłówka
 - [Review][Defer] Empty audio_entries → build_m4b woła ffmpeg z pustym concat — [`Speak-EPUB-1.0.0/core/tts.py:444`] — deferred, pre-existing — evidence: spec-3-3:73 defer low "empty plans → build_m4b creates empty concat and ffmpeg errors"
 - [Review][Defer] Brak timeout na edge_tts Communicate.save — [`Speak-EPUB-1.0.0/core/tts.py:192`] — deferred, pre-existing — evidence: spec-3-3 deferred medium "No timeout on edge_tts save still present after merge"
+
+## Deferred from: code review (2026-10-16)
+
+- [Review][Defer] runTtsJobs (legacy RPC) nie przekazuje rate/engine/local_voice/adaptive do run_part_jobs [core/config.py:1026-1045] — deferred, pre-existing — brak konsumenta w src/ i testach; podłączyć, gdy GUI zacznie używać tego wejścia.
+

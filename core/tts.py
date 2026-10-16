@@ -332,7 +332,7 @@ def _part_file_valid_quick(path: str) -> bool:
         return False
 
 
-def _ensure_valid_or_drop(path: str, text: Optional[str], label: str) -> bool:
+def _ensure_valid_or_drop(path: str, text: Optional[str], label: str, rate: Optional[str] = None) -> bool:
     """Plan-guard helper: an existing file counts as done only if it verifies.
 
     A stale truncated/merged-with-gaps file is deleted so its parts get
@@ -341,7 +341,7 @@ def _ensure_valid_or_drop(path: str, text: Optional[str], label: str) -> bool:
     """
     if not _part_file_valid_quick(path):
         return False
-    ok, reason = verify_part_audio(path, text)
+    ok, reason = verify_part_audio(path, text, rate=rate)
     if ok:
         return True
     try:
@@ -352,7 +352,7 @@ def _ensure_valid_or_drop(path: str, text: Optional[str], label: str) -> bool:
     return False
 
 
-def verify_part_audio(path: str, text: Optional[str] = None) -> Tuple[bool, str]:
+def verify_part_audio(path: str, text: Optional[str] = None, rate: Optional[str] = None) -> Tuple[bool, str]:
     """Check a generated part MP3 is complete, not truncated.
 
     Returns (ok, reason) with reason in:
@@ -360,6 +360,12 @@ def verify_part_audio(path: str, text: Optional[str] = None) -> Tuple[bool, str]
 
     The duration check needs text + ffprobe; without either only the size
     gate applies (still catches empty/partial writes).
+
+    `rate` (Edge-style '+25%') scales the minimum-duration floor down for
+    faster speech: at +100% the audio is ~half as long, so an unscaled
+    MIN_DURATION_RATIO would flag a complete fast part as truncated.
+    Slower rates (negative) never shorten audio, so the nominal floor
+    stays — it can only pass, never false-positive.
     """
     try:
         if not os.path.isfile(path):
@@ -379,7 +385,15 @@ def verify_part_audio(path: str, text: Optional[str] = None) -> Tuple[bool, str]
         return True, "ok_no_duration_check"
     if duration_ms <= 0:
         return False, "no_duration"
-    min_expected_ms = len(text) * 1000.0 / EXPECTED_TTS_CPS * MIN_DURATION_RATIO
+    speed = 1.0
+    if rate is not None:
+        try:
+            _num = int(normalize_tts_rate(rate).rstrip("%"))
+            if _num > 0:
+                speed = 1.0 + min(_num, 100) / 100.0
+        except Exception:
+            speed = 1.0
+    min_expected_ms = len(text) * 1000.0 / EXPECTED_TTS_CPS * MIN_DURATION_RATIO / speed
     if duration_ms < min_expected_ms:
         return False, "truncated"
     return True, "ok"
@@ -442,7 +456,7 @@ def split_text_for_tts(text: str, max_chars: int = 3500) -> List[str]:
 
 
 def build_generation_plan(
-    chapters: List[Chapter], output_dir: str, chunk_size: int
+    chapters: List[Chapter], output_dir: str, chunk_size: int, rate: Optional[str] = None
 ) -> Tuple[List[ChapterPlan], List[PartJob]]:
     """
     Build global PartJob queue in reading order.
@@ -456,6 +470,8 @@ def build_generation_plan(
       (_ensure_valid_or_drop: size gate + duration vs text when ffprobe is
       available), so truncated/partial files are regenerated instead of
       skipped forever; single-chunk guard applies to chapter_mp3 directly
+    - `rate` scales the guard's duration floor for faster speech, so resume
+      at high rates does not mistake complete fast files for truncation
     - ChapterPlan mirror speak.py:75
     - empty chunks -> plan with [],[] and no jobs
     I/O only (os + ffprobe resume validation), no edge_tts.
@@ -481,7 +497,7 @@ def build_generation_plan(
             plans.append(
                 ChapterPlan(chapter_number, title, chapter_mp3, [chapter_mp3], [(chapter_number, title, chapter_mp3)])
             )
-            if not _ensure_valid_or_drop(chapter_mp3, chunks[0], f"Chapter {chapter_number:03d}"):
+            if not _ensure_valid_or_drop(chapter_mp3, chunks[0], f"Chapter {chapter_number:03d}", rate=rate):
                 jobs.append(
                     PartJob(
                         chapter_number=chapter_number,
@@ -501,14 +517,14 @@ def build_generation_plan(
 
         # A merged chapter file with gaps (built from truncated parts by an
         # older run) must not shadow its parts: verify against the full text.
-        merged_ok = _ensure_valid_or_drop(chapter_mp3, text, f"Chapter {chapter_number:03d}")
+        merged_ok = _ensure_valid_or_drop(chapter_mp3, text, f"Chapter {chapter_number:03d}", rate=rate)
         for part_number, chunk in enumerate(chunks, 1):
             part_path = os.path.join(part_dir, f"{chapter_number:03d}_{safe_title}_part{part_number:03d}.mp3")
             part_paths.append(part_path)
             marker_entries.append((chapter_number, f"{title} - part {part_number}", part_path))
 
             if not merged_ok and not _ensure_valid_or_drop(
-                part_path, chunk, f"Chapter {chapter_number:03d} part {part_number:03d}"
+                part_path, chunk, f"Chapter {chapter_number:03d} part {part_number:03d}", rate=rate
             ):
                 jobs.append(
                     PartJob(
@@ -563,7 +579,7 @@ async def tts_text_to_mp3(
                 kwargs["rate"] = rate
             communicate = edge_tts.Communicate(text, voice, **kwargs)
             await communicate.save(output_path)
-            ok, reason = verify_part_audio(output_path, text)
+            ok, reason = verify_part_audio(output_path, text, rate=rate)
             if ok:
                 return
             # saved file failed verification — remove so resume never reuses it
@@ -895,7 +911,7 @@ async def run_part_jobs(
                 # and regenerated — previously they were skipped forever,
                 # leaving silent gaps in the finished audiobook.
                 needs_gen = True
-                ok, reason = verify_part_audio(job.output_path, job.text)
+                ok, reason = verify_part_audio(job.output_path, job.text, rate=rate)
                 if ok:
                     try:
                         size_kb = os.path.getsize(job.output_path) // 1024

@@ -1675,8 +1675,8 @@ def test_convert_wiring(tmp_path, monkeypatch):
         called["extract"] = (epub_path, start_chapter, end_chapter)
         return chapters
 
-    def fake_build_plan(chapters_arg, output_dir_arg, chunk_size_arg):
-        called["build_plan"] = (output_dir_arg, chunk_size_arg)
+    def fake_build_plan(chapters_arg, output_dir_arg, chunk_size_arg, rate=None):
+        called["build_plan"] = (output_dir_arg, chunk_size_arg, rate)
         # return plans with single-chunk chapters to simplify
         plans = [
             ChapterPlan(36, "Ch36", str(Path(output_dir_arg) / "036_Ch36.mp3"), [str(Path(output_dir_arg) / "036_Ch36.mp3")], [(36, "Ch36", str(Path(output_dir_arg) / "036_Ch36.mp3"))]),
@@ -1725,6 +1725,13 @@ def test_convert_wiring(tmp_path, monkeypatch):
     monkeypatch.setattr(speak_mod, "build_m4b", fake_build_m4b_never)
     asyncio.run(speak_mod.convert(str(fake_epub), str(out_dir), voice="en-US-AriaNeural", m4b=False, m4a=False, start_chapter=36, end_chapter=None, chunk_size=3500, keep_parts=False, parallel=3, retries=5))
     assert fake_build_m4b_called is False
+
+    # review cr2: rate/engine/local_voice must reach run_part_jobs — a bare
+    # "25" (accepted by the CLI validator) canonicalizes to "+25%"
+    called.clear()
+    asyncio.run(speak_mod.convert(str(fake_epub), str(out_dir), voice="en-US-AriaNeural", m4b=False, m4a=False, start_chapter=36, end_chapter=None, chunk_size=3500, keep_parts=False, parallel=3, retries=5, rate="25", engine="local", local_voice="pl_PL-darkman-medium"))
+    assert called["run_jobs"][4:] == ("+25%", "local", "pl_PL-darkman-medium")
+    assert called["build_plan"][2] == "+25%"
 
 
 # ---------------------------------------------------------------------------
@@ -1975,6 +1982,22 @@ def test_verify_part_audio_truncated_and_ok(tmp_path):
             assert verify_part_audio(str(p), text) == (False, "truncated")
         with patch("core.tts.get_duration_ms", return_value=250_000):
             assert verify_part_audio(str(p), text) == (True, "ok")
+
+
+def test_verify_part_audio_rate_scales_duration_floor(tmp_path):
+    # review cr2: a complete +100% part is ~half as long; an unscaled floor
+    # would flag it "truncated" and abort the build with a chunk-size hint
+    p = tmp_path / "fastrate.mp3"
+    p.write_bytes(b"x" * 2048)
+    text = "a" * 3000  # nominal floor = 3000/15*0.5 = 100 s; +100% floor = 50 s
+    with patch("core.tts.ffprobe_available", return_value=True):
+        with patch("core.tts.get_duration_ms", return_value=75_000):
+            assert verify_part_audio(str(p), text) == (False, "truncated")
+            assert verify_part_audio(str(p), text, rate="+100%") == (True, "ok")
+            # slower rates never shorten audio: nominal floor still applies
+            assert verify_part_audio(str(p), text, rate="-50%") == (False, "truncated")
+            # garbage rate falls back to the nominal floor
+            assert verify_part_audio(str(p), text, rate="fast") == (False, "truncated")
 
 
 def test_verify_part_audio_no_duration(tmp_path):

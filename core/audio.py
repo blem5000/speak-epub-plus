@@ -461,7 +461,7 @@ def build_audio(
     audio_dir = out_base / f"{slug}_audiobook"
     audio_dir.mkdir(parents=True, exist_ok=True)
 
-    plans, jobs = build_generation_plan(chapters, str(audio_dir), chunk_size)
+    plans, jobs = build_generation_plan(chapters, str(audio_dir), chunk_size, rate=rate)
     logs.append(f"queued {len(jobs)} TTS part job(s) for {len(chapters)} chapter(s)")
 
     def _emit_log(line: str) -> None:

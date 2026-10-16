@@ -2202,6 +2202,8 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         voice_p = voice_p.strip() if isinstance(voice_p, str) else ""
         if not voice_p:
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "voice must be non-empty"}}
+        # force=true re-downloads (escape hatch for present-but-corrupt models)
+        force_p = bool(params.get("force", params.get("forceRedownload", False)))
 
         def _emit_voice_log(line: str) -> None:
             if emit_fn:
@@ -2213,7 +2215,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         try:
             from core.tts_local import download_local_voice
 
-            result = download_local_voice(voice_p, on_log=_emit_voice_log)
+            result = download_local_voice(voice_p, on_log=_emit_voice_log, force=force_p)
             return {"id": rid, "result": result}
         except ValueError as e:
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
@@ -2334,11 +2336,15 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"unknown local voice {local_voice_p}"}}
         if engine_p == "local":
             # fail fast: download is a deliberate Settings action, not a build side effect
-            from core.tts_local import DEFAULT_LOCAL_VOICE as _DEFAULT_LOCAL_VOICE, local_voice_ready as _local_voice_ready
+            from core.tts_local import (
+                DEFAULT_LOCAL_VOICE as _DEFAULT_LOCAL_VOICE,
+                _local_unavailable_message as _local_unavail_msg,
+                local_voice_ready as _local_voice_ready,
+            )
 
             _check_voice = local_voice_p or _DEFAULT_LOCAL_VOICE
             if not _local_voice_ready(_check_voice):
-                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"local voice not downloaded: {_check_voice} (download it in Settings first)"}}
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": _local_unavail_msg(_check_voice)}}
         if chunk_p is None:
             try:
                 chunk_p = (store_audio.get("chunk-size", 3500) if isinstance(store_audio, dict) else 3500)

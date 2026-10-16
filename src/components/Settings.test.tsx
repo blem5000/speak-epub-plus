@@ -161,6 +161,41 @@ describe("Settings 4.2 — form + persist + i18n", () => {
     await waitFor(() => expect(screen.getByTestId("settings-local-status").textContent).toMatch(/Pobrano|Downloaded/));
   });
 
+  it("piperAvailable false disables local engine + download and shows a note", async () => {
+    const base = defaultLocalVoices();
+    mockLocalVoices.mockResolvedValueOnce({
+      ...base,
+      result: { ...base.result, piperAvailable: false },
+    });
+    render(<Settings open={true} onClose={vi.fn()} />);
+    await waitFor(() => expect(mockLocalVoices).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByTestId("settings-engine-nopiper")).toBeInTheDocument());
+    expect(screen.getByTestId("settings-engine-local")).toBeDisabled();
+    expect(screen.getByTestId("settings-local-download")).toBeDisabled();
+  });
+
+  it("localVoices failure shows a load error, not a missing model", async () => {
+    mockLocalVoices.mockRejectedValueOnce(new Error("rpc down"));
+    render(<Settings open={true} onClose={vi.fn()} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-local-status").textContent).toMatch(/Nie można załadować|Could not load/)
+    );
+  });
+
+  it("download backend error shows a localized prefix plus the detail", async () => {
+    mockDownloadLocalVoice.mockResolvedValueOnce({
+      id: "1",
+      error: { code: "DOWNLOAD_FAILED", message: "net down" },
+    });
+    render(<Settings open={true} onClose={vi.fn()} />);
+    await waitFor(() => expect(mockLocalVoices).toHaveBeenCalled());
+    fireEvent.click(screen.getByTestId("settings-local-download"));
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-local-status").textContent).toMatch(/Pobieranie nie powiodło|Download failed/)
+    );
+    expect(screen.getByTestId("settings-local-status").textContent).toContain("net down");
+  });
+
   it("onBlur parallel 3→2 calls setStore and toast Zapisano", async () => {    const user = userEvent.setup();
     render(<Settings open={true} onClose={vi.fn()} />);
     await waitFor(() => expect(mockGetStore).toHaveBeenCalled());

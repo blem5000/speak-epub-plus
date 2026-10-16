@@ -199,8 +199,8 @@ def escape_ffmeta(s: str) -> str:
     return _core_escape(s)
 
 
-def build_generation_plan(chapters: list[Chapter], output_dir: str, chunk_size: int) -> tuple[list[ChapterPlan], list[PartJob]]:
-    return _core_build_plan(chapters, output_dir, chunk_size)
+def build_generation_plan(chapters: list[Chapter], output_dir: str, chunk_size: int, rate: str | None = None) -> tuple[list[ChapterPlan], list[PartJob]]:
+    return _core_build_plan(chapters, output_dir, chunk_size, rate=rate)
 
 
 async def run_part_jobs(
@@ -264,9 +264,15 @@ async def convert(
     print(f"Found {total} chapter(s) in selected range.")
     print(f"Converting with voice: {voice}")
     print(f"Chunk size: {chunk_size} characters")
-    print(f"Parallel TTS part jobs: {parallel} (auto-tunes 1\u201312 while running)")
+    if str(engine or "").strip().lower() == "local":
+        print(f"Parallel TTS part jobs: {parallel} (local Piper: CPU cores, up to 8, no adaptive scaling)")
+    else:
+        print(f"Parallel TTS part jobs: {parallel} (auto-tunes 1\u201312 while running)")
     print(f"Retries per part: {retries}")
-    print(f"Speech rate: {_core_norm_rate(rate)}")
+    # canonicalize CLI-style bare numbers ("15" -> "+15%") so --rate never
+    # silently collapses to +0%: normalize_tts_rate requires the % sign.
+    rate = _core_norm_rate(rate) if "%" in str(rate or "") else _core_norm_rate(f"{rate}%")
+    print(f"Speech rate: {rate}")
     if engine and engine != "edge":
         suffix = f" ({local_voice})" if local_voice else ""
         print(f"TTS engine: {engine}{suffix}")
@@ -277,13 +283,13 @@ async def convert(
         display_title = title[:60] if title else f"Chapter {chapter_number}"
         print(f"Chapter {chapter_number:03d}: {display_title} - {len(text):,} chars, {len(chunks)} part(s)")
 
-    plans, jobs = build_generation_plan(chapters, output_dir, chunk_size)
+    plans, jobs = build_generation_plan(chapters, output_dir, chunk_size, rate=rate)
     print(f"\nQueued {len(jobs)} new TTS part job(s).")
 
     try:
         await run_part_jobs(
             jobs, voice=voice, parallel=parallel, retries=retries,
-            rate=_core_norm_rate(rate), engine=engine, local_voice=local_voice,
+            rate=rate, engine=engine, local_voice=local_voice,
         )
     except Exception as e:
         print(f"\nERROR: generation failed: {e}")
@@ -315,7 +321,7 @@ def main() -> None:
     parser.add_argument("--all-languages", action="store_true", help="With --list-voices, show voices for all languages, not just English")
     parser.add_argument("--start-chapter", type=int, default=1, help="Start conversion from this extracted chapter number. Default: 1.")
     parser.add_argument("--end-chapter", type=int, default=None, help="Stop conversion after this extracted chapter number. Default: convert until the end.")
-    parser.add_argument("--chunk-size", type=int, default=3500, help="Maximum characters per Edge TTS request. Default: 3500. Lower if you still get truncation.")
+    parser.add_argument("--chunk-size", type=int, default=3500, help="Maximum characters per TTS request (Edge and local). Default: 3500. Lower if you still get truncation.")
     parser.add_argument("--keep-parts", action="store_true", help="Keep temporary part MP3 files after merging.")
     parser.add_argument("--parallel", type=int, default=3, help="Starting number of TTS parts generated at the same time (1-6). The pool auto-scales up to 12 while Edge TTS is not throttling, and backs off on retries. Default: 3.")
     parser.add_argument("--retries", type=int, default=5, help="Retries per TTS request/chunk. Default: 5.")

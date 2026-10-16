@@ -113,6 +113,18 @@ def test_resolve_engine_local_requires_model():
     # empty voice -> default voice
     with pytest.raises(ValueError, match="not downloaded"):
         resolve_engine("local", "")
+    # unknown voice names the voice, not the download state
+    with pytest.raises(ValueError, match="unknown local voice"):
+        resolve_engine("local", "xx_XX-evil-voice")
+
+
+def test_resolve_engine_local_distinguishes_missing_piper(monkeypatch):
+    _fake_model(Path(tts_local.local_models_root()), "pl_PL-darkman-medium")
+    monkeypatch.setattr(tts_local, "_piper_available", lambda: False)
+    with pytest.raises(ValueError, match="piper-tts is not installed"):
+        resolve_engine("local", "pl_PL-darkman-medium")
+    with pytest.raises(RuntimeError, match="piper-tts is not installed"):
+        tts_text_to_mp3_local("hi", "/tmp/x.mp3", "pl_PL-darkman-medium")
 
 
 def test_resolve_engine_auto_rules(monkeypatch):
@@ -139,18 +151,38 @@ def test_effective_local_parallel(monkeypatch):
 # download
 # ---------------------------------------------------------------------------
 
-def test_download_local_voice_calls_piper(tmp_path):
-    calls = []
+def test_download_local_voice_uses_timeout_staging_urls(tmp_path):
+    seen = {}
 
-    def fake_download_voice(name, root):
-        calls.append((name, Path(root)))
-        _fake_model(Path(root), name)
+    class _FakeResp:
+        def __init__(self, payload: bytes):
+            self._payload = payload
+            self.headers = {"Content-Length": str(len(payload))}
 
-    with patch("piper.download_voices.download_voice", fake_download_voice, create=True):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            chunk, self._payload = self._payload[:n], self._payload[n:]
+            return chunk
+
+    def fake_urlopen(req, timeout=None):
+        seen["timeout"] = timeout
+        seen.setdefault("urls", []).append(req.full_url)
+        return _FakeResp(b"D" * 2_000_000)
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
         result = download_local_voice("pl_PL-darkman-medium")
-    assert calls and calls[0][0] == "pl_PL-darkman-medium"
-    assert result["id"] == "pl_PL-darkman-medium"
-    assert Path(result["path"]).name == "pl_PL-darkman-medium.onnx"
+    assert seen["timeout"] == tts_local._DOWNLOAD_TIMEOUT_SEC
+    assert len(seen["urls"]) == 2  # model + config
+    assert all("pl_PL-darkman-medium" in u for u in seen["urls"])
+    assert Path(result["path"]).is_file()
+    assert (Path(tts_local.local_models_root()) / "pl_PL-darkman-medium.onnx.json").is_file()
+    # staging dir removed after atomic publish
+    assert not list(Path(tts_local.local_models_root()).glob(".staging-*"))
 
 
 def test_download_local_voice_rejects_unknown():
@@ -161,9 +193,40 @@ def test_download_local_voice_rejects_unknown():
 def test_download_local_voice_already_present_skips():
     _fake_model(Path(tts_local.local_models_root()), "pl_PL-darkman-medium")
     logs = []
-    with patch("piper.download_voices.download_voice", side_effect=AssertionError("must not download")):
+    with patch("core.tts_local._fetch_to_file", side_effect=AssertionError("must not download")):
         download_local_voice("pl_PL-darkman-medium", on_log=logs.append)
     assert any("already downloaded" in line for line in logs)
+
+
+def test_download_partial_failure_leaves_no_finals():
+    def fake_fetch(url, dest_tmp, label, log_fn):
+        Path(dest_tmp).write_bytes(b"partial")
+        if dest_tmp.suffix == ".json":
+            raise RuntimeError("connection reset")
+
+    with patch("core.tts_local._fetch_to_file", side_effect=fake_fetch):
+        with pytest.raises(RuntimeError, match="failed to download"):
+            download_local_voice("pl_PL-darkman-medium")
+    root = Path(tts_local.local_models_root())
+    assert not (root / "pl_PL-darkman-medium.onnx").exists()
+    assert not (root / "pl_PL-darkman-medium.onnx.json").exists()
+    assert not list(root.glob(".staging-*"))
+
+
+def test_download_force_redownloads_present_model():
+    root = Path(tts_local.local_models_root())
+    _fake_model(root, "pl_PL-darkman-medium")
+    calls = []
+
+    def fake_fetch(url, dest_tmp, label, log_fn):
+        calls.append(url)
+        Path(dest_tmp).write_bytes(b"N" * 1_100_000)
+
+    with patch("core.tts_local._fetch_to_file", side_effect=fake_fetch):
+        result = download_local_voice("pl_PL-darkman-medium", force=True)
+    assert len(calls) == 2
+    assert result["bytes"] == 1_100_000
+    assert (root / "pl_PL-darkman-medium.onnx").read_bytes() == b"N" * 1_100_000
 
 
 # ---------------------------------------------------------------------------
@@ -247,9 +310,92 @@ def test_tts_text_to_mp3_local_invalid_output_cleaned(tmp_path):
         with patch("core.tts_local.shutil.which", return_value="ffmpeg"):
             with patch("core.tts_local.subprocess.run", side_effect=_fake_ffmpeg_run):
                 with patch("core.tts_local.verify_part_audio", return_value=(False, "truncated")):
-                    with pytest.raises(RuntimeError, match="invalid audio"):
+                    with pytest.raises(RuntimeError, match="truncated"):
                         tts_text_to_mp3_local("hello", str(out), "pl_PL-darkman-medium")
     assert not out.exists()
+
+
+def test_tts_text_to_mp3_local_transient_failure_retries_then_succeeds(tmp_path, monkeypatch):
+    models = Path(tts_local.local_models_root())
+    _fake_model(models, "pl_PL-darkman-medium")
+    out = tmp_path / "retry.mp3"
+    calls = {"n": 0}
+
+    class _Flaky:
+        @classmethod
+        def load(cls, model_path):
+            return cls()
+
+        def synthesize_wav(self, text, wav_file, syn_config=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("flaky disk")
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(22050)
+            wav_file.writeframes(b"\x00\x00" * 22050)
+
+    retried = []
+    monkeypatch.setattr(tts_local, "_load_voice", lambda name: _Flaky())
+    monkeypatch.setattr(tts_local.time, "sleep", lambda s: None)
+    with patch("core.tts_local.shutil.which", return_value="ffmpeg"):
+        with patch("core.tts_local.subprocess.run", side_effect=_fake_ffmpeg_run):
+            with patch("core.tts_local.verify_part_audio", return_value=(True, "ok")):
+                tts_text_to_mp3_local("hello", str(out), "pl_PL-darkman-medium", retries=2,
+                                      on_retry=lambda a, e: retried.append(a))
+    assert out.is_file()
+    assert calls["n"] == 2
+    assert retried == [1]
+
+
+def test_tts_text_to_mp3_local_retries_exhausted(tmp_path, monkeypatch):
+    models = Path(tts_local.local_models_root())
+    _fake_model(models, "pl_PL-darkman-medium")
+    out = tmp_path / "fail.mp3"
+    monkeypatch.setattr(tts_local.time, "sleep", lambda s: None)
+
+    class _AlwaysBroken:
+        @classmethod
+        def load(cls, model_path):
+            return cls()
+
+        def synthesize_wav(self, text, wav_file, syn_config=None):
+            # params set first: wave.close() must not mask the real failure
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(22050)
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(tts_local, "_load_voice", lambda name: _AlwaysBroken())
+    with patch("core.tts_local.shutil.which", return_value="ffmpeg"):
+        with pytest.raises(RuntimeError, match="failed after 1 attempt"):
+            tts_text_to_mp3_local("hello", str(out), "pl_PL-darkman-medium", retries=1)
+    assert not out.exists()
+
+
+def test_tts_text_to_mp3_local_ffmpeg_failure_cleans_partial_mp3(tmp_path):
+    models = Path(tts_local.local_models_root())
+    _fake_model(models, "pl_PL-darkman-medium")
+    out = tmp_path / "encodefail.mp3"
+    captured = {}
+
+    def _bad_ffmpeg(cmd, capture_output=True, timeout=None):
+        captured["cmd"] = cmd
+        out.write_bytes(b"TRUNCATED")
+        class _P:
+            returncode = 1
+            stderr = b"encode error"
+        return _P()
+
+    with patch("piper.PiperVoice", create=True) as mock_cls:
+        mock_cls.load.return_value = _FakePiperVoice()
+        with patch("core.tts_local.shutil.which", return_value="ffmpeg"):
+            with patch("core.tts_local.subprocess.run", side_effect=_bad_ffmpeg):
+                with pytest.raises(RuntimeError, match="ffmpeg failed"):
+                    tts_text_to_mp3_local("hello", str(out), "pl_PL-darkman-medium", retries=1)
+    assert not out.exists()
+    # canonical 24 kHz mono profile: mixed-engine chapters concat cleanly
+    assert "-ar" in captured["cmd"] and "24000" in captured["cmd"]
 
 
 # ---------------------------------------------------------------------------

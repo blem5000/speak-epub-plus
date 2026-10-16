@@ -286,7 +286,33 @@ class TestBuildAudioRpc:
         assert "error" not in res, res
         assert seen["rate"] == "+25%"  # normalized with an explicit sign
 
+    def test_rpc_buildaudio_store_fallback_forwarding(self, tmp_path, monkeypatch):
+        # review cr2: when buildAudio omits rate/engine, the Settings-persisted
+        # store values must reach build_audio — the desktop UI's only binding.
+        # Break the fallback (hardcode "+0%"/"auto") and this test must fail.
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("core.fetch.CACHE_ROOT", tmp_path)
+        _seed(tmp_path)
+        (tmp_path / "store.json").write_text('{"rate": "+20%", "engine": "edge"}', encoding="utf-8")
+        seen = {}
+
+        def _fake_build_audio(**kw):
+            seen.update(kw)
+            return {"audio_dir": str(tmp_path / "out"), "chapters": []}
+
+        monkeypatch.setattr("core.audio.build_audio", _fake_build_audio)
+        res = handle_rpc({"id": "1", "method": "buildAudio", "params": {
+            "novelUrl": "https://www.novelphoenix.com/novel/123",
+            "urls": [CH1], "format": "mp3"}})
+        assert "error" not in res, res
+        assert seen["rate"] == "+20%"
+        assert seen["engine"] == "edge"
+
     def test_engine_forwarded_and_store_fallback(self, tmp_path, monkeypatch):
+        # review cr2: isolate from the real store.json — the store fallback
+        # reads it when local_voice is None, and a dev machine with a persisted
+        # localVoice would otherwise fail the first assertion below
+        monkeypatch.chdir(tmp_path)
         _seed(tmp_path)
         captured = {}
 
@@ -349,16 +375,29 @@ class TestBuildAudioRpc:
         res = handle_rpc({"id": "1", "method": "downloadLocalVoice", "params": {"voice": "nope"}})
         assert res["error"]["code"] == "VALUE_ERROR"
 
-        def _fake_download(voice, on_log=None):
+        def _fake_download(voice, on_log=None, force=False):
             if on_log:
                 on_log(f"downloading {voice}...")
             return {"id": voice, "path": str(tmp_path / "models" / f"{voice}.onnx")}
 
         monkeypatch.setattr("core.tts_local.download_local_voice", _fake_download)
+        events = []
         res = handle_rpc({"id": "1", "method": "downloadLocalVoice",
-                          "params": {"voice": "pl_PL-darkman-medium"}})
+                          "params": {"voice": "pl_PL-darkman-medium"}},
+                         emit_fn=lambda ev, payload: events.append((ev, payload)))
         assert "error" not in res
         assert res["result"]["id"] == "pl_PL-darkman-medium"
+        # download progress reaches the UI through logLine events
+        assert any(ev == "logLine" and "downloading pl_PL-darkman-medium" in str(pl)
+                   for ev, pl in events)
+
+        def _boom_download(voice, on_log=None, force=False):
+            raise RuntimeError("network down")
+
+        monkeypatch.setattr("core.tts_local.download_local_voice", _boom_download)
+        res = handle_rpc({"id": "1", "method": "downloadLocalVoice",
+                          "params": {"voice": "pl_PL-darkman-medium"}})
+        assert res["error"]["code"] == "DOWNLOAD_FAILED"
 
     def test_output_falls_back_when_cwd_unwritable(self, tmp_path, monkeypatch, capsys):
         """System32-CWD regression: default output lands in user docs, no WinError 5."""

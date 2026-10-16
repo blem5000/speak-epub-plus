@@ -613,9 +613,11 @@ export async function localVoices(opts?: { signal?: AbortSignal }): Promise<RpcR
 /** Download a curated Piper voice (~63–115 MB) into the models directory. */
 export async function downloadLocalVoice(
   voice: string,
-  opts?: { signal?: AbortSignal }
+  opts?: { signal?: AbortSignal; force?: boolean }
 ): Promise<RpcResponse> {
-  return callSidecar("downloadLocalVoice", { voice }, opts);
+  const params: Record<string, unknown> = { voice };
+  if (opts?.force) params.force = true;
+  return callSidecar("downloadLocalVoice", params, opts);
 }
 
 // Type guards for fetchChapter(s) responses — strict shape

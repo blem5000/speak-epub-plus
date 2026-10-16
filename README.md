@@ -136,9 +136,12 @@ The default voice is `en-US-AndrewNeural` (American male). Run `--list-voices` t
 | `--m4b` / `--m4a` | off | Combine chapter MP3s into a single audiobook file (requires FFmpeg) |
 | `--start-chapter` | `1` | First extracted chapter number to convert |
 | `--end-chapter` | last chapter | Stop after this extracted chapter number |
-| `--chunk-size` | `3500` | Maximum characters per Edge TTS request; lower it if output gets truncated |
-| `--parallel` | `3` | Number of TTS parts generated at the same time (2–3 recommended; higher may trigger throttling) |
-| `--retries` | `5` | Retries per failed TTS request/part |
+| `--chunk-size` | `3500` | Maximum characters per TTS request (Edge and local); lower it if output gets truncated |
+| `--parallel` | `3` | Starting number of TTS parts generated at the same time. Edge TTS auto-scales 1–12 while running (backs off on throttling); the local Piper engine uses CPU cores instead |
+| `--retries` | `5` | Retries per failed TTS request/part (Edge and local) |
+| `--rate` | `+0%` | Speech rate like `+25%` or `-10%` (clamped to ±100%) |
+| `--engine` | `auto` | TTS engine: `auto` (local Piper on fast CPUs once its voice is downloaded, else Edge), `edge` (cloud), `local` (offline Piper) |
+| `--local-voice` | default voice | Piper voice for the local engine, e.g. `pl_PL-darkman-medium` (downloaded on demand into `Documents\speak-epub\models`) |
 | `--keep-parts` | off | Keep the temporary `_parts` MP3 files after merging |
 | `--list-voices` | – | List English voices (`--all-languages`: every language) |
 
