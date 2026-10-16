@@ -27,6 +27,10 @@ from core.tts import (
     escape_ffmeta,
     finalize_chapter_audio,
     build_m4b,
+    AdaptiveGate,
+    ADAPTIVE_GROW_AFTER,
+    ADAPTIVE_MAX_PARALLEL,
+    normalize_tts_rate,
 )
 
 
@@ -698,12 +702,12 @@ def test_speak_delegation_parity(monkeypatch, tmp_path):
     # Verify delegation: patch core and check speak wrapper calls it
     called = {}
 
-    async def fake_core_tts(text, output_path, voice, retries=5):
-        called["tts"] = (text, output_path, voice, retries)
+    async def fake_core_tts(text, output_path, voice, retries=5, rate=None):
+        called["tts"] = (text, output_path, voice, retries, rate)
         Path(output_path).write_text("ok", encoding="utf-8")
 
-    async def fake_core_run(jobs, voice, parallel, retries):
-        called["run"] = (jobs, voice, parallel, retries)
+    async def fake_core_run(jobs, voice, parallel, retries, rate=None, adaptive=False, parallel_max=None):
+        called["run"] = (jobs, voice, parallel, retries, rate, adaptive)
 
     monkeypatch.setattr(core_mod, "tts_text_to_mp3", fake_core_tts)
     # Need to also patch the alias that speak imported at import time: _core_tts
@@ -714,15 +718,19 @@ def test_speak_delegation_parity(monkeypatch, tmp_path):
         # Test tts delegation
         out = tmp_path / "deleg.mp3"
         await speak_mod.tts_text_to_mp3("hi", str(out), "en-US-AriaNeural", retries=2)
-        assert called["tts"] == ("hi", str(out), "en-US-AriaNeural", 2)
+        assert called["tts"] == ("hi", str(out), "en-US-AriaNeural", 2, None)
+        await speak_mod.tts_text_to_mp3("hi", str(out), "en-US-AriaNeural", retries=2, rate="+10%")
+        assert called["tts"] == ("hi", str(out), "en-US-AriaNeural", 2, "+10%")
 
         # Test run delegation with parallel propagation 1..6
         jobs = [
             PartJob(chapter_number=1, chapter_title="T", part_number=1, part_count=1, text="hi", output_path=str(tmp_path / "a.mp3"), is_final_chapter_file=True)
         ]
-        await speak_mod.run_part_jobs(jobs, voice="en-US-AriaNeural", parallel=3, retries=5)
+        await speak_mod.run_part_jobs(jobs, voice="en-US-AriaNeural", parallel=3, retries=5, rate="+25%")
         assert called["run"][2] == 3  # parallel
         assert called["run"][1] == "en-US-AriaNeural"
+        assert called["run"][4] == "+25%"  # rate forwarded
+        assert called["run"][5] is True  # adaptive enabled by the wrapper
 
     asyncio.run(_run())
 
@@ -1671,8 +1679,8 @@ def test_convert_wiring(tmp_path, monkeypatch):
         jobs = []
         return plans, jobs
 
-    async def fake_run_jobs(jobs, voice, parallel, retries):
-        called["run_jobs"] = (voice, parallel, retries, len(jobs))
+    async def fake_run_jobs(jobs, voice, parallel, retries, rate=None):
+        called["run_jobs"] = (voice, parallel, retries, len(jobs), rate)
 
     def fake_finalize(plans, keep_parts):
         called["finalize"] = (len(plans), keep_parts)
@@ -2214,4 +2222,291 @@ def test_resolve_output_dir_no_ensure_no_writes(tmp_path, monkeypatch):
 
     assert out2 == (user_output_base() / "output").resolve()
     assert not (tmp_path / "ghost").exists()
+
+
+# ---------------------------------------------------------------------------
+# Speech rate: normalize + forwarding to edge_tts.Communicate
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_tts_rate_matrix():
+    assert normalize_tts_rate("+25%") == "+25%"
+    assert normalize_tts_rate("15%") == "+15%"
+    assert normalize_tts_rate("-30%") == "-30%"
+    assert normalize_tts_rate("+ 15 %") == "+15%"
+    assert normalize_tts_rate(15) == "+15%"
+    assert normalize_tts_rate(-200) == "-100%"  # clamped
+    assert normalize_tts_rate("+250%") == "+100%"  # clamped
+    assert normalize_tts_rate("fast") == "+0%"  # garbage -> default
+    assert normalize_tts_rate("fast", "+7%") == "+7%"  # custom default
+    assert normalize_tts_rate(None) == "+0%"
+    assert normalize_tts_rate(True) == "+0%"  # bool is not a number here
+
+
+def test_tts_text_to_mp3_forwards_rate(tmp_path):
+    out = tmp_path / "rate_fwd.mp3"
+    seen = {}
+
+    class FakeCommunicate:
+        def __init__(self, text, voice_arg, **kwargs):
+            seen["kwargs"] = kwargs
+
+        async def save(self, path):
+            Path(path).write_text("x" * 2048, encoding="utf-8")
+
+    async def _run():
+        with patch("edge_tts.Communicate", FakeCommunicate):
+            await tts_text_to_mp3("hello", str(out), "en-US-AriaNeural", retries=2, rate="+25%")
+
+    asyncio.run(_run())
+    assert seen["kwargs"].get("rate") == "+25%"
+
+
+def test_tts_text_to_mp3_omits_rate_when_none(tmp_path):
+    out = tmp_path / "no_rate.mp3"
+    seen = {}
+
+    class FakeCommunicate:
+        def __init__(self, text, voice_arg, **kwargs):
+            seen["kwargs"] = kwargs
+
+        async def save(self, path):
+            Path(path).write_text("x" * 2048, encoding="utf-8")
+
+    async def _run():
+        with patch("edge_tts.Communicate", FakeCommunicate):
+            await tts_text_to_mp3("hello", str(out), "en-US-AriaNeural", retries=2)
+
+    asyncio.run(_run())
+    assert "rate" not in seen["kwargs"]
+
+
+def test_tts_text_to_mp3_on_retry_callback(tmp_path):
+    out = tmp_path / "retry_cb.mp3"
+    retries_seen = []
+
+    class FakeCommunicate:
+        calls = 0
+
+        def __init__(self, text, voice_arg, **kwargs):
+            pass
+
+        async def save(self, path):
+            FakeCommunicate.calls += 1
+            if FakeCommunicate.calls == 1:
+                raise RuntimeError("429")
+            Path(path).write_text("x" * 2048, encoding="utf-8")
+
+    async def fake_sleep(_seconds):
+        pass
+
+    def on_retry(attempt, err):
+        retries_seen.append((attempt, str(err)))
+
+    async def _run():
+        with patch("edge_tts.Communicate", FakeCommunicate):
+            with patch("core.tts.asyncio.sleep", new=fake_sleep):
+                await tts_text_to_mp3("hello", str(out), "en-US-AriaNeural", retries=5, on_retry=on_retry)
+
+    asyncio.run(_run())
+    assert retries_seen == [(1, "429")]
+
+
+def test_tts_text_to_mp3_on_retry_exception_does_not_mask_retry(tmp_path):
+    out = tmp_path / "retry_cb2.mp3"
+
+    class FakeCommunicate:
+        calls = 0
+
+        def __init__(self, text, voice_arg, **kwargs):
+            pass
+
+        async def save(self, path):
+            FakeCommunicate.calls += 1
+            if FakeCommunicate.calls == 1:
+                raise RuntimeError("429")
+            Path(path).write_text("x" * 2048, encoding="utf-8")
+
+    async def fake_sleep(_seconds):
+        pass
+
+    def on_retry(_attempt, _err):
+        raise ValueError("callback bug must not kill the retry loop")
+
+    async def _run():
+        with patch("edge_tts.Communicate", FakeCommunicate):
+            with patch("core.tts.asyncio.sleep", new=fake_sleep):
+                await tts_text_to_mp3("hello", str(out), "en-US-AriaNeural", retries=5, on_retry=on_retry)
+
+    asyncio.run(_run())
+    assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# AdaptiveGate (AIMD concurrency)
+# ---------------------------------------------------------------------------
+
+
+def test_adaptive_gate_grows_after_clean_streak():
+    gate = AdaptiveGate(3, ADAPTIVE_MAX_PARALLEL)
+    for _ in range(ADAPTIVE_GROW_AFTER - 1):
+        gate.note_clean_success()
+    assert gate.limit == 3
+    gate.note_clean_success()
+    assert gate.limit == 4
+
+
+def test_adaptive_gate_halves_on_retry_with_floor_1():
+    gate = AdaptiveGate(6, ADAPTIVE_MAX_PARALLEL)
+    gate.note_retry()
+    assert gate.limit == 3
+    gate.note_retry()
+    assert gate.limit == 1
+    gate.note_retry()
+    assert gate.limit == 1  # floor
+    # retry resets the clean streak
+    for _ in range(ADAPTIVE_GROW_AFTER - 1):
+        gate.note_clean_success()
+    assert gate.limit == 1
+    gate.note_clean_success()
+    assert gate.limit == 2
+
+
+def test_adaptive_gate_ceiling_and_initial_clamp():
+    gate = AdaptiveGate(99, 5)
+    assert gate.limit == 5
+    gate.note_clean_success()
+    assert gate.limit == 5  # at ceiling, no growth, no crash
+    gate2 = AdaptiveGate(0, ADAPTIVE_MAX_PARALLEL)
+    assert gate2.limit == 1
+
+
+def test_adaptive_gate_acquire_release_blocks_over_limit():
+    async def _run():
+        gate = AdaptiveGate(1, 2)
+        await gate.acquire()
+        assert gate.limit == 1
+
+        async def second():
+            await gate.acquire()
+            return True
+
+        task = asyncio.create_task(second())
+        await asyncio.sleep(0.01)
+        assert not task.done(), "second acquire must block while limit is 1"
+        gate.release()
+        assert await asyncio.wait_for(task, timeout=1) is True
+
+    asyncio.run(_run())
+
+
+def test_adaptive_gate_release_wakes_after_growth():
+    async def _run():
+        gate = AdaptiveGate(1, 2)
+        await gate.acquire()
+
+        async def second():
+            return await gate.acquire()
+
+        task = asyncio.create_task(second())
+        await asyncio.sleep(0.01)
+        assert not task.done()
+        for _ in range(ADAPTIVE_GROW_AFTER):
+            gate.note_clean_success()
+        assert gate.limit == 2
+        assert await asyncio.wait_for(task, timeout=1) is None
+        gate.release()
+        gate.release()
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# run_part_jobs adaptive integration (rate forwarding + AIMD logs)
+# ---------------------------------------------------------------------------
+
+
+def _make_jobs(n, tmp_path):
+    out_dir = tmp_path / "adaptive_out"
+    out_dir.mkdir(exist_ok=True)
+    jobs = []
+    for i in range(n):
+        jobs.append(
+            PartJob(
+                chapter_number=40,
+                chapter_title="C40",
+                part_number=i + 1,
+                part_count=n,
+                text="Sentence. " * 50,
+                output_path=str(out_dir / f"040_C40_part{i + 1:03d}.mp3"),
+                is_final_chapter_file=(i + 1 == n),
+            )
+        )
+    return jobs
+
+
+def test_run_part_jobs_adaptive_logs_reduce_and_increase(tmp_path):
+    jobs = _make_jobs(16, tmp_path)
+    calls = {"n": 0}
+    logs = []
+
+    async def fake_tts(text, output_path, voice, retries=5, rate=None, on_retry=None):
+        first = calls["n"] == 0
+        calls["n"] += 1
+        if first and on_retry is not None:
+            on_retry(1, RuntimeError("429"))
+        Path(output_path).write_text("x" * 1024, encoding="utf-8")
+        await asyncio.sleep(0)
+
+    async def _run():
+        with patch("core.tts.tts_text_to_mp3", new=fake_tts):
+            await run_part_jobs(
+                jobs, voice="en-US-AndrewNeural", parallel=3, retries=5,
+                adaptive=True, on_log=logs.append,
+            )
+
+    asyncio.run(_run())
+    joined = "\n".join(logs)
+    assert "parallel: throttling detected, reducing TTS concurrency 3 -> 1" in joined
+    assert "parallel: stable, increasing TTS concurrency 1 -> 2" in joined
+    # one retry consumed the streak: 15 clean parts -> exactly one +1 growth
+    assert "increasing TTS concurrency 2 -> 3" not in joined
+
+
+def test_run_part_jobs_adaptive_forward_rate_and_parallel_max(tmp_path):
+    jobs = _make_jobs(4, tmp_path)
+    seen_rates = []
+
+    async def fake_tts(text, output_path, voice, retries=5, rate=None, on_retry=None):
+        seen_rates.append(rate)
+        Path(output_path).write_text("x" * 1024, encoding="utf-8")
+        await asyncio.sleep(0)
+
+    async def _run():
+        with patch("core.tts.tts_text_to_mp3", new=fake_tts):
+            await run_part_jobs(
+                jobs, voice="en-US-AndrewNeural", parallel=2, retries=5,
+                rate="+40%", adaptive=True, parallel_max=3,
+            )
+
+    asyncio.run(_run())
+    assert seen_rates == ["+40%"] * 4
+
+
+def test_run_part_jobs_legacy_callers_keep_strict_kwargs(tmp_path):
+    """Legacy callers/fakes: no rate/on_retry kwargs when the gate is off."""
+    jobs = _make_jobs(2, tmp_path)
+    seen_retries = []
+
+    async def fake_tts(text, output_path, voice, retries=5):
+        seen_retries.append(retries)
+        Path(output_path).write_text("x" * 1024, encoding="utf-8")
+        await asyncio.sleep(0)
+
+    async def _run():
+        with patch("core.tts.tts_text_to_mp3", new=fake_tts):
+            await run_part_jobs(jobs, voice="en-US-AndrewNeural", parallel=2, retries=5)
+
+    asyncio.run(_run())
+    assert seen_retries == [5, 5]
 

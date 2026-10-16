@@ -29,7 +29,8 @@ def _seed(tmp_path, url=CH1, title="Chapter 1", body="Short text one."):
     return url
 
 
-async def _fake_run(jobs, voice, parallel, retries, on_part_status=None, on_log=None, on_progress=None):
+async def _fake_run(jobs, voice, parallel, retries, on_part_status=None, on_log=None, on_progress=None,
+                    rate=None, adaptive=False, parallel_max=None):
     for j in jobs:
         Path(j.output_path).parent.mkdir(parents=True, exist_ok=True)
         Path(j.output_path).write_bytes(b"FAKEMP3" * 100)
@@ -147,7 +148,8 @@ class TestBuildAudio:
         _bp_seed(tmp_path, CH2, 58, "The mirror showed a woman.", "New Fools")
         seen_texts = []
 
-        async def _capture(jobs, voice, parallel, retries, on_part_status=None, on_log=None, on_progress=None):
+        async def _capture(jobs, voice, parallel, retries, on_part_status=None, on_log=None, on_progress=None,
+                           rate=None, adaptive=False, parallel_max=None):
             for j in jobs:
                 seen_texts.append(j.text)
             await _fake_run(jobs, voice, parallel, retries, on_part_status, on_log, on_progress)
@@ -228,6 +230,60 @@ class TestBuildAudioRpc:
             "novelUrl": "https://www.novelphoenix.com/novel/123",
             "urls": [CH1], "format": "mp3", "audioBitrate": "ogg"}})
         assert res["error"]["code"] == "VALUE_ERROR"
+
+    def test_rate_forwarded_and_store_fallback(self, tmp_path, monkeypatch):
+        _seed(tmp_path)
+        captured = {}
+
+        async def _capture(jobs, voice, parallel, retries, on_part_status=None, on_log=None,
+                           on_progress=None, rate=None, adaptive=False, parallel_max=None):
+            captured["rate"] = rate
+            captured["adaptive"] = adaptive
+            await _fake_run(jobs, voice, parallel, retries, on_part_status, on_log, on_progress)
+
+        kwargs = dict(
+            from_idx=1, to_idx=1, title="T", cache_dir=tmp_path,
+            chapter_urls=[CH1], audio_format="mp3",
+        )
+        with patch("core.audio.run_part_jobs", side_effect=_capture):
+            build_audio("https://www.novelphoenix.com/novel/123",
+                        output_dir=tmp_path / "out_r1", rate="+35%", **kwargs)
+        assert captured == {"rate": "+35%", "adaptive": True}
+
+        # explicit None -> store-backed default
+        monkeypatch.setattr("core.config.load_store", lambda: {"rate": "+20%"})
+        with patch("core.audio.run_part_jobs", side_effect=_capture):
+            build_audio("https://www.novelphoenix.com/novel/123",
+                        output_dir=tmp_path / "out_r2", rate=None, **kwargs)
+        assert captured["rate"] == "+20%"
+
+        # garbage explicit rate is normalized to neutral, never crashes
+        with patch("core.audio.run_part_jobs", side_effect=_capture):
+            build_audio("https://www.novelphoenix.com/novel/123",
+                        output_dir=tmp_path / "out_r3", rate="fast", **kwargs)
+        assert captured["rate"] == "+0%"
+
+    def test_rpc_rate_invalid_and_valid(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("core.fetch.CACHE_ROOT", tmp_path)
+        _seed(tmp_path)
+        res = handle_rpc({"id": "1", "method": "buildAudio", "params": {
+            "novelUrl": "https://www.novelphoenix.com/novel/123",
+            "urls": [CH1], "format": "mp3", "rate": "fast"}})
+        assert res["error"]["code"] == "VALUE_ERROR"
+
+        seen = {}
+
+        def _fake_build_audio(**kw):
+            seen.update(kw)
+            return {"audio_dir": str(tmp_path / "out"), "chapters": []}
+
+        monkeypatch.setattr("core.audio.build_audio", _fake_build_audio)
+        res = handle_rpc({"id": "1", "method": "buildAudio", "params": {
+            "novelUrl": "https://www.novelphoenix.com/novel/123",
+            "urls": [CH1], "format": "mp3", "rate": "25"}})
+        assert "error" not in res, res
+        assert seen["rate"] == "+25%"  # normalized with an explicit sign
 
     def test_output_falls_back_when_cwd_unwritable(self, tmp_path, monkeypatch, capsys):
         """System32-CWD regression: default output lands in user docs, no WinError 5."""

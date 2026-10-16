@@ -67,7 +67,7 @@
   "settings.helper.voice": "Głos Edge TTS do generowania audio.",
   "settings.helper.bitrate": "Bitrate audio M4B/M4A. Domyślny dla mowy 32k (połowa rozmiaru 64k).",
   "settings.helper.rate": "Tempo mowy, np. +0% (suwak \u221250% do +50%, krok 5).",
-  "settings.helper.parallel": "Równoległe zadania TTS (zalecane 2\u20133, zakres 1\u20136).",
+  "settings.helper.parallel": "Startowa liczba równoległych zadań TTS (zalecane 2\u20133, zakres 1\u20136). Zwiększa się automatycznie, gdy Edge nie dławi, a cofa się przy ponowieniach (limit 12).",
   "settings.helper.chunkSize": "Maksymalna liczba znaków na fragment TTS (500\u20135000, zmniejsz jeśli słyszysz ucięcia).",
   "settings.helper.retries": "Liczba prób na fragment TTS (1\u201310).",
   "settings.helper.scrapeDelay": "Opóźnienie między pobraniami (preset lub własne ms, 0\u201320000).",

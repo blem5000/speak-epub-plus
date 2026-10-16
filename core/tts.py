@@ -299,6 +299,31 @@ class _TruncatedPartError(RuntimeError):
     """Internal: Edge TTS returned a complete-but-short file (deterministic)."""
 
 
+_RE_TTS_RATE = re.compile(r"^\s*([+-]?)\s*(\d+)\s*%\s*$")
+
+
+def normalize_tts_rate(value: Any, default: str = "+0%") -> str:
+    """Normalize a speech-rate like '+25%'/'-30%' (clamped to ±100).
+
+    Accepts '+15%', '15%', '-30%', 15 → '+15%'. Garbage returns `default`.
+    Edge TTS requires the sign, so the result always carries one.
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        value = f"{int(value):+d}%"
+    if not isinstance(value, str):
+        return default
+    m = _RE_TTS_RATE.match(value)
+    if not m:
+        return default
+    num = int(m.group(2))
+    if m.group(1) == "-":
+        num = -num
+    num = max(-100, min(100, num))
+    return f"{num:+d}%"
+
+
 def _part_file_valid_quick(path: str) -> bool:
     """Pure size gate for build_generation_plan (no subprocess, keeps it pure)."""
     try:
@@ -502,12 +527,22 @@ def build_generation_plan(
     return plans, jobs
 
 
-async def tts_text_to_mp3(text: str, output_path: str, voice: str, retries: int = 5) -> None:
+async def tts_text_to_mp3(
+    text: str,
+    output_path: str,
+    voice: str,
+    retries: int = 5,
+    rate: Optional[str] = None,
+    on_retry: Optional[Callable[[int, Exception], None]] = None,
+) -> None:
     """
     Core-owned Edge TTS execution (ratyfikacja speak.py:116).
 
     - edge_tts lazy import inside loop (CI without deps still imports core.tts)
-    - for attempt in 1..retries: edge_tts.Communicate(text,voice).save
+    - for attempt in 1..retries: edge_tts.Communicate(text,voice[,rate]).save
+    - rate like '+25%' (normalized upstream); omitted → Edge default '+0%'
+    - on_retry(attempt, error) fires before every backoff sleep so the
+      adaptive pool can treat retries as a throttling signal
     - after each save verify_part_audio: invalid file is deleted and the
       attempt counts as failed (empty/partial writes are retried; a
       "truncated" verdict raises immediately with a --chunk-size hint —
@@ -523,7 +558,10 @@ async def tts_text_to_mp3(text: str, output_path: str, voice: str, retries: int 
         try:
             import edge_tts  # lazy — keep core importable without edge-tts
 
-            communicate = edge_tts.Communicate(text, voice)
+            kwargs: dict = {}
+            if rate:
+                kwargs["rate"] = rate
+            communicate = edge_tts.Communicate(text, voice, **kwargs)
             await communicate.save(output_path)
             ok, reason = verify_part_audio(output_path, text)
             if ok:
@@ -559,9 +597,92 @@ async def tts_text_to_mp3(text: str, output_path: str, voice: str, retries: int 
             if attempt < retries:
                 wait_seconds = min(20, 2 * attempt)
                 print(f"        retry {attempt}/{retries - 1} for {Path(output_path).name}: {e}")
+                if on_retry is not None:
+                    try:
+                        on_retry(attempt, e)
+                    except Exception:
+                        pass
                 await asyncio.sleep(wait_seconds)
 
     raise RuntimeError(f"TTS failed after {retries} attempts for {output_path}: {last_error}") from last_error
+
+
+#: Adaptive pool: +1 worker after this many consecutive clean parts.
+ADAPTIVE_GROW_AFTER = 8
+
+#: Adaptive pool hard ceiling (> configured parallel, which is clamped 1–6).
+ADAPTIVE_MAX_PARALLEL = 12
+
+
+class AdaptiveGate:
+    """Dynamic concurrency limiter (AIMD) for TTS part workers.
+
+    Starts at the configured parallel, grows +1 after ADAPTIVE_GROW_AFTER
+    consecutive clean parts (no retry), and halves on any retry — Edge
+    throttling surfaces as retries followed by backoff, so the pool
+    self-tunes without probing beyond what the service tolerates.
+    Floor 1, ceiling `maximum`.
+
+    `release()` is synchronous on purpose: workers call it from a `finally`
+    that may run while the task is being cancelled, where awaiting would
+    risk re-entrant cancellation.
+    """
+
+    def __init__(self, initial: int, maximum: int):
+        self.maximum = max(1, int(maximum))
+        self.limit = max(1, min(int(initial), self.maximum))
+        self.active = 0
+        self._streak = 0
+        self._waiters: List[asyncio.Future] = []
+
+    def _wake(self) -> None:
+        while self._waiters and self.active < self.limit:
+            fut = self._waiters.pop(0)
+            if not fut.done():
+                fut.set_result(True)
+                return
+
+    def _set_limit(self, new: int) -> None:
+        new = max(1, min(int(new), self.maximum))
+        if new != self.limit:
+            self.limit = new
+            if self.active < self.limit:
+                self._wake()
+
+    def note_clean_success(self) -> None:
+        """One part finished with zero retries — grow after a streak."""
+        if self.limit >= self.maximum:
+            self._streak = 0
+            return
+        self._streak += 1
+        if self._streak >= ADAPTIVE_GROW_AFTER:
+            self._streak = 0
+            self._set_limit(self.limit + 1)
+
+    def note_retry(self) -> None:
+        """A part needed a retry — treat as throttling and back off."""
+        self._streak = 0
+        self._set_limit(self.limit // 2)
+
+    async def acquire(self) -> None:
+        while True:
+            if self.active < self.limit:
+                self.active += 1
+                return
+            fut = asyncio.get_running_loop().create_future()
+            self._waiters.append(fut)
+            try:
+                await fut
+            finally:
+                try:
+                    self._waiters.remove(fut)
+                except ValueError:
+                    pass
+
+    def release(self) -> None:
+        if self.active > 0:
+            self.active -= 1
+        self._wake()
 
 
 async def run_part_jobs(
@@ -572,13 +693,20 @@ async def run_part_jobs(
     on_part_status=None,
     on_log=None,
     on_progress=None,
+    rate: Optional[str] = None,
+    adaptive: bool = False,
+    parallel_max: Optional[int] = None,
 ) -> None:
     """
     Global parallel PartJob queue — deterministyczny reading-order.
 
-    - asyncio.Queue[Optional[PartJob]] filled for job in jobs: put_nowait(job) then sentinel None×parallel
-    - workers parallel = asyncio.create_task(worker(i+1)) for i in range(parallel)
+    - asyncio.Queue[Optional[PartJob]] filled for job in jobs: put_nowait(job) then sentinel None×pool
+    - workers pool = asyncio.create_task(worker(i+1))
     - worker while True: job=await queue.get(); if job is None: task_done/break
+    - rate like '+25%' forwarded to tts_text_to_mp3 (omit = Edge default)
+    - adaptive=True: concurrency starts at `parallel` (clamp 1–6) and self-tunes
+      via AdaptiveGate up to ADAPTIVE_MAX_PARALLEL (override: parallel_max) —
+      +1 after ADAPTIVE_GROW_AFTER clean parts, halved on any retry
     - skip if output verifies (verify_part_audio): log skip + size_kb, no TTS call
     - else if file exists but invalid (too_small/truncated/no_duration): delete + regenerate
     - else start/done logs + await tts_text_to_mp3
@@ -663,7 +791,22 @@ async def run_part_jobs(
     for job in jobs:
         queue.put_nowait(job)
 
-    for _ in range(parallel):
+    # Worker pool size = concurrency ceiling; the AdaptiveGate throttles
+    # actual concurrency (and can raise it up to parallel_max while running).
+    gate: Optional[AdaptiveGate] = None
+    pool_size = parallel
+    if adaptive:
+        max_par = ADAPTIVE_MAX_PARALLEL
+        try:
+            if parallel_max is not None:
+                max_par = max(parallel, min(int(parallel_max), 64))
+        except Exception:
+            max_par = ADAPTIVE_MAX_PARALLEL
+        max_par = max(parallel, max_par)
+        gate = AdaptiveGate(parallel, max_par)
+        pool_size = max(parallel, min(max_par, len(jobs)))
+
+    for _ in range(pool_size):
         queue.put_nowait(None)
 
     total_jobs = len(jobs)
@@ -700,7 +843,11 @@ async def run_part_jobs(
                 queue.task_done()
                 break
 
+            acquired = False
             try:
+                if gate is not None:
+                    await gate.acquire()
+                    acquired = True
                 # Resume gate: an existing file is reused only if it verifies.
                 # Stale truncated/partial files from earlier runs are deleted
                 # and regenerated — previously they were skipped forever,
@@ -741,8 +888,26 @@ async def run_part_jobs(
                     _emit_log(msg_start)
                     _emit_log(f"start Chapter {job.chapter_number:03d} part {job.part_number:03d}/{job.part_count:03d}")
                     _emit_part(job, "fetching")
+                    part_retried = False
+
+                    def _on_retry(_attempt, _err) -> None:
+                        nonlocal part_retried
+                        part_retried = True
+                        if gate is not None:
+                            before = gate.limit
+                            gate.note_retry()
+                            if gate.limit != before:
+                                _emit_log(
+                                    f"parallel: throttling detected, reducing TTS concurrency {before} -> {gate.limit}"
+                                )
+
+                    tts_kwargs: dict = {"retries": retries}
+                    if rate:
+                        tts_kwargs["rate"] = rate
+                    if gate is not None:
+                        tts_kwargs["on_retry"] = _on_retry
                     try:
-                        await tts_text_to_mp3(job.text, job.output_path, voice, retries=retries)
+                        await tts_text_to_mp3(job.text, job.output_path, voice, **tts_kwargs)
                     except asyncio.CancelledError:
                         # cancelled mid-save: drop truncated file so resume heals (H6)
                         try:
@@ -780,6 +945,13 @@ async def run_part_jobs(
                     _emit_log(msg_done)
                     _emit_log(f"done Chapter {job.chapter_number:03d} part {job.part_number:03d}/{job.part_count:03d}")
                     _emit_part(job, "done")
+                    if gate is not None and not part_retried:
+                        before = gate.limit
+                        gate.note_clean_success()
+                        if gate.limit != before:
+                            _emit_log(
+                                f"parallel: stable, increasing TTS concurrency {before} -> {gate.limit}"
+                            )
 
                 async with completed_lock:
                     completed += 1
@@ -792,9 +964,11 @@ async def run_part_jobs(
                         except Exception:
                             pass
             finally:
+                if acquired and gate is not None:
+                    gate.release()
                 queue.task_done()
 
-    workers = [asyncio.create_task(worker(i + 1)) for i in range(parallel)]
+    workers = [asyncio.create_task(worker(i + 1)) for i in range(pool_size)]
 
     try:
         await asyncio.gather(*workers)

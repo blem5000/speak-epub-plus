@@ -2198,6 +2198,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         outputDir_p = params.get("outputDir", params.get("output_dir", params.get("output")))
         urls_p = params.get("urls", params.get("chapterUrls", params.get("chapter_urls")))
         voice_p = params.get("voice", params.get("voiceName"))
+        rate_p = params.get("rate")
         bitrate_p = params.get("audioBitrate", params.get("audio_bitrate", params.get("bitrate")))
         parallel_p = params.get("parallel")
         retries_p = params.get("retries")
@@ -2255,6 +2256,21 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             parallel_p = store_audio.get("parallel", 3) if isinstance(store_audio, dict) else 3
         if retries_p is None:
             retries_p = store_audio.get("retries", 5) if isinstance(store_audio, dict) else 5
+        if rate_p is None:
+            try:
+                rate_p = store_audio.get("rate", "+0%") if isinstance(store_audio, dict) else "+0%"
+            except Exception:
+                rate_p = "+0%"
+        # fail fast on garbage rate (build_audio re-validates via normalize)
+        _rate_m = _re_audio.match(r"^\s*[+-]?\d+%?\s*$", str(rate_p)) if rate_p is not None else None
+        if not _rate_m:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid rate {rate_p}"}}
+        try:
+            _rate_num = int(str(rate_p).strip().rstrip("%"))
+        except Exception:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid rate {rate_p}"}}
+        _rate_num = max(-100, min(100, _rate_num))
+        rate_p = f"{_rate_num:+d}%"
         if chunk_p is None:
             try:
                 chunk_p = (store_audio.get("chunk-size", 3500) if isinstance(store_audio, dict) else 3500)
@@ -2363,6 +2379,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 filters=None,
                 chapter_urls=desired_urls_norm,
                 voice=voice_p,
+                rate=rate_p,
                 parallel=parallel_p,
                 retries=retries_p,
                 chunk_size=chunk_p,

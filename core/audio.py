@@ -277,6 +277,7 @@ def build_audio(
     start_selector: str | None = None,
     end_selector: str | None = None,
     voice: str = "en-US-AndrewNeural",
+    rate: str | None = None,
     parallel: int = 3,
     retries: int = 5,
     chunk_size: int = 3500,
@@ -328,6 +329,16 @@ def build_audio(
     if not isinstance(voice, str) or not voice.strip():
         raise ValueError("voice must be non-empty")
     voice = voice.strip()[:100]
+    if rate is None:
+        try:
+            from core.config import load_store  # dynamic, no cycles
+
+            rate = load_store().get("rate", "+0%")
+        except Exception:
+            rate = "+0%"
+    from core.tts import normalize_tts_rate
+
+    rate = normalize_tts_rate(rate)
     try:
         parallel = max(1, min(6, int(parallel)))  # type: ignore[arg-type]
     except Exception:
@@ -456,6 +467,7 @@ def build_audio(
         await run_part_jobs(
             jobs, voice, parallel, retries,
             on_part_status=on_part_status, on_log=_emit_log, on_progress=on_progress,
+            rate=rate, adaptive=True,
         )
 
     try:

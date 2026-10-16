@@ -68,6 +68,7 @@ from core.tts import split_text_for_tts as _core_split_tts
 from core.tts import build_generation_plan as _core_build_plan
 from core.tts import tts_text_to_mp3 as _core_tts
 from core.tts import run_part_jobs as _core_run
+from core.tts import normalize_tts_rate as _core_norm_rate
 from core.tts import ffmpeg_available as _core_ffmpeg
 from core.tts import ffprobe_available as _core_ffprobe
 from core.tts import concat_mp3_files as _core_concat
@@ -154,9 +155,11 @@ def split_text_for_tts(text: str, max_chars: int = 3500) -> list[str]:
     return _core_split_tts(text, max_chars)
 
 
-async def tts_text_to_mp3(text: str, output_path: str, voice: str, retries: int = 5) -> None:
+async def tts_text_to_mp3(
+    text: str, output_path: str, voice: str, retries: int = 5, rate: str | None = None
+) -> None:
     # Delegates to core/tts.py — single source, no duplication (Story 3.2)
-    return await _core_tts(text, output_path, voice, retries=retries)
+    return await _core_tts(text, output_path, voice, retries=retries, rate=rate)
 
 
 async def list_voices(all_languages: bool = False) -> None:
@@ -200,9 +203,12 @@ def build_generation_plan(chapters: list[Chapter], output_dir: str, chunk_size: 
     return _core_build_plan(chapters, output_dir, chunk_size)
 
 
-async def run_part_jobs(jobs: list[PartJob], voice: str, parallel: int, retries: int) -> None:
-    # Delegates to core/tts.py — single source, no duplication (Story 3.2)
-    return await _core_run(jobs, voice, parallel, retries)
+async def run_part_jobs(
+    jobs: list[PartJob], voice: str, parallel: int, retries: int, rate: str | None = None
+) -> None:
+    # Delegates to core/tts.py — single source, no duplication (Story 3.2).
+    # adaptive=True: concurrency self-tunes (grow on clean streaks, halve on retries).
+    return await _core_run(jobs, voice, parallel, retries, rate=rate, adaptive=True)
 
 
 def finalize_chapter_audio(plans: list[ChapterPlan], keep_parts: bool) -> list[AudioEntry]:
@@ -226,6 +232,7 @@ async def convert(
     parallel: int = 3,
     retries: int = 5,
     bitrate: str = "32k",
+    rate: str = "+0%",
 ) -> None:
     try:
         chapters = extract_chapters(epub_path, start_chapter=start_chapter, end_chapter=end_chapter)
@@ -247,8 +254,9 @@ async def convert(
     print(f"Found {total} chapter(s) in selected range.")
     print(f"Converting with voice: {voice}")
     print(f"Chunk size: {chunk_size} characters")
-    print(f"Parallel TTS part jobs: {parallel}")
+    print(f"Parallel TTS part jobs: {parallel} (auto-tunes 1\u201312 while running)")
     print(f"Retries per part: {retries}")
+    print(f"Speech rate: {_core_norm_rate(rate)}")
     print(f"Output folder: {output_dir}\n")
 
     for chapter_number, title, text in chapters:
@@ -260,7 +268,7 @@ async def convert(
     print(f"\nQueued {len(jobs)} new TTS part job(s).")
 
     try:
-        await run_part_jobs(jobs, voice=voice, parallel=parallel, retries=retries)
+        await run_part_jobs(jobs, voice=voice, parallel=parallel, retries=retries, rate=_core_norm_rate(rate))
     except Exception as e:
         print(f"\nERROR: generation failed: {e}")
         print("Already generated MP3 files are kept. Re-run the same command to resume.")
@@ -293,8 +301,9 @@ def main() -> None:
     parser.add_argument("--end-chapter", type=int, default=None, help="Stop conversion after this extracted chapter number. Default: convert until the end.")
     parser.add_argument("--chunk-size", type=int, default=3500, help="Maximum characters per Edge TTS request. Default: 3500. Lower if you still get truncation.")
     parser.add_argument("--keep-parts", action="store_true", help="Keep temporary part MP3 files after merging.")
-    parser.add_argument("--parallel", type=int, default=3, help="Number of TTS parts to generate at the same time. Recommended: 2 or 3. Default: 3.")
+    parser.add_argument("--parallel", type=int, default=3, help="Starting number of TTS parts generated at the same time (1-6). The pool auto-scales up to 12 while Edge TTS is not throttling, and backs off on retries. Default: 3.")
     parser.add_argument("--retries", type=int, default=5, help="Retries per TTS request/chunk. Default: 5.")
+    parser.add_argument("--rate", default="+0%", help="Speech rate adjustment like +25%% or -10%% (clamped to ±100%%). Default: +0%%.")
     parser.add_argument("--bitrate", default="32k", help="M4B/M4A audio bitrate like 32k (16k-128k, speech default: 32k).")
 
     args = parser.parse_args()
@@ -330,10 +339,14 @@ def main() -> None:
         sys.exit(1)
 
     if args.parallel > 6:
-        print("Warning: high --parallel values may trigger Edge TTS throttling. Recommended: 2 or 3.")
+        print("Warning: --parallel above 6 is clamped to 6 (the adaptive pool can still scale up to 12 on its own).")
 
     if args.retries < 1:
         print("Error: --retries must be at least 1.")
+        sys.exit(1)
+
+    if not re.match(r"^\s*[+-]?\d+%?\s*$", str(args.rate or "")):
+        print("Error: --rate must look like +0%, +25% or -10%.")
         sys.exit(1)
 
     _bitrate_match = re.match(r"^(\d+)\s*k$", (args.bitrate or "").strip(), re.IGNORECASE)
@@ -357,6 +370,7 @@ def main() -> None:
             parallel=args.parallel,
             retries=args.retries,
             bitrate=f"{int(_bitrate_match.group(1))}k",
+            rate=_core_norm_rate(args.rate),
         )
     )
 
