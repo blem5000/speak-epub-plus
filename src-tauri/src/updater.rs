@@ -1,18 +1,21 @@
 //! In-app updater (mirrors the cisco-acl-helper pattern, adapted to Tauri).
 //!
-//! The frontend checks GitHub Releases and downloads the portable ZIP in
-//! base64 chunks over the IPC (progress + cancel live in the webview).
-//! `apply_update` writes a hidden `.bat` that waits for our PID (with a
-//! start-time guard against PID reuse), extracts the ZIP, robocopies it over
-//! the install dir (never touching preserved user files), restarts the exe
-//! and cleans up — then the app exits so its own files can be replaced.
+//! The frontend checks GitHub Releases; the portable ZIP is downloaded by
+//! Rust (`update_download_asset`) — GitHub release assets send no CORS
+//! headers, so a webview fetch always fails with "Failed to fetch".
+//! Progress is emitted as `updateDownloadProgress`, cancel is a flag set by
+//! `update_discard`. `apply_update` writes a hidden `.bat` that waits for our
+//! PID (with a start-time guard against PID reuse), extracts the ZIP,
+//! robocopies it over the install dir (never touching preserved user files),
+//! restarts the exe and cleans up — then the app exits so its own files can
+//! be replaced.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-use base64::Engine as _;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 /// Files in the install dir that must never be overwritten.
 /// (User data lives in Documents\speak-epub and AppData, not the install dir,
@@ -20,7 +23,10 @@ use tauri::{AppHandle, State};
 const PRESERVED_FILES: &[&str] = &[];
 
 #[derive(Default)]
-pub struct UpdateState(pub Mutex<Option<PathBuf>>);
+pub struct UpdateState {
+    pub path: Mutex<Option<PathBuf>>,
+    pub cancel: AtomicBool,
+}
 
 fn sanitize_tag(tag: &str) -> String {
     tag.chars()
@@ -29,45 +35,98 @@ fn sanitize_tag(tag: &str) -> String {
         .collect()
 }
 
-/// Creates the temp file for the pending download and remembers it in state.
-/// The webview never supplies filesystem paths — only this command creates them.
+/// Downloads the portable ZIP asset into a Rust-managed temp file.
+/// Emits `updateDownloadProgress` ({ received, total }); returns bytes written.
+/// The webview never supplies filesystem paths and only release URLs are
+/// accepted. Cancelled (or failed) downloads leave nothing behind.
 #[tauri::command]
-pub fn update_download_path(tag: String, state: State<'_, UpdateState>) -> Result<String, String> {
+pub async fn update_download_asset(
+    app: AppHandle,
+    url: String,
+    tag: String,
+    state: State<'_, UpdateState>,
+) -> Result<u64, String> {
+    if !url.starts_with("https://github.com/") || !url.contains("/releases/download/") {
+        return Err("refusing to download a non-release URL".into());
+    }
     let safe = sanitize_tag(&tag);
     let path = std::env::temp_dir().join(format!(
         "speak_epub_update_{}_{}.zip",
         safe,
         std::process::id()
     ));
-    std::fs::write(&path, b"").map_err(|e| e.to_string())?;
-    *state.0.lock().map_err(|_| "update state poisoned")? = Some(path.clone());
-    Ok(path.to_string_lossy().into_owned())
+    state.cancel.store(false, Ordering::SeqCst);
+    *state.path.lock().map_err(|_| "update state poisoned")? = Some(path.clone());
+
+    let fail = |state: &UpdateState, path: &Path, msg: String| -> String {
+        let _ = std::fs::remove_file(path);
+        if let Ok(mut guard) = state.path.lock() {
+            *guard = None;
+        }
+        msg
+    };
+
+    let client = reqwest::Client::builder()
+        .user_agent("speak-epub-updater")
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| fail(&state, &path, e.to_string()))?;
+    let mut res = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| fail(&state, &path, e.to_string()))?;
+    if !res.status().is_success() {
+        let code = res.status().as_u16();
+        return Err(fail(&state, &path, format!("HTTP {code}")));
+    }
+    let total = res.content_length().unwrap_or(0);
+    let mut file = std::fs::File::create(&path).map_err(|e| fail(&state, &path, e.to_string()))?;
+    let mut received: u64 = 0;
+    let mut last_emit: u64 = 0;
+    loop {
+        if state.cancel.load(Ordering::SeqCst) {
+            drop(file);
+            return Err(fail(&state, &path, "cancelled".into()));
+        }
+        let chunk = match res.chunk().await {
+            Ok(Some(c)) => c,
+            Ok(None) => break,
+            Err(e) => {
+                drop(file);
+                return Err(fail(&state, &path, e.to_string()));
+            }
+        };
+        if let Err(e) = file.write_all(&chunk) {
+            drop(file);
+            return Err(fail(&state, &path, e.to_string()));
+        }
+        received += chunk.len() as u64;
+        if received - last_emit >= 256 * 1024 {
+            last_emit = received;
+            let _ = app.emit(
+                "updateDownloadProgress",
+                serde_json::json!({ "received": received, "total": total }),
+            );
+        }
+    }
+    if let Err(e) = file.flush() {
+        drop(file);
+        return Err(fail(&state, &path, e.to_string()));
+    }
+    let _ = app.emit(
+        "updateDownloadProgress",
+        serde_json::json!({ "received": received, "total": if total > 0 { total } else { received } }),
+    );
+    Ok(received)
 }
 
-/// Appends one base64-encoded chunk; returns bytes written so far.
-#[tauri::command]
-pub fn update_write_chunk(chunk_b64: String, state: State<'_, UpdateState>) -> Result<u64, String> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(chunk_b64.as_bytes())
-        .map_err(|e| e.to_string())?;
-    let path = state
-        .0
-        .lock()
-        .map_err(|_| "update state poisoned")?
-        .clone()
-        .ok_or("no active update download")?;
-    let mut f = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
-    f.write_all(&bytes).map_err(|e| e.to_string())?;
-    std::fs::metadata(&path).map(|m| m.len()).map_err(|e| e.to_string())
-}
-
-/// Drops the pending download (user cancelled or download failed).
+/// Drops the pending download (user cancelled or download failed) and asks
+/// any in-flight Rust download to stop.
 #[tauri::command]
 pub fn update_discard(state: State<'_, UpdateState>) -> Result<(), String> {
-    if let Some(path) = state.0.lock().map_err(|_| "update state poisoned")?.take() {
+    state.cancel.store(true, Ordering::SeqCst);
+    if let Some(path) = state.path.lock().map_err(|_| "update state poisoned")?.take() {
         let _ = std::fs::remove_file(path);
     }
     Ok(())
@@ -77,7 +136,7 @@ pub fn update_discard(state: State<'_, UpdateState>) -> Result<(), String> {
 #[tauri::command]
 pub fn apply_update(app: AppHandle, tag: String, state: State<'_, UpdateState>) -> Result<(), String> {
     let zip = state
-        .0
+        .path
         .lock()
         .map_err(|_| "update state poisoned")?
         .clone()

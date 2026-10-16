@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getStore, setStore } from "@/lib/sidecar";
 
 export const GITHUB_OWNER = "blem5000";
@@ -201,75 +202,45 @@ export function canInstallUpdates(): boolean {
   return import.meta.env.PROD || import.meta.env.MODE === "test";
 }
 
-const CHUNK_FLUSH_BYTES = 512 * 1024;
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let bin = "";
-  const STEP = 0x8000;
-  for (let i = 0; i < bytes.length; i += STEP) {
-    bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + STEP)));
-  }
-  return btoa(bin);
-}
-
 /**
- * Stream the portable ZIP asset into a Rust-managed temp file (base64 chunks).
- * Cancellable via AbortSignal; a failed/aborted download is discarded.
+ * Ask Rust to download the portable ZIP into its temp file (GitHub release
+ * assets send no CORS headers, so a webview fetch always fails). Progress
+ * arrives via the `updateDownloadProgress` event; aborting the signal makes
+ * Rust stop and cleans up the partial file.
  */
 export async function downloadUpdate(
   info: UpdateInfo,
   opts: {
     signal?: AbortSignal;
     onProgress?: (p: DownloadProgress) => void;
-    fetchFn?: typeof fetch;
   } = {}
 ): Promise<{ bytes: number }> {
   if (!info.zipUrl) throw new Error("release has no portable package");
-  const fetchFn = opts.fetchFn ?? globalThis.fetch;
-  await invoke<string>("update_download_path", { tag: info.latest });
+  const unlisten = await listen<DownloadProgress>("updateDownloadProgress", (e) => {
+    opts.onProgress?.(e.payload);
+  });
+  const onAbort = (): void => {
+    void discardUpdate();
+  };
+  opts.signal?.addEventListener("abort", onAbort);
   try {
-    const res = await fetchFn(info.zipUrl, { signal: opts.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const headerTotal = Number(res.headers.get("Content-Length") ?? 0);
-    const total = headerTotal > 0 ? headerTotal : info.zipSize || 0;
-    const reader = res.body?.getReader?.();
-    if (!reader) throw new Error("response has no stream");
-    let received = 0;
-    let buf: Uint8Array[] = [];
-    let bufLen = 0;
-    const flush = async (): Promise<void> => {
-      if (bufLen <= 0) return;
-      const merged = new Uint8Array(bufLen);
-      let off = 0;
-      for (const b of buf) {
-        merged.set(b, off);
-        off += b.length;
-      }
-      await invoke("update_write_chunk", { chunkB64: bytesToBase64(merged) });
-      buf = [];
-      bufLen = 0;
-    };
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value && value.length > 0) {
-        buf.push(value);
-        bufLen += value.length;
-        received += value.length;
-        opts.onProgress?.({ received, total });
-        if (bufLen >= CHUNK_FLUSH_BYTES) await flush();
-      }
-    }
-    await flush();
-    opts.onProgress?.({ received, total: total || received });
-    return { bytes: received };
+    if (opts.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    const bytes = await invoke<number>("update_download_asset", {
+      url: info.zipUrl,
+      tag: info.latest,
+    });
+    return { bytes };
   } catch (err) {
     try {
       await invoke("update_discard");
     } catch {
       // ignore cleanup errors
     }
-    throw err;
+    if (opts.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    throw err instanceof Error ? err : new Error(String(err));
+  } finally {
+    opts.signal?.removeEventListener("abort", onAbort);
+    unlisten();
   }
 }
 

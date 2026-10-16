@@ -372,8 +372,7 @@ pub fn run() {
             python_sidecar_call,
             emit_event,
             cancel_sidecar_job,
-            updater::update_download_path,
-            updater::update_write_chunk,
+            updater::update_download_asset,
             updater::update_discard,
             updater::apply_update
         ])

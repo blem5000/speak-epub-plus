@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   announceUpdateFound,
   canInstallUpdates,
@@ -24,6 +25,7 @@ vi.mock("@/lib/sidecar", () => ({
 const mockedGetStore = vi.mocked(getStore);
 const mockedSetStore = vi.mocked(setStore);
 const mockedInvoke = vi.mocked(invoke);
+const mockedListen = vi.mocked(listen);
 
 function mockFetch(json: unknown, ok = true): typeof fetch {
   return vi.fn().mockResolvedValue({
@@ -51,21 +53,6 @@ const INFO: UpdateInfo = {
   zipUrl: "https://example/portable.zip",
   zipSize: 20,
 };
-
-function streamFetch(chunks: Uint8Array[], total: number): typeof fetch {
-  let i = 0;
-  return vi.fn().mockResolvedValue({
-    ok: true,
-    status: 200,
-    headers: new Headers({ "Content-Length": String(total) }),
-    body: {
-      getReader: () => ({
-        read: () =>
-          Promise.resolve(i < chunks.length ? { done: false, value: chunks[i++] } : { done: true, value: undefined }),
-      }),
-    },
-  }) as unknown as typeof fetch;
-}
 
 describe("updater versions", () => {
   it("normalize strips v and build metadata", () => {
@@ -183,62 +170,77 @@ describe("update found event bus", () => {
 });
 
 describe("downloadUpdate", () => {
+  type ProgressEvent = { payload: { received: number; total: number } };
+
   beforeEach(() => {
     vi.clearAllMocks();
-    mockedInvoke.mockResolvedValue("C:\\tmp\\speak_epub_update_0.3.0.zip" as never);
+    mockedInvoke.mockResolvedValue(undefined as never);
+    mockedListen.mockResolvedValue(() => {});
   });
 
-  it("streams chunks to Rust via base64 and reports final progress", async () => {
-    const a = new Uint8Array([1, 2, 3, 4]);
-    const b = new Uint8Array([5, 6, 7, 8, 9, 10]);
-    const fetchFn = streamFetch([a, b], 10);
+  it("asks Rust to download and forwards progress events", async () => {
+    let progressCb: ((e: ProgressEvent) => void) | undefined;
+    const unlisten = vi.fn();
+    mockedListen.mockImplementation(async (_event, cb) => {
+      progressCb = cb as (e: ProgressEvent) => void;
+      return unlisten;
+    });
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "update_download_asset") {
+        progressCb?.({ payload: { received: 4, total: 10 } });
+        progressCb?.({ payload: { received: 10, total: 10 } });
+        return 10 as never;
+      }
+      return undefined as never;
+    });
     const onProgress = vi.fn();
-    const res = await downloadUpdate(INFO, { fetchFn, onProgress });
+    const res = await downloadUpdate(INFO, { onProgress });
     expect(res.bytes).toBe(10);
-    expect(mockedInvoke).toHaveBeenCalledWith("update_download_path", { tag: "0.3.0" });
-    const writeCalls = mockedInvoke.mock.calls.filter(([cmd]) => cmd === "update_write_chunk");
-    expect(writeCalls).toHaveLength(1);
-    const b64 = (writeCalls[0][1] as { chunkB64: string }).chunkB64;
-    expect(Array.from(Buffer.from(b64, "base64"))).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(mockedListen).toHaveBeenCalledWith("updateDownloadProgress", expect.any(Function));
+    expect(mockedInvoke).toHaveBeenCalledWith("update_download_asset", {
+      url: INFO.zipUrl,
+      tag: "0.3.0",
+    });
+    expect(onProgress).toHaveBeenNthCalledWith(1, { received: 4, total: 10 });
     expect(onProgress).toHaveBeenLastCalledWith({ received: 10, total: 10 });
+    expect(unlisten).toHaveBeenCalled();
+    const discardCalls = mockedInvoke.mock.calls.filter(([cmd]) => cmd === "update_discard");
+    expect(discardCalls).toHaveLength(0);
   });
 
-  it("discards the temp file when the fetch fails", async () => {
-    const fetchFn = vi.fn().mockResolvedValue({ ok: false, status: 500 }) as unknown as typeof fetch;
-    await expect(downloadUpdate(INFO, { fetchFn })).rejects.toThrow("HTTP 500");
+  it("normalizes Rust errors and discards the temp file", async () => {
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "update_download_asset") throw "HTTP 500";
+      return undefined as never;
+    });
+    await expect(downloadUpdate(INFO)).rejects.toThrow("HTTP 500");
     expect(mockedInvoke).toHaveBeenCalledWith("update_discard");
   });
 
-  it("discards on abort and rejects with AbortError", async () => {
-    const fetchFn = vi.fn((_url: string, init?: RequestInit) =>
-      Promise.resolve({
-        ok: true,
-        status: 200,
-        headers: new Headers({}),
-        body: {
-          getReader: () => ({
-            read: () => {
-              const sig = init?.signal;
-              if (sig?.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
-              return new Promise((_res, rej) => {
-                sig?.addEventListener("abort", () =>
-                  rej(new DOMException("Aborted", "AbortError"))
-                );
-              });
-            },
-          }),
-        },
-      })
-    ) as unknown as typeof fetch;
+  it("aborting discards the download and rejects with AbortError", async () => {
+    let rejectAsset: ((e: unknown) => void) | undefined;
+    mockedInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "update_download_asset") {
+        return new Promise((_res, rej) => {
+          rejectAsset = rej;
+        }) as never;
+      }
+      if (cmd === "update_discard") rejectAsset?.("cancelled");
+      return Promise.resolve(undefined) as never;
+    });
     const ac = new AbortController();
-    const p = downloadUpdate(INFO, { fetchFn, signal: ac.signal });
+    const p = downloadUpdate(INFO, { signal: ac.signal });
+    await vi.waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith("update_download_asset", expect.anything());
+    });
     ac.abort();
     await expect(p).rejects.toMatchObject({ name: "AbortError" });
     expect(mockedInvoke).toHaveBeenCalledWith("update_discard");
   });
 
-  it("throws without touching the filesystem when release has no package", async () => {
+  it("throws without touching Rust when the release has no package", async () => {
     await expect(downloadUpdate({ ...INFO, zipUrl: "" })).rejects.toThrow("no portable package");
     expect(mockedInvoke).not.toHaveBeenCalled();
+    expect(mockedListen).not.toHaveBeenCalled();
   });
 });
