@@ -561,12 +561,15 @@ async def tts_text_to_mp3(
       adaptive pool can treat retries as a throttling signal
     - after each save verify_part_audio: invalid file is deleted and the
       attempt counts as failed (empty/partial writes are retried; a
-      "truncated" verdict raises immediately with a --chunk-size hint —
-      Edge cuts overlong requests deterministically so retries can't help)
+      "truncated" verdict triggers the built-in troubleshooter —
+      _autosplit_truncated regenerates the part in halves — and raises
+      only when splitting cannot help, since Edge cuts overlong requests
+      deterministically and retries can't help)
     - wait = min(20, 2*attempt) + asyncio.sleep + log retry {attempt}/{retries-1} for {name}
     - raise RuntimeError after exhausting retries with last_error chained
 
-    Pure Core — no adapters/*, no FFmpeg/epub/filters.
+    Pure Core — no adapters/*, no epub/filters (ffmpeg only for the
+    truncation auto-split concat).
     """
     last_error: Optional[Exception] = None
 
@@ -588,9 +591,17 @@ async def tts_text_to_mp3(
             except Exception:
                 pass
             if reason == "truncated":
+                # built-in troubleshooter: Edge cuts overlong requests
+                # deterministically, so instead of aborting the whole build,
+                # split the part and regenerate it in halves (recursively).
+                if await _autosplit_truncated(
+                    text, output_path, voice, retries, rate, on_retry
+                ):
+                    return
                 raise _TruncatedPartError(
                     f"TTS output truncated for {Path(output_path).name} "
-                    f"({len(text)} chars) — lower --chunk-size (e.g. 2000) and re-run"
+                    f"({len(text)} chars) even after automatic splitting — "
+                    f"try a lower --rate, a different voice, or --chunk-size 2000 and re-run"
                 )
             # non-truncated but invalid (empty/partial/unprobed): reuse the
             # generic retry path below so it gets backoff logging + sleep
@@ -621,6 +632,70 @@ async def tts_text_to_mp3(
                 await asyncio.sleep(wait_seconds)
 
     raise RuntimeError(f"TTS failed after {retries} attempts for {output_path}: {last_error}") from last_error
+
+
+#: Auto-split floor for the truncation troubleshooter: parts at or below
+#: this size are synthesized as-is; persistent truncation below it raises
+#: instead of recursing forever.
+TRUNC_SPLIT_FLOOR = 500
+
+
+async def _autosplit_truncated(
+    text: str,
+    output_path: str,
+    voice: str,
+    retries: int,
+    rate: Optional[str],
+    on_retry: Optional[Callable[[int, Exception], None]],
+) -> bool:
+    """Regenerate a truncated part in halves; True when healed.
+
+    Splits `text`, synthesizes each half via tts_text_to_mp3 (which recurses
+    here if a half truncates too), concatenates the halves over `output_path`,
+    and re-verifies. Returns False when splitting cannot help: text already
+    at/below the floor, unsplittable, ffmpeg unavailable for the concat, or
+    the re-assembled output still does not verify.
+    """
+    name = Path(output_path).name
+    if len(text) <= TRUNC_SPLIT_FLOOR:
+        return False
+    if not ffmpeg_available():
+        return False
+    sub_texts = split_text_for_tts(text, max_chars=max(TRUNC_SPLIT_FLOOR, len(text) // 2))
+    if len(sub_texts) < 2:
+        return False
+    print(
+        f"        truncated {name} ({len(text)} chars) — "
+        f"auto-splitting into {len(sub_texts)} parts and regenerating"
+    )
+    tmp_paths = [f"{output_path}.autosplit{i}.mp3" for i in range(len(sub_texts))]
+    try:
+        for sub_text, tmp in zip(sub_texts, tmp_paths):
+            await tts_text_to_mp3(sub_text, tmp, voice, retries=retries, rate=rate, on_retry=on_retry)
+        concat_mp3_files(tmp_paths, output_path)
+    except Exception as e:
+        print(f"        auto-split regenerate failed for {name}: {e}")
+        try:
+            Path(output_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+    finally:
+        for tmp in tmp_paths:
+            try:
+                Path(tmp).unlink(missing_ok=True)
+            except Exception:
+                pass
+    ok, reason = verify_part_audio(output_path, text, rate=rate)
+    if ok:
+        print(f"        auto-split healed {name}")
+        return True
+    print(f"        auto-split output still invalid ({reason}) for {name}")
+    try:
+        Path(output_path).unlink(missing_ok=True)
+    except Exception:
+        pass
+    return False
 
 
 #: Adaptive pool: +1 worker after this many consecutive clean parts.
@@ -1510,6 +1585,7 @@ __all__ = [
     "EXPECTED_TTS_CPS",
     "MIN_DURATION_RATIO",
     "MIN_TEXT_LEN_FOR_DURATION_CHECK",
+    "TRUNC_SPLIT_FLOOR",
     "verify_part_audio",
     "split_text_for_tts",
     "build_generation_plan",
