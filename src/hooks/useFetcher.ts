@@ -28,7 +28,7 @@ export type UseFetcherReturn = {
   elapsedSec: number;
   badge: string | null;
   error: string | null;
-  start: (params: { urls?: string[]; novelUrl?: string; from?: number | null; to?: number | null }) => Promise<void>;
+  start: (params: { urls?: string[]; novelUrl?: string; from?: number | null; to?: number | null }) => Promise<boolean>;
   abort: () => void;
   setLogs: React.Dispatch<React.SetStateAction<string[]>>;
   setStatuses: React.Dispatch<React.SetStateAction<Record<number, FetcherStatus>>>;
@@ -211,8 +211,8 @@ export function useFetcher(): UseFetcherReturn {
 
       try {
         const res = await callSidecar("fetchChapters", params, { signal: controller.signal });
-        if (id !== callIdRef.current) return;
-        if (controller.signal.aborted) return;
+        if (id !== callIdRef.current) return false;
+        if (controller.signal.aborted) return false;
 
         if ((res as { error?: { code?: string; message?: string } }).error) {
           const err = (res as { error: { code?: string; message?: string } }).error;
@@ -220,18 +220,18 @@ export function useFetcher(): UseFetcherReturn {
           const msg = err?.message ?? code;
           if (code === "ABORTED") {
             // silent cancel, no error toast
-            return;
+            return false;
           }
           if (code === "LOCKED") {
             setError("LOCKED");
             setBadge("Kolejka zablokowana");
             setLogs((prev) => [...prev, "queue locked", `error LOCKED: ${msg}`].slice(-200));
-            return;
+            return false;
           }
           setError(code);
           setLogs((prev) => [...prev, `error ${code}: ${msg}`].slice(-200));
           // set statuses to error for remaining?
-          return;
+          return false;
         }
 
         const data = (res as { result?: unknown }).result;
@@ -356,12 +356,13 @@ export function useFetcher(): UseFetcherReturn {
             return next;
           });
         }
+        return true;
       } catch (e: unknown) {
-        if (id !== callIdRef.current) return;
+        if (id !== callIdRef.current) return false;
         const msg = e instanceof Error ? e.message : String(e);
         const code = (e as { code?: string })?.code;
         if (code === "ABORTED" || msg === "aborted") {
-          return;
+          return false;
         }
         if (msg.includes("VALUE_ERROR") || code === "VALUE_ERROR") {
           setError("VALUE_ERROR");
@@ -373,6 +374,7 @@ export function useFetcher(): UseFetcherReturn {
           setError((code as string) ?? "LIST_FAILED");
           setLogs((prev) => [...prev, `error: ${msg}`].slice(-200));
         }
+        return false;
       } finally {
         if (id === callIdRef.current) {
           setFetching(false);

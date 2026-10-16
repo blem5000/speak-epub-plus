@@ -124,9 +124,9 @@ describe("App 4.4 — state treatments + a11y + platform", () => {
     expect(header).not.toBeNull();
   });
 
-  it("filters window button still present alongside announcer", async () => {
+  it("advanced panel toggle present alongside announcer", async () => {
     render(<App />);
-    expect(await screen.findByTestId("filters-window-button")).toBeInTheDocument();
+    expect(await screen.findByTestId("advanced-toggle")).toBeInTheDocument();
     expect(await screen.findByTestId("surface-announcer")).toBeInTheDocument();
   });
 });

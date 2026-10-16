@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { t } from "@/i18n";
 import {
   buildAudio,
@@ -25,9 +25,21 @@ type AudiobookProps = {
   progress: { done: number; total: number; percent: number };
   onClearParts: () => void;
   onBuildingChange?: (building: boolean) => void;
+  /** Wizard mode: hide format radios + build/stop buttons (advanced panel
+   *  owns the format; the wizard owns the single Start/Stop). */
+  showControls?: boolean;
+  /** Controlled format (advanced radios); when set, internal radios are ignored. */
+  format?: AudioFormat;
+  outputDir?: string;
 };
 
-type AudioFormat = "mp3" | "m4b" | "m4a";
+/** Imperative API for the App orchestrator (single Start button). */
+export type AudiobookHandle = {
+  start: (formatOverride?: AudioFormat) => Promise<void>;
+  stop: () => void;
+};
+
+export type AudioFormat = "mp3" | "m4b" | "m4a";
 
 function humanSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -50,7 +62,7 @@ const FORMAT_LABEL = {
   m4a: "audio.formatM4A",
 } as const;
 
-export default function Audiobook({
+const Audiobook = forwardRef<AudiobookHandle, AudiobookProps>(function Audiobook({
   novelUrl,
   from,
   to,
@@ -61,8 +73,13 @@ export default function Audiobook({
   progress,
   onClearParts,
   onBuildingChange,
-}: AudiobookProps): JSX.Element {
-  const [format, setFormat] = useState<AudioFormat>("m4b");
+  showControls = true,
+  format: formatProp,
+  outputDir,
+}: AudiobookProps, ref): JSX.Element {
+  const [formatState, setFormatState] = useState<AudioFormat>("m4b");
+  const format = formatProp ?? formatState;
+  const setFormat = setFormatState;
   const [summary, setSummary] = useState<string>("");
   const [building, setBuilding] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -160,8 +177,10 @@ export default function Audiobook({
 
   const canBuild = canStart && !fetching && !building && urls.length > 0;
 
-  const handleBuild = async (): Promise<void> => {
+  const handleBuild = async (formatOverride?: AudioFormat): Promise<void> => {
     if (!canBuild || !novelUrl) return;
+    const fmt = formatOverride ?? format;
+    if (formatOverride && formatProp === undefined) setFormatState(formatOverride);
     onClearParts();
     startRef.current = Date.now();
     mergeStartRef.current = null;
@@ -174,7 +193,10 @@ export default function Audiobook({
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const res = await buildAudio({ novelUrl, from, to, title, urls, format }, { signal: controller.signal });
+      const res = await buildAudio(
+        { novelUrl, from, to, title, urls, format: fmt, outputDir: outputDir || undefined },
+        { signal: controller.signal }
+      );
       if (res.error) {
         const code = res.error.code;
         const msg = res.error.message;
@@ -217,6 +239,12 @@ export default function Audiobook({
     void cancelSidecarJob([...CANCEL_METHODS_AUDIO]);
   };
 
+  // Imperative API for the App orchestrator (wizard Start / Stop).
+  useImperativeHandle(ref, () => ({
+    start: (formatOverride?: AudioFormat) => handleBuild(formatOverride),
+    stop: () => handleStop(),
+  }));
+
   const openTarget = result?.audiobook?.path ?? result?.audio_dir ?? null;
 
   return (
@@ -236,44 +264,50 @@ export default function Audiobook({
 
       {summary ? <p className="mt-1 text-body-sm text-muted-foreground">{summary}</p> : null}
 
-      <div className="mt-4 flex flex-wrap items-center gap-2" role="radiogroup" aria-label={t("audio.format")}>
-        {(["mp3", "m4b", "m4a"] as const).map((f) => (
-          <button
-            key={f}
-            type="button"
-            role="radio"
-            aria-checked={format === f}
-            data-testid={`audio-format-${f}`}
-            onClick={() => setFormat(f)}
-            disabled={building}
-            className={`rounded-md border px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 ${
-              format === f ? "border-accent bg-accent/15 text-foreground" : "bg-card"
-            }`}
-          >
-            {t(FORMAT_LABEL[f])}
-          </button>
-        ))}
-      </div>
+      {showControls ? (
+        <div className="mt-4 flex flex-wrap items-center gap-2" role="radiogroup" aria-label={t("audio.format")}>
+          {(["mp3", "m4b", "m4a"] as const).map((f) => (
+            <button
+              key={f}
+              type="button"
+              role="radio"
+              aria-checked={format === f}
+              data-testid={`audio-format-${f}`}
+              onClick={() => setFormat(f)}
+              disabled={building}
+              className={`rounded-md border px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 ${
+                format === f ? "border-accent bg-accent/15 text-foreground" : "bg-card"
+              }`}
+            >
+              {t(FORMAT_LABEL[f])}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          data-testid="audio-build"
-          onClick={() => void handleBuild()}
-          disabled={!canBuild}
-          className="rounded-md bg-accent px-4 py-2 text-body font-medium text-accent-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          {building ? t("audio.building") : t("audio.build")}
-        </button>
-        {building ? (
-          <button
-            type="button"
-            data-testid="audio-stop"
-            onClick={handleStop}
-            className="rounded-md border border-destructive/40 bg-card px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            {t("audio.stop")}
-          </button>
+        {showControls ? (
+          <>
+            <button
+              type="button"
+              data-testid="audio-build"
+              onClick={() => void handleBuild()}
+              disabled={!canBuild}
+              className="rounded-md bg-accent px-4 py-2 text-body font-medium text-accent-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {building ? t("audio.building") : t("audio.build")}
+            </button>
+            {building ? (
+              <button
+                type="button"
+                data-testid="audio-stop"
+                onClick={handleStop}
+                className="rounded-md border border-destructive/40 bg-card px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {t("audio.stop")}
+              </button>
+            ) : null}
+          </>
         ) : null}
         {building && !inMerge && !inMultiplex && !inProbing ? (
           <ProgressTrack done={progress.done} total={progress.total} />
@@ -425,4 +459,6 @@ export default function Audiobook({
       ) : null}
     </section>
   );
-}
+});
+
+export default Audiobook;

@@ -6,6 +6,12 @@ import { getCurrentVersion, manualCheck } from "@/lib/updater";
 type SettingsProps = {
   open: boolean;
   onClose: () => void;
+  /**
+   * "modal" (default) — overlay dialog opened from the header gear.
+   * "inline" — same form embedded in the page (Advanced panel); loads on
+   * mount, no overlay, no focus trap, Esc does not close.
+   */
+  variant?: "modal" | "inline";
 };
 
 const VOICE_OPTIONS = [
@@ -19,7 +25,7 @@ const BITRATE_OPTIONS = ["32k", "48k", "64k", "96k"];
 
 const PRESET_DELAYS = [3000, 4000, 5000] as const;
 
-export default function Settings({ open, onClose }: SettingsProps): JSX.Element | null {
+export default function Settings({ open, onClose, variant = "modal" }: SettingsProps): JSX.Element | null {
   const dialogRef = useRef<HTMLDivElement>(null);
   const firstFocusableRef = useRef<HTMLElement | null>(null);
   const [loading, setLoading] = useState(true);
@@ -55,9 +61,9 @@ export default function Settings({ open, onClose }: SettingsProps): JSX.Element 
     toastTimerRef.current = window.setTimeout(() => setToast(null), 1500) as unknown as number;
   };
 
-  // load on open
+  // load on open (inline variant loads on mount)
   useEffect(() => {
-    if (!open) return;
+    if (variant !== "inline" && !open) return;
     let alive = true;
     setLoading(true);
     (async () => {
@@ -156,11 +162,11 @@ export default function Settings({ open, onClose }: SettingsProps): JSX.Element 
       }
     })();
     return () => { alive = false; };
-  }, [open]);
+  }, [open, variant]);
 
-  // focus trap + Esc + auto focus
+  // focus trap + Esc + auto focus (modal only)
   useEffect(() => {
-    if (!open) return;
+    if (variant === "inline" || !open) return;
     const dialog = dialogRef.current;
     if (!dialog) return;
     // focus first focusable
@@ -202,7 +208,7 @@ export default function Settings({ open, onClose }: SettingsProps): JSX.Element 
     };
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
-  }, [open, onClose]);
+  }, [open, onClose, variant]);
 
   useEffect(() => {
     return () => {
@@ -519,42 +525,13 @@ export default function Settings({ open, onClose }: SettingsProps): JSX.Element 
     })();
   };
 
-  if (!open) return null;
+  if (variant !== "inline" && !open) return null;
 
   const rateSliderValue = Math.max(-50, Math.min(50, rateNum));
+  const isInline = variant === "inline";
 
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      role="presentation"
-      onClick={onClose}
-      data-testid="settings-overlay"
-    >
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" aria-hidden="true" />
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-label={t("settings.title") as string}
-        data-testid="settings-dialog"
-        tabIndex={-1}
-        className="relative max-h-[90vh] w-full max-w-[560px] overflow-auto rounded-lg border bg-card shadow-lg focus-visible:outline-none"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="sticky top-0 flex items-center justify-between border-b bg-card px-6 py-4">
-          <h2 className="text-heading font-semibold">{t("settings.title")}</h2>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={t("settings.title") as string}
-            className="rounded-md p-2 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            data-testid="settings-close"
-          >
-            ×
-          </button>
-        </div>
-
-        <div className="space-y-4 p-6">
+  const body = (
+    <div className={isInline ? "space-y-4" : "space-y-4 p-6"}>
           {loading ? (
             <p className="text-body-sm text-muted-foreground">...</p>
           ) : (
@@ -861,19 +838,62 @@ export default function Settings({ open, onClose }: SettingsProps): JSX.Element 
               </section>
             </>
           )}
-        </div>
+    </div>
+  );
 
-        {toast ? (
-          <div
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
-            data-testid="settings-toast"
-            className="fixed bottom-4 left-1/2 -translate-x-1/2 rounded-md bg-card border shadow-lg px-4 py-2 text-body-sm"
+  const toastNode = toast ? (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      data-testid="settings-toast"
+      className="fixed bottom-4 left-1/2 -translate-x-1/2 rounded-md bg-card border shadow-lg px-4 py-2 text-body-sm"
+    >
+      {toast}
+    </div>
+  ) : null;
+
+  if (isInline) {
+    return (
+      <section data-testid="settings-inline" aria-label={t("settings.title") as string}>
+        {body}
+        {toastNode}
+      </section>
+    );
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      role="presentation"
+      onClick={onClose}
+      data-testid="settings-overlay"
+    >
+      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" aria-hidden="true" />
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("settings.title") as string}
+        data-testid="settings-dialog"
+        tabIndex={-1}
+        className="relative max-h-[90vh] w-full max-w-[560px] overflow-auto rounded-lg border bg-card shadow-lg focus-visible:outline-none"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sticky top-0 flex items-center justify-between border-b bg-card px-6 py-4">
+          <h2 className="text-heading font-semibold">{t("settings.title")}</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={t("settings.title") as string}
+            className="rounded-md p-2 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            data-testid="settings-close"
           >
-            {toast}
-          </div>
-        ) : null}
+            ×
+          </button>
+        </div>
+        {body}
+        {toastNode}
       </div>
     </div>
   );

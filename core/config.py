@@ -50,6 +50,7 @@ DEFAULT_STORE: Dict[str, Any] = {
     "keepEPUB": True,
     "keepMP3": True,
     "keepM4B": True,
+    "outputDir": "",
     "filters": [],
     "autoBoilerplate": True,
     "audioBitrate": "32k",
@@ -2439,6 +2440,8 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     return "keepMP3"
                 if low in ("keepm4b", "keep_m4b"):
                     return "keepM4B"
+                if low in ("outputdir", "output_dir", "output-dir"):
+                    return "outputDir"
                 if low in ("updateauto", "update_auto"):
                     return "updateAuto"
                 if low in ("updateskipped", "update_skipped"):
@@ -2456,7 +2459,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     return "autoBoilerplate"
                 if k in ("audioBitrate", "audio_bitrate", "audio-bitrate"):
                     return "audioBitrate"
-                if k in ("keepEPUB", "keepMP3", "keepM4B", "voice", "rate", "parallel", "retries", "filters", "scrapeDelay", "safeMode"):
+                if k in ("keepEPUB", "keepMP3", "keepM4B", "outputDir", "voice", "rate", "parallel", "retries", "filters", "scrapeDelay", "safeMode"):
                     return k
                 # fallback: if lower matches known without case, map to canonical case
                 # voice/rate etc lower is same
@@ -2552,6 +2555,15 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     sanitized[ck] = f"{int(m.group(1))}k"
                 elif ck in ("keepEPUB", "keepMP3", "keepM4B"):
                     sanitized[ck] = _to_bool_store(v)
+                elif ck == "outputDir":
+                    if not isinstance(v, str):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "outputDir must be string"}}
+                    vv = v.strip()
+                    if len(vv) > 260:
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "outputDir too long"}}
+                    if ".." in vv or "\0" in vv:
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "outputDir invalid"}}
+                    sanitized[ck] = vv
                 elif ck == "updateAuto":
                     sanitized[ck] = _to_bool_store(v)
                 elif ck == "updateSkipped":

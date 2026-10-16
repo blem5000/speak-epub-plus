@@ -1,19 +1,19 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { t, getLocale, setLocale } from "./i18n";
-import { buildEpub, callSidecar, getStore, isEpubResult, setStore, type EpubResult } from "./lib/sidecar";
+import { buildEpub, callSidecar, cancelSidecarJob, getStore, isEpubResult, setStore, type EpubResult } from "./lib/sidecar";
 import FindInput from "./components/FindInput";
 import ResultsTable from "./components/ResultsTable";
 import ChapterList from "./components/ChapterList";
 import Preview from "./components/Preview";
 import Filters from "./components/Filters";
-import FiltersWindow from "./components/FiltersWindow";
 import Result from "./components/Result";
-import Audiobook from "./components/Audiobook";
+import Audiobook, { type AudioFormat, type AudiobookHandle } from "./components/Audiobook";
 import UpdaterBanner from "./components/UpdaterBanner";
 import Queue from "./components/Queue";
 import ThrottleBadge from "./components/ThrottleBadge";
 import ProgressTrack from "./components/ProgressTrack";
 import Settings from "./components/Settings";
+import RangeBar from "./components/RangeBar";
 import { useChapterList } from "./hooks/useChapterList";
 import { useDebouncedSearch } from "./hooks/useDebouncedSearch";
 import { useFetcher } from "./hooks/useFetcher";
@@ -22,8 +22,6 @@ import { selectedUrlsForFetch as urlsForFetch } from "./lib/selection";
 
 export default function App(): JSX.Element {
   const [locale, setLocaleState] = useState(getLocale());
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [filtersWindowOpen, setFiltersWindowOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selectedUrl, setSelectedUrl] = useState<string | null>(null);
   const ctaRef = useRef<HTMLButtonElement>(null);
@@ -65,18 +63,21 @@ export default function App(): JSX.Element {
     };
   }, []);
 
-  // Restore persisted UI locale from Core on mount ("" = auto-detect from system)
+  // Restore persisted UI locale + outputDir from Core on mount ("" = auto-detect)
   useEffect(() => {
     let alive = true;
     void (async () => {
       try {
         const res = await getStore();
         if (!alive) return;
-        const saved = (res?.result as Record<string, unknown> | undefined)?.locale;
+        const result = res?.result as Record<string, unknown> | undefined;
+        const saved = result?.locale;
         if (saved === "en" || saved === "pl") {
           setLocale(saved);
           setLocaleState(saved);
         }
+        const savedDir = result?.outputDir;
+        if (typeof savedDir === "string" && savedDir.trim()) setOutputDir(savedDir.trim());
       } catch {
         // silent — falls back to system detection
       }
@@ -215,16 +216,8 @@ export default function App(): JSX.Element {
       setPreviewIdx(null);
       return true;
     }
-    if (filtersWindowOpen) {
-      setFiltersWindowOpen(false);
-      return true;
-    }
-    if (settingsOpen) {
-      setSettingsOpen(false);
-      return true;
-    }
     return false;
-  }, [previewIdx, filtersWindowOpen, settingsOpen]);
+  }, [previewIdx]);
   useGlobalKeys(closeTopModal);
   const previewChapter = previewIdx != null ? chapterList.find((c) => c.index === previewIdx) ?? null : null;
 
@@ -260,7 +253,22 @@ export default function App(): JSX.Element {
   const [epubMissing, setEpubMissing] = useState<string[] | null>(null);
   // Audiobook build (Step 7) — shares the fetcher event bus for part progress
   const [audioBuilding, setAudioBuilding] = useState(false);
+  // Wizard (single Start = fetch → build selected targets)
+  const [epubWanted, setEpubWanted] = useState(true);
+  const [audioWanted, setAudioWanted] = useState(true);
+  const [audioFormat, setAudioFormat] = useState<AudioFormat>("m4b");
+  const [outputDir, setOutputDir] = useState<string>("");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [epubTouched, setEpubTouched] = useState(false);
+  const [audioTouched, setAudioTouched] = useState(false);
+  const [phase, setPhase] = useState<"idle" | "fetching" | "epub" | "audio">("idle");
+  const [pickerToast, setPickerToast] = useState<string | null>(null);
+  const audiobookRef = useRef<AudiobookHandle>(null);
+  const epubAbortRef = useRef<AbortController | null>(null);
+  const epubStopRef = useRef(false);
   const logPaneRef = useRef<HTMLDivElement>(null);
+  // One job at a time: fetch → epub → audio (wizard orchestration)
+  const jobRunning = fetching || epubBuilding || audioBuilding;
 
   // auto-scroll log pane when logs change (reuse queue logic) — preserve for Result pane, Queue handles its own
   useEffect(() => {
@@ -289,119 +297,214 @@ export default function App(): JSX.Element {
     });
   };
 
+  // Native folder picker (tauri-plugin-dialog) — persisted as store.outputDir
+  const handlePickFolder = async (): Promise<void> => {
+    try {
+      const mod = await import("@tauri-apps/plugin-dialog");
+      const picked = await mod.open({
+        directory: true,
+        multiple: false,
+        title: t("wizard.pickFolder") as string,
+        defaultPath: outputDir || undefined,
+      });
+      if (typeof picked !== "string" || !picked.trim()) return;
+      const dir = picked.trim();
+      setOutputDir(dir);
+      void setStore({ outputDir: dir }).catch(() => {
+        if (import.meta.env.DEV) console.warn("outputDir persist failed");
+      });
+    } catch (e) {
+      setPickerToast(e instanceof Error ? e.message : String(e));
+      window.setTimeout(() => setPickerToast(null), 4000);
+    }
+  };
+
   // EPUB build — Story 2.4
   const selectedResult = results.find((r) => r.url === selectedUrl) ?? null;
   const buildTitle = selectedResult?.title ?? chapterList[0]?.title ?? "book";
   const buildAuthor = (selectedResult as unknown as { author?: string })?.author ?? null;
-  const canBuild = !!(hasSelectedUrl && !chapterLoading && N > 0 && !fetching && !epubBuilding);
+  const canBuild = !!(hasSelectedUrl && !chapterLoading && N > 0 && !jobRunning);
 
-  const handleBuildEpub = useCallback(async (): Promise<void> => {
-    if (!canBuild) return;
-    const urls = selectedUrlsForFetch;
-    if (urls.length === 0) return;
-    setEpubBuilding(true);
-    setEpubError(null);
-    setEpubMissing(null);
-    // mark cleaning for each chapter in range
-    const fromC = Math.max(1, Math.min(from, N));
-    const toC = Math.max(1, Math.min(to, N));
-    const lo = Math.min(fromC, toC);
-    const hi = Math.max(fromC, toC);
-    // set all in range to cleaning — only existing indices
-    setStatuses((prev) => {
-      const next = { ...prev };
-      const existing = new Set(chapterList.map((c) => c.index));
-      for (let i = lo; i <= hi; i++) {
-        if (!existing.has(i)) continue;
-        if (selectedUrlsForFetch.some((u) => chapterList.find((c) => c.url === u && c.index === i))) {
-          next[i] = "cleaning";
-        } else if (selected.size === 0) {
-          next[i] = "cleaning";
+  const handleBuildEpub = useCallback(
+    async (urlsOverride?: string[], loOverride?: number, hiOverride?: number): Promise<boolean> => {
+      const urls = urlsOverride ?? selectedUrlsForFetch;
+      if (urls.length === 0) return false;
+      if (!hasSelectedUrl || chapterLoading || N === 0) return false;
+      if (!urlsOverride && jobRunning) return false;
+      setEpubTouched(true);
+      setEpubBuilding(true);
+      setEpubError(null);
+      setEpubMissing(null);
+      epubStopRef.current = false;
+      const controller = new AbortController();
+      epubAbortRef.current = controller;
+      // mark cleaning for each chapter in range
+      const fromC = Math.max(1, Math.min(loOverride ?? from, N));
+      const toC = Math.max(1, Math.min(hiOverride ?? to, N));
+      const lo = Math.min(fromC, toC);
+      const hi = Math.max(fromC, toC);
+      // set all in range to cleaning — only existing indices
+      setStatuses((prev) => {
+        const next = { ...prev };
+        const existing = new Set(chapterList.map((c) => c.index));
+        for (let i = lo; i <= hi; i++) {
+          if (!existing.has(i)) continue;
+          if (urls.some((u) => chapterList.find((c) => c.url === u && c.index === i))) {
+            next[i] = "cleaning";
+          } else if (selected.size === 0) {
+            next[i] = "cleaning";
+          }
         }
-      }
-      return next;
-    });
-    appendLogs([`building epub ${lo}->${hi}`, `cleaning chapter ${lo}`]);
-    try {
-      const res = await buildEpub({
-        novelUrl: selectedUrl ?? "",
-        from: lo,
-        to: hi,
-        title: buildTitle,
-        author: buildAuthor ?? undefined,
-        coverUrl: chapterCover ?? undefined,
-        urls,
+        return next;
       });
-      if (res.error) {
-        const code = res.error.code;
-        const msg = res.error.message;
-        if (code === "CACHE_MISS") {
-          const missing = (res.error as unknown as { missing?: string[] }).missing ?? [];
-          setEpubMissing(missing);
-          setEpubError(`CACHE_MISS: ${msg}`);
-          const missLogs = missing.length > 0 ? missing.map((m) => `cache miss ${m}`) : [`cache miss ${msg}`];
-          appendLogs([...missLogs, `CACHE_MISS ${msg}`]);
-          // mark missing as error with per-chapter granularity
+      appendLogs([`building epub ${lo}->${hi}`, `cleaning chapter ${lo}`]);
+      try {
+        const res = await buildEpub(
+          {
+            novelUrl: selectedUrl ?? "",
+            from: lo,
+            to: hi,
+            title: buildTitle,
+            author: buildAuthor ?? undefined,
+            coverUrl: chapterCover ?? undefined,
+            urls,
+            outputDir: outputDir || undefined,
+          },
+          { signal: controller.signal }
+        );
+        if (res.error) {
+          const code = res.error.code;
+          const msg = res.error.message;
+          // User pressed Stop — detached UI, backend process killed. Not an error.
+          if (code === "ABORTED" || epubStopRef.current) return false;
+          if (code === "CACHE_MISS") {
+            const missing = (res.error as unknown as { missing?: string[] }).missing ?? [];
+            setEpubMissing(missing);
+            setEpubError(`CACHE_MISS: ${msg}`);
+            const missLogs = missing.length > 0 ? missing.map((m) => `cache miss ${m}`) : [`cache miss ${msg}`];
+            appendLogs([...missLogs, `CACHE_MISS ${msg}`]);
+            // mark missing as error with per-chapter granularity
+            setStatuses((prev) => {
+              const next = { ...prev };
+              const urlToIdx = new Map<string, number>();
+              for (const ch of chapterList) urlToIdx.set(ch.url, ch.index);
+              let anyMatched = false;
+              for (const mu of missing) {
+                const idx = urlToIdx.get(mu);
+                if (idx !== undefined && next[idx] === "cleaning") {
+                  next[idx] = "error";
+                  anyMatched = true;
+                }
+              }
+              if (!anyMatched) {
+                for (let i = lo; i <= hi; i++) {
+                  if (next[i] === "cleaning") next[i] = "error";
+                }
+              }
+              return next;
+            });
+            return false;
+          } else if (code === "VALUE_ERROR") {
+            setEpubError(`VALUE_ERROR: ${msg}`);
+            appendLogs([`VALUE_ERROR ${msg}`]);
+            return false;
+          } else {
+            setEpubError(`${code}: ${msg}`);
+            appendLogs([`error ${code}: ${msg}`]);
+            return false;
+          }
+        }
+        if (isEpubResult(res)) {
+          const data = res.result as unknown as EpubResult;
+          setEpubResult(data);
+          setEpubError(null);
+          // map cleaning->done for built range — only existing
           setStatuses((prev) => {
             const next = { ...prev };
-            const urlToIdx = new Map<string, number>();
-            for (const ch of chapterList) urlToIdx.set(ch.url, ch.index);
-            let anyMatched = false;
-            for (const mu of missing) {
-              const idx = urlToIdx.get(mu);
-              if (idx !== undefined && next[idx] === "cleaning") {
-                next[idx] = "error";
-                anyMatched = true;
-              }
-            }
-            if (!anyMatched) {
-              for (let i = lo; i <= hi; i++) {
-                if (next[i] === "cleaning") next[i] = "error";
-              }
+            const existing = new Set(chapterList.map((c) => c.index));
+            for (let i = lo; i <= hi; i++) {
+              if (!existing.has(i)) continue;
+              next[i] = "done";
             }
             return next;
           });
-        } else if (code === "VALUE_ERROR") {
-          setEpubError(`VALUE_ERROR: ${msg}`);
-          appendLogs([`VALUE_ERROR ${msg}`]);
-        } else {
-          setEpubError(`${code}: ${msg}`);
-          appendLogs([`error ${code}: ${msg}`]);
+          const logLines = (data.logs as string[] | undefined) ?? [];
+          if (logLines.length > 0) appendLogs(logLines);
+          else appendLogs([`epub built ${data.path}`, `epubcheck ${data.epubcheck_ok ? "✓" : "✗"}`]);
+          // also log epubcheck
+          if (Array.isArray(data.messages) && data.messages.length > 0) {
+            appendLogs(data.messages.map((m) => `epubcheck ${m}`));
+          }
+          return true;
         }
+        setEpubError("unknown epub result");
+        return false;
+      } catch (e) {
+        if (epubStopRef.current) return false;
+        const msg = e instanceof Error ? e.message : String(e);
+        setEpubError(msg);
+        appendLogs([`epub error ${msg}`]);
+        return false;
+      } finally {
+        epubStopRef.current = false;
+        epubAbortRef.current = null;
+        setEpubBuilding(false);
+      }
+    },
+    [hasSelectedUrl, chapterLoading, N, jobRunning, selectedUrl, from, to, buildTitle, buildAuthor, chapterCover, selectedUrlsForFetch, chapterList, selected.size, appendLogs, setStatuses, outputDir]
+  );
+
+  // Wizard orchestrator — one Start: fetch → EPUB (if wanted) → audio (if wanted)
+  const handleStartJob = async (rangeFrom?: number, rangeTo?: number): Promise<void> => {
+    if (!hasSelectedUrl || chapterLoading || N === 0 || jobRunning) return;
+    if (!epubWanted && !audioWanted) return;
+    const rf = rangeFrom ?? from;
+    const rt = rangeTo ?? to;
+    const urls = urlsForFetch(chapterList, selected, rf, rt);
+    if (urls.length === 0) return;
+    const clampOne = (v: number, fallback: number): number =>
+      Number.isFinite(v) ? Math.max(1, Math.min(Math.trunc(v), N)) : fallback;
+    const lo = clampOne(rf, 1);
+    const hi = clampOne(rt, N);
+    // Mount the Audiobook section early so its imperative ref exists by the
+    // time the audio phase starts (it is the builder for audio results).
+    if (audioWanted) setAudioTouched(true);
+    setPhase("fetching");
+    const okFetch = await startFetcher({ urls, novelUrl: selectedUrl ?? undefined, from: lo, to: hi });
+    if (!okFetch) {
+      setPhase("idle");
+      return;
+    }
+    if (epubWanted) {
+      setPhase("epub");
+      const okEpub = await handleBuildEpub(urls, lo, hi);
+      if (!okEpub) {
+        setPhase("idle");
         return;
       }
-      if (isEpubResult(res)) {
-        const data = res.result as unknown as EpubResult;
-        setEpubResult(data);
-        setEpubError(null);
-        // map cleaning->done for built range — only existing
-        setStatuses((prev) => {
-          const next = { ...prev };
-          const existing = new Set(chapterList.map((c) => c.index));
-          for (let i = lo; i <= hi; i++) {
-            if (!existing.has(i)) continue;
-            next[i] = "done";
-          }
-          return next;
-        });
-        const logLines = (data.logs as string[] | undefined) ?? [];
-        if (logLines.length > 0) appendLogs(logLines);
-        else appendLogs([`epub built ${data.path}`, `epubcheck ${data.epubcheck_ok ? "✓" : "✗"}`]);
-        // also log epubcheck
-        if (Array.isArray(data.messages) && data.messages.length > 0) {
-          appendLogs(data.messages.map((m) => `epubcheck ${m}`));
-        }
-      } else {
-        setEpubError("unknown epub result");
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setEpubError(msg);
-      appendLogs([`epub error ${msg}`]);
-    } finally {
-      setEpubBuilding(false);
     }
-  }, [canBuild, selectedUrl, from, to, buildTitle, buildAuthor, chapterCover, selectedUrlsForFetch, N, chapterList, selected.size, appendLogs, setStatuses]);
+    if (audioWanted) {
+      setPhase("audio");
+      // one macrotask so React flushes pending renders — the imperative ref
+      // must point at a render where fetching/epubBuilding are already false
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      await audiobookRef.current?.start(audioFormat);
+    }
+    setPhase("idle");
+  };
+
+  const handleStopAll = (): void => {
+    if (fetching) abortFetcher();
+    if (epubBuilding || epubAbortRef.current) {
+      epubStopRef.current = true;
+      epubAbortRef.current?.abort();
+      epubAbortRef.current = null;
+    }
+    audiobookRef.current?.stop();
+    // belt & braces — kill every cancelable sidecar job (fetch/epub/audio)
+    void cancelSidecarJob();
+    setPhase("idle");
+  };
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -421,26 +524,6 @@ export default function App(): JSX.Element {
             </p>
           </div>
           <div className="flex items-center gap-2" style={{ WebkitAppRegion: "no-drag" } as unknown as React.CSSProperties}>
-            <button
-              type="button"
-              data-testid="filters-window-button"
-              aria-label={(t("filters.title") as string) || "Filters"}
-              title={(t("filters.title") as string) || "Filters"}
-              onClick={() => setFiltersWindowOpen(true)}
-              className="rounded-md border bg-card px-3 py-1.5 text-body-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              ♢
-            </button>
-            <button
-              type="button"
-              data-testid="settings-gear"
-              aria-label={(t("settings.gear") as string) || "Settings"}
-              title={(t("settings.gear") as string) || "Settings"}
-              onClick={() => setSettingsOpen(true)}
-              className="rounded-md border bg-card px-3 py-1.5 text-body-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              ⚙
-            </button>
             <button
               type="button"
               onClick={toggleLocale}
@@ -504,8 +587,6 @@ export default function App(): JSX.Element {
             </div>
           ) : null;
         })()}
-        <Settings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-        <FiltersWindow open={filtersWindowOpen} onClose={() => setFiltersWindowOpen(false)} />
         <UpdaterBanner />
 
         {/* Find surface — FindInput + ResultsTable per spec 1.3 */}
@@ -596,114 +677,93 @@ export default function App(): JSX.Element {
               {t("toast.searchFailed")}: {error}
             </div>
           ) : null}
-        </section>
 
-        {/* Chapter List surface — spec 1.4 */}
-        {hasSelectedUrl ? (
-          <section className="mt-6 rounded-lg border bg-card p-6 shadow-sm" aria-label={t("chapterList.title")}>
-            <div className="flex items-start justify-between gap-4">
-              <h2 className="text-heading font-semibold">{t("chapterList.title")}</h2>
-              {chapterCover ? (
-                <img
-                  src={chapterCover}
-                  alt="Cover"
-                  loading="lazy"
-                  onError={(e) => {
-                    (e.currentTarget as HTMLImageElement).style.display = "none";
-                  }}
-                  className="h-12 w-8 rounded object-cover border"
-                  data-testid="chapter-cover"
-                />
+          {/* Wizard: range → targets → destination → single Start (fetch + build) */}
+          {hasSelectedUrl && chapterLoading ? (
+            <p className="mt-4 text-body-sm text-muted-foreground" data-testid="wizard-chapter-loading" role="status" aria-live="polite">
+              {t("wizard.chapterLoading")}
+            </p>
+          ) : null}
+          {hasSelectedUrl && !chapterLoading ? (
+            <div className="mt-6 space-y-3 border-t pt-4" data-testid="wizard-options">
+              <RangeBar
+                from={from}
+                to={to}
+                total={N}
+                selectedCount={selected.size}
+                busy={jobRunning}
+                onChangeRange={handleRangeChange}
+                onStartRange={(rf, rt) => void handleStartJob(rf, rt)}
+                startLabel={t("wizard.start")}
+              />
+              <div className="flex flex-wrap items-center gap-4 text-body-sm">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={epubWanted}
+                    onChange={(e) => setEpubWanted(e.target.checked)}
+                    data-testid="wizard-want-epub"
+                    className="h-4 w-4 rounded border-input"
+                  />
+                  <span>{t("wizard.wantEpub")}</span>
+                </label>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={audioWanted}
+                    onChange={(e) => setAudioWanted(e.target.checked)}
+                    data-testid="wizard-want-audio"
+                    className="h-4 w-4 rounded border-input"
+                  />
+                  <span>{t("wizard.wantAudio")}</span>
+                </label>
+                {!epubWanted && !audioWanted ? (
+                  <span className="text-destructive" role="alert" data-testid="wizard-no-targets">
+                    {t("wizard.noTargets")}
+                  </span>
+                ) : null}
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-body-sm">
+                <span className="text-muted-foreground">{t("wizard.outputLabel")}:</span>
+                <span className="mono break-all text-mono" data-testid="wizard-output-dir">
+                  {outputDir || t("wizard.outputDefault")}
+                </span>
+                <button
+                  type="button"
+                  data-testid="wizard-pick-folder"
+                  onClick={() => void handlePickFolder()}
+                  className="rounded-md border bg-card px-3 py-1 text-body-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {t("wizard.pickFolder")}
+                </button>
+              </div>
+              {pickerToast ? (
+                <div role="alert" className="text-body-sm text-destructive" data-testid="wizard-picker-error">
+                  {pickerToast}
+                </div>
+              ) : null}
+              {jobRunning ? (
+                <div className="flex flex-wrap items-center gap-3" data-testid="wizard-progress">
+                  <button
+                    type="button"
+                    data-testid="wizard-stop"
+                    onClick={handleStopAll}
+                    className="rounded-md border border-destructive/40 bg-card px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    {t("wizard.stop")}
+                  </button>
+                  {phase !== "idle" ? (
+                    <span data-testid="wizard-phase" className="text-body-sm text-muted-foreground" role="status" aria-live="polite">
+                      {t(`wizard.phase.${phase}`)}
+                    </span>
+                  ) : null}
+                </div>
               ) : null}
             </div>
-            {/* aria-live for selection changes */}
-            <div className="sr-only" aria-live="polite" aria-atomic="true" data-testid="selection-live">
-              {t("chapterList.selected", { count: selected.size, total: chapterList.length })}
-            </div>
+          ) : null}
+        </section>
 
-            {/* loading skeleton 6 rows */}
-            {showChapterSkeleton ? (
-              <div className="mt-4" role="status" aria-busy="true" aria-live="polite" data-testid="chapter-skeleton">
-                <p className="mb-2 text-body-sm text-muted-foreground">{t("chapterList.loading")}</p>
-                <div className="overflow-hidden rounded-lg border">
-                  <div className="sticky top-0 border-b bg-card px-4 py-2 text-body-sm font-semibold text-muted-foreground">
-                    <div className="grid grid-cols-3 gap-2">
-                      <span>✓</span>
-                      <span>#</span>
-                      <span>{t("chapterList.title")}</span>
-                    </div>
-                  </div>
-                  <div className="divide-y">
-                    {[0, 1, 2, 3, 4, 5].map((i) => (
-                      <div key={i} className="grid grid-cols-3 gap-2 px-4 py-3">
-                        <div className="h-4 animate-pulse rounded bg-muted" />
-                        <div className="h-4 animate-pulse rounded bg-muted" />
-                        <div className="h-4 animate-pulse rounded bg-muted" />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            ) : null}
-
-            {/* error empty state */}
-            {showChapterError ? (
-              <div className="mt-4 space-y-3">
-                <div
-                  role="alert"
-                  aria-live="assertive"
-                  className="rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-body-sm text-destructive"
-                >
-                  {t(chapterError === "VALUE_ERROR" ? "chapterList.errorValue" : "chapterList.errorList", { defaultValue: t("toast.searchFailed") })}:{" "}
-                  {chapterError}
-                </div>
-                <div className="rounded-lg border border-dashed bg-card p-6 text-center">
-                  <p className="text-body font-semibold">{t("chapterList.empty")}</p>
-                  <button
-                    ref={retryRef}
-                    type="button"
-                    onClick={() => {
-                      const url = selectedUrl;
-                      if (typeof window === "undefined") return;
-                      if (retryTimeoutRef.current) window.clearTimeout(retryTimeoutRef.current);
-                      setSelectedUrl(null);
-                      retryTimeoutRef.current = window.setTimeout(() => setSelectedUrl(url), 0);
-                    }}
-                    className="mt-3 rounded-md bg-accent px-4 py-2 text-body font-medium text-accent-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    {t("chapterList.retry")}
-                  </button>
-                </div>
-              </div>
-            ) : null}
-
-            {/* actual list */}
-            {showChapterList ? (
-              <div className="mt-4">
-                <ChapterList
-                  chapters={chapterList}
-                  selected={selected}
-                  from={from}
-                  to={to}
-                  anchor={anchor}
-                  busy={fetching || audioBuilding}
-                  onSelectedChange={setSelected}
-                  onRangeChange={handleRangeChange}
-                  onAnchorChange={setAnchor}
-                  onStartFetch={handleStartFetchRange}
-                  onPreview={handlePreview}
-                />
-              </div>
-            ) : null}
-
-            {/* empty list but no error — still show Brak listy if needed */}
-            {showChapterEmpty ? (
-              <div className="mt-4 rounded-lg border border-dashed bg-card p-6 text-center" role="status" aria-live="polite">
-                <p className="text-body font-semibold">{t("chapterList.empty")}</p>
-              </div>
-            ) : null}
-          </section>
-        ) : null}
+        {/* Chapter list + detail moved into the Advanced panel below */}
 
         {/* Fetcher Queue — AD-6 live bus, expanded per-chapter + per-part (Story 4.1) */}
         {hasSelectedUrl && !chapterLoading ? (
@@ -741,40 +801,201 @@ export default function App(): JSX.Element {
           </>
         ) : null}
 
-        {/* Result — Story 2.4 EPUB assembly + epubcheck */}
-        <div className="mt-6">
-          <Result
-            result={epubResult}
-            building={epubBuilding}
-            error={epubError}
-            missing={epubMissing}
-            canBuild={canBuild}
-            onBuild={() => void handleBuildEpub()}
-            from={from}
-            to={to}
-          />
-        </div>
+        {/* Result — Story 2.4 EPUB assembly + epubcheck (shown once started) */}
+        {epubTouched || epubBuilding || epubResult || epubError ? (
+          <div className="mt-6">
+            <Result
+              result={epubResult}
+              building={epubBuilding}
+              error={epubError}
+              missing={epubMissing}
+              canBuild={canBuild}
+              onBuild={() => void handleBuildEpub()}
+              from={from}
+              to={to}
+            />
+          </div>
+        ) : null}
 
         {/* Audiobook — Step 7: MP3/M4B/M4A from the same fetched cache */}
-        <div className="mt-6">
-          <Audiobook
-            novelUrl={selectedUrl}
-            from={from}
-            to={to}
-            title={buildTitle}
-            urls={selectedUrlsForFetch}
-            canStart={!!(hasSelectedUrl && !chapterLoading && N > 0)}
-            fetching={fetching || epubBuilding}
-            progress={progress}
-            onClearParts={() => setPartStatuses({})}
-            onBuildingChange={setAudioBuilding}
-          />
-        </div>
+        {audioTouched || audioBuilding ? (
+          <div className="mt-6">
+            <Audiobook
+              ref={audiobookRef}
+              novelUrl={selectedUrl}
+              from={from}
+              to={to}
+              title={buildTitle}
+              urls={selectedUrlsForFetch}
+              canStart={!!(hasSelectedUrl && !chapterLoading && N > 0)}
+              fetching={fetching || epubBuilding}
+              progress={progress}
+              onClearParts={() => setPartStatuses({})}
+              onBuildingChange={setAudioBuilding}
+              showControls={false}
+              format={audioFormat}
+              outputDir={outputDir}
+            />
+          </div>
+        ) : null}
 
-        {/* Filters — Story 2.3 plain+regex gate */}
-        <div className="mt-6">
-          <Filters />
-        </div>
+        {/* Advanced — power options behind a collapsible arrow */}
+        <section
+          className="mt-6 rounded-lg border bg-card shadow-sm"
+          aria-label={t("wizard.advanced") as string}
+          data-testid="advanced-section"
+        >
+          <button
+            type="button"
+            data-testid="advanced-toggle"
+            aria-expanded={advancedOpen}
+            onClick={() => setAdvancedOpen((v) => !v)}
+            className="flex w-full items-center justify-between rounded-lg px-6 py-4 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <span className="text-heading font-semibold">{t("wizard.advanced")}</span>
+            <span aria-hidden="true" className="text-muted-foreground">
+              {advancedOpen ? "▾" : "▸"}
+            </span>
+          </button>
+          {advancedOpen ? (
+            <div className="space-y-6 border-t px-6 py-4" data-testid="advanced-content">
+              {/* Audiobook format (consumed by the wizard Start) */}
+              <div className="flex flex-wrap items-center gap-2" role="radiogroup" aria-label={t("wizard.formatLabel") as string}>
+                <span className="text-body-sm font-medium">{t("wizard.formatLabel")}:</span>
+                {(["mp3", "m4b", "m4a"] as const).map((f) => (
+                  <button
+                    key={f}
+                    type="button"
+                    role="radio"
+                    aria-checked={audioFormat === f}
+                    data-testid={`wizard-format-${f}`}
+                    onClick={() => setAudioFormat(f)}
+                    className={`rounded-md border px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                      audioFormat === f ? "border-accent bg-accent/15 text-foreground" : "bg-card"
+                    }`}
+                  >
+                    {t(f === "mp3" ? "audio.formatMP3" : f === "m4b" ? "audio.formatM4B" : "audio.formatM4A")}
+                  </button>
+                ))}
+              </div>
+
+              {/* Settings form (same store keys as the modal variant) */}
+              <Settings open={advancedOpen} onClose={() => {}} variant="inline" />
+
+              {/* Filters — Story 2.3 plain+regex gate */}
+              <Filters />
+
+              {/* Chapter detail — spec 1.4 */}
+              {hasSelectedUrl ? (
+                <div data-testid="advanced-chapters" className="rounded-lg border bg-card p-6 shadow-sm">
+                  <div className="flex items-start justify-between gap-4">
+                    <h3 className="text-heading font-semibold">{t("chapterList.title")}</h3>
+                    {chapterCover ? (
+                      <img
+                        src={chapterCover}
+                        alt="Cover"
+                        loading="lazy"
+                        onError={(e) => {
+                          (e.currentTarget as HTMLImageElement).style.display = "none";
+                        }}
+                        className="h-12 w-8 rounded object-cover border"
+                        data-testid="chapter-cover"
+                      />
+                    ) : null}
+                  </div>
+                  {/* aria-live for selection changes */}
+                  <div className="sr-only" aria-live="polite" aria-atomic="true" data-testid="selection-live">
+                    {t("chapterList.selected", { count: selected.size, total: chapterList.length })}
+                  </div>
+
+                  {/* loading skeleton 6 rows */}
+                  {showChapterSkeleton ? (
+                    <div className="mt-4" role="status" aria-busy="true" aria-live="polite" data-testid="chapter-skeleton">
+                      <p className="mb-2 text-body-sm text-muted-foreground">{t("chapterList.loading")}</p>
+                      <div className="overflow-hidden rounded-lg border">
+                        <div className="sticky top-0 border-b bg-card px-4 py-2 text-body-sm font-semibold text-muted-foreground">
+                          <div className="grid grid-cols-3 gap-2">
+                            <span>✓</span>
+                            <span>#</span>
+                            <span>{t("chapterList.title")}</span>
+                          </div>
+                        </div>
+                        <div className="divide-y">
+                          {[0, 1, 2, 3, 4, 5].map((i) => (
+                            <div key={i} className="grid grid-cols-3 gap-2 px-4 py-3">
+                              <div className="h-4 animate-pulse rounded bg-muted" />
+                              <div className="h-4 animate-pulse rounded bg-muted" />
+                              <div className="h-4 animate-pulse rounded bg-muted" />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {/* error empty state */}
+                  {showChapterError ? (
+                    <div className="mt-4 space-y-3">
+                      <div
+                        role="alert"
+                        aria-live="assertive"
+                        className="rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-body-sm text-destructive"
+                      >
+                        {t(chapterError === "VALUE_ERROR" ? "chapterList.errorValue" : "chapterList.errorList", { defaultValue: t("toast.searchFailed") })}:{" "}
+                        {chapterError}
+                      </div>
+                      <div className="rounded-lg border border-dashed bg-card p-6 text-center">
+                        <p className="text-body font-semibold">{t("chapterList.empty")}</p>
+                        <button
+                          ref={retryRef}
+                          type="button"
+                          onClick={() => {
+                            const url = selectedUrl;
+                            if (typeof window === "undefined") return;
+                            if (retryTimeoutRef.current) window.clearTimeout(retryTimeoutRef.current);
+                            setSelectedUrl(null);
+                            retryTimeoutRef.current = window.setTimeout(() => setSelectedUrl(url), 0);
+                          }}
+                          className="mt-3 rounded-md bg-accent px-4 py-2 text-body font-medium text-accent-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          {t("chapterList.retry")}
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {/* actual list */}
+                  {showChapterList ? (
+                    <div className="mt-4">
+                      <ChapterList
+                        chapters={chapterList}
+                        selected={selected}
+                        from={from}
+                        to={to}
+                        anchor={anchor}
+                        busy={fetching || audioBuilding}
+                        onSelectedChange={setSelected}
+                        onRangeChange={handleRangeChange}
+                        onAnchorChange={setAnchor}
+                        onStartFetch={handleStartFetchRange}
+                        onPreview={handlePreview}
+                        hideRangeBar={true}
+                      />
+                    </div>
+                  ) : null}
+
+                  {/* empty list but no error — still show Brak listy if needed */}
+                  {showChapterEmpty ? (
+                    <div className="mt-4 rounded-lg border border-dashed bg-card p-6 text-center" role="status" aria-live="polite">
+                      <p className="text-body font-semibold">{t("chapterList.empty")}</p>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+
          {previewChapter ? (
            <Preview
              open={previewIdx != null}

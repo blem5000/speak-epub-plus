@@ -27,6 +27,7 @@ def test_getStore_defaults(tmp_path, monkeypatch):
     assert data["keepEPUB"] == DEFAULT_STORE["keepEPUB"]
     assert data["keepMP3"] == DEFAULT_STORE["keepMP3"]
     assert data["keepM4B"] == DEFAULT_STORE["keepM4B"]
+    assert data["outputDir"] == DEFAULT_STORE["outputDir"]
 
 
 def test_setStore_voice_trim(tmp_path, monkeypatch):
@@ -304,3 +305,32 @@ def test_setStore_locale(tmp_path, monkeypatch):
     assert r8["result"]["locale"] == "pl"
     r9 = handle_rpc({"id": "9", "method": "getStore", "params": {}})
     assert r9["result"]["locale"] == "pl"
+
+
+def test_setStore_outputDir(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    r = handle_rpc({"id": "1", "method": "getStore", "params": {}})
+    # "" = use backend default (./output next to the app / user base fallback)
+    assert r["result"]["outputDir"] == ""
+    r2 = handle_rpc({"id": "2", "method": "setStore", "params": {"outputDir": "  D:\\Books\\Audio  "}})
+    assert r2["result"]["outputDir"] == "D:\\Books\\Audio"
+    # snake_case alias
+    r3 = handle_rpc({"id": "3", "method": "setStore", "params": {"output_dir": "C:/books"}})
+    assert r3["result"]["outputDir"] == "C:/books"
+    # empty resets to default
+    r4 = handle_rpc({"id": "4", "method": "setStore", "params": {"outputDir": ""}})
+    assert r4["result"]["outputDir"] == ""
+    # rejects traversal + NUL + non-string + overlong
+    r5 = handle_rpc({"id": "5", "method": "setStore", "params": {"outputDir": "..\\evil"}})
+    assert r5["error"]["code"] == "VALUE_ERROR"
+    r6 = handle_rpc({"id": "6", "method": "setStore", "params": {"outputDir": "a\0b"}})
+    assert r6["error"]["code"] == "VALUE_ERROR"
+    r7 = handle_rpc({"id": "7", "method": "setStore", "params": {"outputDir": 3}})
+    assert r7["error"]["code"] == "VALUE_ERROR"
+    r8 = handle_rpc({"id": "8", "method": "setStore", "params": {"outputDir": "a" * 261}})
+    assert r8["error"]["code"] == "VALUE_ERROR"
+    # persistence roundtrip
+    r9 = handle_rpc({"id": "9", "method": "setStore", "params": {"outputDir": "D:\\Books"}})
+    assert r9["result"]["outputDir"] == "D:\\Books"
+    r10 = handle_rpc({"id": "10", "method": "getStore", "params": {}})
+    assert r10["result"]["outputDir"] == "D:\\Books"

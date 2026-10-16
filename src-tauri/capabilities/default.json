@@ -17,6 +17,7 @@
     "store:allow-save",
     "opener:default",
     "opener:allow-reveal-item-in-dir",
+    "dialog:default",
     {
       "identifier": "opener:allow-open-path",
       "allow": [

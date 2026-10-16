@@ -13,6 +13,8 @@ type RangeBarProps = {
   // always uses what is in the fields (no stale-closure after typing).
   // Start both selects the range and begins fetching it.
   onStartRange: (from: number, to: number) => void;
+  /** Wizard mode: override the Start button label (e.g. "Download & build"). */
+  startLabel?: string;
 };
 
 export default function RangeBar({
@@ -23,6 +25,7 @@ export default function RangeBar({
   busy,
   onChangeRange,
   onStartRange,
+  startLabel,
 }: RangeBarProps): JSX.Element {
   const N = total;
   const disabled = N === 0 || busy;
@@ -201,7 +204,7 @@ export default function RangeBar({
           aria-disabled={disabled}
           className="rounded-md bg-accent px-4 py-2 text-body font-medium text-accent-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {busy ? t("range.starting") : t("range.start")}
+          {busy ? t("range.starting") : startLabel ?? t("range.start")}
         </button>
       </div>
 

@@ -16,6 +16,9 @@ type ChapterListProps = {
   onAnchorChange: (anchor: number | null) => void;
   onStartFetch: (from: number, to: number) => void;
   onPreview?: (index: number) => void;
+  /** Advanced mode: the range fields + Start live in the wizard above, so the
+   *  embedded RangeBar is hidden; the detail table + expand toggle stay. */
+  hideRangeBar?: boolean;
 };
 
 export default function ChapterList({
@@ -30,6 +33,7 @@ export default function ChapterList({
   onAnchorChange,
   onStartFetch,
   onPreview,
+  hideRangeBar = false,
 }: ChapterListProps): JSX.Element {
   const N = chapters.length;
   const [focusedIndex, setFocusedIndex] = useState<number>(0);
@@ -148,15 +152,17 @@ export default function ChapterList({
       aria-roledescription="chapter list"
     >
       <div className="border-b bg-card px-4 py-3">
-        <RangeBar
-          from={from}
-          to={to}
-          total={total}
-          selectedCount={selectedCount}
-          busy={busy}
-          onChangeRange={onRangeChange}
-          onStartRange={handleStartRange}
-        />
+        {hideRangeBar ? null : (
+          <RangeBar
+            from={from}
+            to={to}
+            total={total}
+            selectedCount={selectedCount}
+            busy={busy}
+            onChangeRange={onRangeChange}
+            onStartRange={handleStartRange}
+          />
+        )}
         <button
           type="button"
           data-testid="chapter-list-toggle"

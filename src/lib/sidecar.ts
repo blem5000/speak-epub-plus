@@ -445,8 +445,8 @@ export async function buildEpub(
   if (params.outputDir) {
     const od = String(params.outputDir).trim();
     if (od.includes("..") || od.includes("\0")) throw new Error("outputDir invalid");
-    if (/^[a-zA-Z]:[\\/]/.test(od) || od.startsWith("\\\\")) throw new Error("outputDir must be relative");
-    if (od.startsWith("/") || od.startsWith("~")) throw new Error("outputDir must be relative");
+    // Absolute paths are allowed (native folder picker); the backend
+    // resolve_output_dir creates them and surfaces real errors.
     payload.outputDir = od;
   }
   if (params.urls) {
@@ -483,6 +483,7 @@ export type AudioParams = {
   retries?: number;
   chunkSize?: number;
   format?: string;
+  outputDir?: string | null;
 };
 export type AudioChapter = { number: number; title: string; path: string };
 export type AudioResult = {
@@ -532,12 +533,18 @@ export async function buildAudio(params: AudioParams, opts?: { signal?: AbortSig
     if (f !== "mp3" && f !== "m4b" && f !== "m4a") throw new Error("format must be mp3, m4b or m4a");
     payload.format = f;
   }
+  if (params.outputDir) {
+    const od = String(params.outputDir).trim();
+    if (od.includes("..") || od.includes("\0")) throw new Error("outputDir invalid");
+    payload.outputDir = od;
+  }
   return callSidecar("buildAudio", payload, opts);
 }
 
 /** RPC method names the GUI can hard-stop (must match Rust CANCELABLE_METHODS). */
 export const CANCEL_METHODS_AUDIO = ["buildAudio", "build_audio", "buildAudiobook"];
 export const CANCEL_METHODS_FETCH = ["fetchChapters"];
+export const CANCEL_METHODS_EPUB = ["buildEpub", "build_epub"];
 
 /**
  * Hard-stop running backend jobs (Stop buttons). Kills the Python sidecar
@@ -582,6 +589,7 @@ export async function revealPath(path: string): Promise<void> {
  * - `scrapeDelay` / `scrape_delay` int 0-20000 (preset 3000/4000/5000/custom)
  * - `safeMode` / `safe_mode` bool
  * - `keepEPUB` / `keepMP3` / `keepM4B` bool
+ * - `outputDir` / `output_dir` string ≤260 ("" = backend default; no `..`/NUL)
  * Persist via atomic `.tmp` replace — no polling, no direct frontend file write.
  */
 export async function getStore(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
