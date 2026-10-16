@@ -165,3 +165,9 @@
 
 - [Review][Defer] runTtsJobs (legacy RPC) nie przekazuje rate/engine/local_voice/adaptive do run_part_jobs [core/config.py:1026-1045] — deferred, pre-existing — brak konsumenta w src/ i testach; podłączyć, gdy GUI zacznie używać tego wejścia.
 
+
+## Deferred from: code review round 2 (2026-10-16)
+
+- [Review][Defer] Zmiana --rate nie regeneruje istniejących MP3 (rate nie jest częścią tożsamości resume) [core/tts.py:build_generation_plan] — deferred — wymaga decyzji produktowej: auto-regeneracja vs flaga vs pliki per-rate.
+- [Review][Defer] mkdir output swallow w tts_text_to_mp3_local (pre-existing pattern) [core/tts_local.py] — deferred, pre-existing — błąd uprawnień powierzchnią później; nie ruszane w tej rundzie.
+

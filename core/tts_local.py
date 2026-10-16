@@ -17,6 +17,7 @@ Design notes:
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import wave
@@ -48,6 +49,11 @@ DEFAULT_LOCAL_VOICE = "en_US-lessac-medium"
 #: none, and a stalled connection would block the sequential sidecar RPC
 #: loop forever.
 _DOWNLOAD_TIMEOUT_SEC = 30
+
+#: Overall deadline (s) for a single voice-file download: the socket timeout
+#: above fires per read, but a trickling connection could otherwise stall
+#: just under it forever.
+_DOWNLOAD_TOTAL_TIMEOUT_SEC = 600
 
 #: Progress logLines are emitted every this many bytes during download (the
 #: only download telemetry until the UI subscribes to progress events).
@@ -136,11 +142,12 @@ def list_local_voices() -> Dict[str, Any]:
 def download_local_voice(voice: Any, on_log: Optional[Callable[[str], None]] = None, force: bool = False) -> Dict[str, Any]:
     """Download a curated voice into the models dir; returns its status dict.
 
-    Downloads stream with a socket timeout into a staging directory and are
-    published atomically (os.replace), so an interrupted download can never
-    leave a partial .onnx that `local_voice_ready` would accept as installed.
-    `force=True` deletes existing files first (escape hatch for models that
-    are present but corrupt).
+    Downloads stream with a socket timeout (plus an overall deadline) into a
+    staging directory and are published atomically (os.replace), so an
+    interrupted download can never leave a partial .onnx that
+    `local_voice_ready` would accept as installed. `force=True` re-downloads
+    even when files are present; the old files stay in place until the staged
+    replacements publish, so a failed re-download never leaves no voice.
     """
 
     def _log(msg: str) -> None:
@@ -164,22 +171,33 @@ def download_local_voice(voice: Any, on_log: Optional[Callable[[str], None]] = N
     if local_voice_ready(name) and not force:
         _log(f"local voice {name} already downloaded")
     else:
-        if force:
-            for _p in (onnx, cfg):
-                try:
-                    _p.unlink(missing_ok=True)
-                except Exception:
-                    pass
         size_mb = LOCAL_VOICES[name]["size_mb"]
         _log(f"downloading local voice {name} (~{size_mb} MB)...")
         model_url, config_url = _voice_download_urls(name)
-        staging = root / f".staging-{name}-{os.getpid()}"
+        # drop orphaned staging dirs from crashed earlier runs (same voice)
+        for _stale in root.glob(f".staging-{name}-*"):
+            try:
+                if _stale.is_dir():
+                    shutil.rmtree(_stale, ignore_errors=True)
+                else:
+                    _stale.unlink(missing_ok=True)
+            except Exception:
+                pass
+        staging = Path(tempfile.mkdtemp(prefix=f".staging-{name}-", dir=str(root)))
         try:
-            staging.mkdir(parents=True, exist_ok=True)
             _fetch_to_file(model_url, staging / onnx.name, name, _log)
             _fetch_to_file(config_url, staging / cfg.name, name, _log)
             os.replace(staging / onnx.name, onnx)
-            os.replace(staging / cfg.name, cfg)
+            try:
+                os.replace(staging / cfg.name, cfg)
+            except Exception:
+                # never leave a mixed new-onnx/old-config pair behind: it
+                # would pass the ready check and fail only at synthesis
+                try:
+                    onnx.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
         except Exception as e:
             raise RuntimeError(f"failed to download local voice {name}: {e}") from e
         finally:
@@ -197,7 +215,12 @@ def download_local_voice(voice: Any, on_log: Optional[Callable[[str], None]] = N
 
 def _voice_download_urls(voice: str) -> tuple[str, str]:
     """Resolve (.onnx, .onnx.json) URLs from piper's official URL_FORMAT."""
-    from piper.download_voices import URL_FORMAT, VOICE_PATTERN
+    try:
+        from piper.download_voices import URL_FORMAT, VOICE_PATTERN
+    except ImportError as e:
+        raise RuntimeError(
+            f"incompatible piper-tts version: cannot resolve voice download URLs ({e})"
+        ) from e
 
     m = VOICE_PATTERN.match(voice.strip())
     if not m:
@@ -215,24 +238,36 @@ def _voice_download_urls(voice: str) -> tuple[str, str]:
 
 
 def _fetch_to_file(url: str, dest_tmp: Path, label: str, log_fn: Callable[[str], None]) -> None:
-    """Stream a URL to a temp file with a socket timeout, logging progress."""
+    """Stream a URL to a temp file with timeouts, logging progress.
+
+    Raises RuntimeError on network errors, overall-deadline expiry, empty
+    responses, and short bodies (declared Content-Length unmet) — a truncated
+    download must never be mistaken for a complete voice file.
+    """
     import urllib.request
 
     req = urllib.request.Request(url, headers={"User-Agent": "speak-epub/1.0"})
     done = 0
+    total: Optional[int] = None
     next_mark = _DOWNLOAD_PROGRESS_EVERY
+    started = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=_DOWNLOAD_TIMEOUT_SEC) as resp:
             try:
-                total = resp.headers.get("Content-Length")
+                _length = resp.headers.get("Content-Length")
+                total = int(_length) if _length else None
             except Exception:
                 total = None
             try:
-                total_mb = int(total) // (1024 * 1024) if total else None
+                total_mb = total // (1024 * 1024) if total else None
             except Exception:
                 total_mb = None
             with open(dest_tmp, "wb") as f:
                 while True:
+                    if time.monotonic() - started > _DOWNLOAD_TOTAL_TIMEOUT_SEC:
+                        raise RuntimeError(
+                            f"download timed out after {_DOWNLOAD_TOTAL_TIMEOUT_SEC}s for {label}"
+                        )
                     chunk = resp.read(256 * 1024)
                     if not chunk:
                         break
@@ -254,6 +289,14 @@ def _fetch_to_file(url: str, dest_tmp: Path, label: str, log_fn: Callable[[str],
         except Exception:
             pass
         raise RuntimeError(f"download failed for {label}: empty response")
+    if total is not None and done < total:
+        try:
+            dest_tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"download failed for {label}: incomplete body ({done} of {total} bytes)"
+        )
 
 
 def _local_unavailable_message(voice: str) -> str:

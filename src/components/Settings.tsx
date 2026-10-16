@@ -413,11 +413,25 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
   };
 
   const handleDownloadLocalVoice = async (): Promise<void> => {
+    await runLocalVoiceDownload(false);
+  };
+
+  const handleRedownloadLocalVoice = async (): Promise<void> => {
+    await runLocalVoiceDownload(true);
+  };
+
+  const runLocalVoiceDownload = async (force: boolean): Promise<void> => {
+    if (!piperAvailable) {
+      setLocalMsg(t("settings.engine.noPiper") as string);
+      return;
+    }
     const target = localVoice || defaultLocalVoice;
     setLocalBusy(true);
     setLocalMsg(t("settings.localVoice.downloading") as string);
     try {
-      const res = await downloadLocalVoice(target);
+      const res = force
+        ? await downloadLocalVoice(target, { force: true })
+        : await downloadLocalVoice(target);
       if (res.error) {
         const err = res.error as { code?: string; message?: string };
         const code = typeof err.code === "string" ? err.code : "";
@@ -427,7 +441,9 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
             : code === "VALUE_ERROR"
               ? (t("settings.localVoice.invalidVoice") as string)
               : null;
-        setLocalMsg(prefix ? `${prefix}: ${String(err.message ?? res.error)}` : String(err.message ?? res.error));
+        const detail =
+          typeof err.message === "string" && err.message ? err.message : JSON.stringify(res.error);
+        setLocalMsg(prefix ? `${prefix}: ${detail}` : detail);
       } else {
         setLocalMsg(t("settings.localVoice.downloaded") as string);
         showToast(t("settings.localVoice.downloaded") as string);
@@ -773,6 +789,16 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                       className="h-9 rounded-md border border-input bg-card px-3 text-body hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       {localBusy ? t("settings.localVoice.downloading") : t("settings.localVoice.download")}
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="settings-local-redownload"
+                      disabled={localBusy || !piperAvailable}
+                      onClick={() => void handleRedownloadLocalVoice()}
+                      title={t("settings.localVoice.redownloadTitle") as string}
+                      className="h-9 rounded-md border border-input bg-card px-3 text-body hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {t("settings.localVoice.redownload")}
                     </button>
                     <span data-testid="settings-local-status" className="text-body-sm text-muted-foreground">
                       {localMsg || (localVoiceList.find((v) => v.id === (localVoice || defaultLocalVoice))?.downloaded

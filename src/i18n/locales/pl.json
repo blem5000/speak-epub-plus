@@ -87,6 +87,8 @@
   "settings.localVoice.loadError": "Nie można załadować listy głosów",
   "settings.localVoice.downloadFailed": "Pobieranie nie powiodło się",
   "settings.localVoice.invalidVoice": "Nieprawidłowy głos",
+  "settings.localVoice.redownload": "Pobierz ponownie",
+  "settings.localVoice.redownloadTitle": "Pobierz jeszcze raz (naprawia obecny, ale uszkodzony model)",
   "settings.helper.retries": "Liczba prób na fragment TTS (1\u201310).",
   "settings.helper.scrapeDelay": "Opóźnienie między pobraniami (preset lub własne ms, 0\u201320000).",
   "settings.helper.safeMode": "Tryb bezpieczny dodaje opóźnienie po 429.",

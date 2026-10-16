@@ -196,6 +196,26 @@ describe("Settings 4.2 — form + persist + i18n", () => {
     expect(screen.getByTestId("settings-local-status").textContent).toContain("net down");
   });
 
+  it("redownload passes force:true to the backend", async () => {
+    render(<Settings open={true} onClose={vi.fn()} />);
+    await waitFor(() => expect(mockLocalVoices).toHaveBeenCalled());
+    fireEvent.click(screen.getByTestId("settings-local-redownload"));
+    await waitFor(() =>
+      expect(mockDownloadLocalVoice).toHaveBeenCalledWith("en_US-lessac-medium", { force: true })
+    );
+  });
+
+  it("messageless backend error renders JSON, never [object Object]", async () => {
+    mockDownloadLocalVoice.mockResolvedValueOnce({ id: "1", error: { code: "WEIRD" } });
+    render(<Settings open={true} onClose={vi.fn()} />);
+    await waitFor(() => expect(mockLocalVoices).toHaveBeenCalled());
+    fireEvent.click(screen.getByTestId("settings-local-download"));
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-local-status").textContent).toContain("WEIRD")
+    );
+    expect(screen.getByTestId("settings-local-status").textContent).not.toContain("[object Object]");
+  });
+
   it("onBlur parallel 3→2 calls setStore and toast Zapisano", async () => {    const user = userEvent.setup();
     render(<Settings open={true} onClose={vi.fn()} />);
     await waitFor(() => expect(mockGetStore).toHaveBeenCalled());

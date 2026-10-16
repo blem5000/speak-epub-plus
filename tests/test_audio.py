@@ -399,6 +399,31 @@ class TestBuildAudioRpc:
                           "params": {"voice": "pl_PL-darkman-medium"}})
         assert res["error"]["code"] == "DOWNLOAD_FAILED"
 
+    def test_rpc_download_force_flag_parsing(self, tmp_path, monkeypatch):
+        # review cr2r: explicit force:false must not mask forceRedownload:true,
+        # and the string "false" must not coerce to True
+        monkeypatch.setenv("SPEAK_EPUB_MODELS_DIR", str(tmp_path / "models"))
+        seen = {}
+
+        def _force_download(voice, on_log=None, force=False):
+            seen["force"] = force
+            return {"id": voice, "path": "x"}
+
+        monkeypatch.setattr("core.tts_local.download_local_voice", _force_download)
+        base = {"voice": "pl_PL-darkman-medium"}
+        res = handle_rpc({"id": "1", "method": "downloadLocalVoice",
+                          "params": {**base, "force": False, "forceRedownload": True}})
+        assert "error" not in res
+        assert seen["force"] is True
+        res = handle_rpc({"id": "1", "method": "downloadLocalVoice",
+                          "params": {**base, "force": "false"}})
+        assert "error" not in res
+        assert seen["force"] is False
+        res = handle_rpc({"id": "1", "method": "downloadLocalVoice",
+                          "params": {**base, "force": "yes"}})
+        assert "error" not in res
+        assert seen["force"] is True
+
     def test_output_falls_back_when_cwd_unwritable(self, tmp_path, monkeypatch, capsys):
         """System32-CWD regression: default output lands in user docs, no WinError 5."""
         import os as _os

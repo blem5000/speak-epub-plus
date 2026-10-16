@@ -87,6 +87,8 @@
   "settings.localVoice.loadError": "Could not load the voice list",
   "settings.localVoice.downloadFailed": "Download failed",
   "settings.localVoice.invalidVoice": "Invalid voice",
+  "settings.localVoice.redownload": "Re-download",
+  "settings.localVoice.redownloadTitle": "Download again (repairs a present but corrupt model)",
   "settings.helper.retries": "Retries per TTS chunk (1\u201310).",
   "settings.helper.scrapeDelay": "Delay between polite fetches (preset or custom ms, 0\u201320000).",
   "settings.helper.safeMode": "Safe mode adds extra delay after 429.",

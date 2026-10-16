@@ -2203,7 +2203,16 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         if not voice_p:
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "voice must be non-empty"}}
         # force=true re-downloads (escape hatch for present-but-corrupt models)
-        force_p = bool(params.get("force", params.get("forceRedownload", False)))
+        def _flag(value: Any) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return value != 0
+            if isinstance(value, str):
+                return value.strip().lower() not in ("", "0", "false", "no", "off")
+            return False
+
+        force_p = _flag(params.get("force", False)) or _flag(params.get("forceRedownload", False))
 
         def _emit_voice_log(line: str) -> None:
             if emit_fn:

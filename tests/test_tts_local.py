@@ -172,17 +172,30 @@ def test_download_local_voice_uses_timeout_staging_urls(tmp_path):
     def fake_urlopen(req, timeout=None):
         seen["timeout"] = timeout
         seen.setdefault("urls", []).append(req.full_url)
-        return _FakeResp(b"D" * 2_000_000)
+        # distinct payloads: a swapped model/config pair must be detectable.
+        # NB: real piper URLs carry "?download=true", so match on the path.
+        from urllib.parse import urlparse
+
+        path = urlparse(req.full_url).path
+        if path.endswith(".onnx"):
+            return _FakeResp(b"M" * 2_000_000)
+        return _FakeResp(b'{"config": true}')
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
         result = download_local_voice("pl_PL-darkman-medium")
     assert seen["timeout"] == tts_local._DOWNLOAD_TIMEOUT_SEC
-    assert len(seen["urls"]) == 2  # model + config
-    assert all("pl_PL-darkman-medium" in u for u in seen["urls"])
+    assert len(seen["urls"]) == 2  # model + config, in order
+    from urllib.parse import urlparse as _up
+
+    paths = [_up(u).path for u in seen["urls"]]
+    assert paths[0].endswith(".onnx")
+    assert paths[1].endswith(".onnx.json")
+    root = Path(tts_local.local_models_root())
+    assert (root / "pl_PL-darkman-medium.onnx").read_bytes() == b"M" * 2_000_000
+    assert (root / "pl_PL-darkman-medium.onnx.json").read_bytes() == b'{"config": true}'
     assert Path(result["path"]).is_file()
-    assert (Path(tts_local.local_models_root()) / "pl_PL-darkman-medium.onnx.json").is_file()
     # staging dir removed after atomic publish
-    assert not list(Path(tts_local.local_models_root()).glob(".staging-*"))
+    assert not list(root.glob(".staging-*"))
 
 
 def test_download_local_voice_rejects_unknown():
@@ -211,6 +224,127 @@ def test_download_partial_failure_leaves_no_finals():
     assert not (root / "pl_PL-darkman-medium.onnx").exists()
     assert not (root / "pl_PL-darkman-medium.onnx.json").exists()
     assert not list(root.glob(".staging-*"))
+
+
+def test_download_force_failure_keeps_old_files():
+    # review cr2r: force re-download must publish over, never delete first —
+    # a failed re-download leaves the previous files in place
+    root = Path(tts_local.local_models_root())
+    _fake_model(root, "pl_PL-darkman-medium")
+    before = (root / "pl_PL-darkman-medium.onnx").read_bytes()
+
+    def fake_fetch(url, dest_tmp, label, log_fn):
+        raise RuntimeError("network down")
+
+    with patch("core.tts_local._fetch_to_file", side_effect=fake_fetch):
+        with pytest.raises(RuntimeError, match="failed to download"):
+            download_local_voice("pl_PL-darkman-medium", force=True)
+    assert (root / "pl_PL-darkman-medium.onnx").read_bytes() == before
+    assert (root / "pl_PL-darkman-medium.onnx.json").is_file()
+
+
+def test_download_incomplete_body_rejected(tmp_path):
+    class _ShortResp:
+        headers = {"Content-Length": str(2_000_000)}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return b""  # server closed early: 0 of 2_000_000 bytes
+
+    with patch("urllib.request.urlopen", return_value=_ShortResp()):
+        with pytest.raises(RuntimeError, match="empty response"):
+            download_local_voice("pl_PL-darkman-medium")
+
+    class _TruncatedResp(_ShortResp):
+        def __init__(self):
+            self._left = 1_500_000
+
+        def read(self, n=-1):
+            if self._left <= 0:
+                return b""
+            chunk, self._left = self._left, 0
+            return b"T" * chunk
+
+    with patch("urllib.request.urlopen", return_value=_TruncatedResp()):
+        with pytest.raises(RuntimeError, match="incomplete body"):
+            download_local_voice("pl_PL-darkman-medium")
+    root = Path(tts_local.local_models_root())
+    assert not (root / "pl_PL-darkman-medium.onnx").exists()
+
+
+def test_download_sweeps_stale_staging_dirs():
+    root = Path(tts_local.local_models_root())
+    stale = root / ".staging-pl_PL-darkman-medium-crashed"
+    stale.mkdir(parents=True, exist_ok=True)
+    (stale / "junk.bin").write_bytes(b"x")
+
+    def fake_fetch(url, dest_tmp, label, log_fn):
+        Path(dest_tmp).write_bytes(b"F" * 1_100_000)
+
+    with patch("core.tts_local._fetch_to_file", side_effect=fake_fetch):
+        download_local_voice("pl_PL-darkman-medium")
+    assert not stale.exists()
+    assert not list(root.glob(".staging-*"))
+    assert (root / "pl_PL-darkman-medium.onnx").is_file()
+
+
+def test_download_second_replace_failure_leaves_no_mixed_pair(tmp_path, monkeypatch):
+    import os as _os
+
+    root = Path(tts_local.local_models_root())
+    _fake_model(root, "pl_PL-darkman-medium")
+    real_replace = _os.replace
+    calls = {"n": 0}
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("disk full")
+        return real_replace(src, dst)
+
+    def fake_fetch(url, dest_tmp, label, log_fn):
+        Path(dest_tmp).write_bytes(b"N" * 1_100_000)
+
+    monkeypatch.setattr(tts_local.os, "replace", flaky_replace)
+    with patch("core.tts_local._fetch_to_file", side_effect=fake_fetch):
+        with pytest.raises(RuntimeError, match="failed to download"):
+            download_local_voice("pl_PL-darkman-medium", force=True)
+    # new onnx rolled back, old config untouched: never a mixed pair
+    assert not (root / "pl_PL-darkman-medium.onnx").exists()
+    assert (root / "pl_PL-darkman-medium.onnx.json").is_file()
+    assert not tts_local.local_voice_ready("pl_PL-darkman-medium")
+
+
+def test_download_total_deadline_stops_trickle(tmp_path, monkeypatch):
+    ticks = {"t": 0.0}
+
+    def fake_mono():
+        ticks["t"] += 200.0
+        return ticks["t"]
+
+    class _Trickle:
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return b"x" * 10  # 10 bytes per 200 s: would stall ~forever
+
+    monkeypatch.setattr(tts_local.time, "monotonic", fake_mono)
+    with patch("urllib.request.urlopen", return_value=_Trickle()):
+        with pytest.raises(RuntimeError, match="timed out"):
+            download_local_voice("pl_PL-darkman-medium")
+    root = Path(tts_local.local_models_root())
+    assert not (root / "pl_PL-darkman-medium.onnx").exists()
 
 
 def test_download_force_redownloads_present_model():
@@ -312,6 +446,42 @@ def test_tts_text_to_mp3_local_invalid_output_cleaned(tmp_path):
                 with patch("core.tts_local.verify_part_audio", return_value=(False, "truncated")):
                     with pytest.raises(RuntimeError, match="truncated"):
                         tts_text_to_mp3_local("hello", str(out), "pl_PL-darkman-medium")
+    assert not out.exists()
+
+
+def test_tts_text_to_mp3_local_truncated_does_not_retry(tmp_path, monkeypatch):
+    # review cr2r: a truncated verdict is deterministic — exactly one attempt,
+    # no sleeps, no on_retry, immediate message (not the retried wrapper)
+    models = Path(tts_local.local_models_root())
+    _fake_model(models, "pl_PL-darkman-medium")
+    out = tmp_path / "trunc.mp3"
+    synth_calls = {"n": 0}
+    sleeps = []
+    retried = []
+
+    class _Counting:
+        @classmethod
+        def load(cls, model_path):
+            return cls()
+
+        def synthesize_wav(self, text, wav_file, syn_config=None):
+            synth_calls["n"] += 1
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(22050)
+            wav_file.writeframes(b"\x00\x00" * 22050)
+
+    monkeypatch.setattr(tts_local, "_load_voice", lambda name: _Counting())
+    monkeypatch.setattr(tts_local.time, "sleep", lambda s: sleeps.append(s))
+    with patch("core.tts_local.shutil.which", return_value="ffmpeg"):
+        with patch("core.tts_local.subprocess.run", side_effect=_fake_ffmpeg_run):
+            with patch("core.tts_local.verify_part_audio", return_value=(False, "truncated")):
+                with pytest.raises(RuntimeError, match="output truncated"):
+                    tts_text_to_mp3_local("hello", str(out), "pl_PL-darkman-medium", retries=3,
+                                          on_retry=lambda a, e: retried.append(a))
+    assert synth_calls["n"] == 1
+    assert sleeps == []
+    assert retried == []
     assert not out.exists()
 
 
