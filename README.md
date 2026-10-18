@@ -33,6 +33,10 @@ Convert any EPUB file into a spoken-word audiobook using Microsoft Edge's free n
 - Python 3.10+
 - FFmpeg on your PATH (only needed for `--m4b` / `--m4a`)
 
+> No FFmpeg? The app auto-repairs itself: it downloads a portable build to
+> `%LOCALAPPDATA%\speak-epub\ffmpeg` (per-user, no admin rights) once and
+> reuses it afterwards. A manual install below is still fine and preferred.
+
 ## Installation
 
 Clone or download the project, then follow the steps for your OS.

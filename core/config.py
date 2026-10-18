@@ -2581,6 +2581,15 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 except Exception:
                     pass
 
+        # ffmpeg powers merging/M4B/post-processing (local TTS re-heals itself
+        # inside tts_local); a missing install is auto-repaired here first
+        try:
+            from core.ffmpeg_setup import ensure_ffmpeg as _ensure_ffmpeg_build
+
+            _ensure_ffmpeg_build(on_log=_emit_audio_log)
+        except Exception:
+            pass
+
         try:
             result_audio = build_audio_fn(
                 novel_url=novelUrl,

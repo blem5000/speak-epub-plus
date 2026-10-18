@@ -412,8 +412,13 @@ def tts_text_to_mp3_local(
     wav_path = output.with_suffix(".part.wav")
 
     # deterministic pre-checks stay outside the retry loop: a missing binary
-    # cannot heal between attempts
+    # cannot heal between attempts; self-heal downloads a portable build once
     ffmpeg = shutil.which(ffmpeg_bin)
+    if not ffmpeg:
+        from core.ffmpeg_setup import ensure_ffmpeg
+
+        ensure_ffmpeg()
+        ffmpeg = shutil.which(ffmpeg_bin)
     if not ffmpeg:
         raise RuntimeError("ffmpeg not found on PATH — required for local TTS MP3 encoding")
 

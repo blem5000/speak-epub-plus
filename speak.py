@@ -477,6 +477,14 @@ def main() -> None:
     dialogue_voice_arg = (args.dialogue_voice or "").strip() or None
 
     failures: list[str] = []
+    # CLI self-heal: try to repair before the per-book degraded-mode warnings
+    # fire; with SPEAK_EPUB_FFMPEG_DIR or a prior install this is instant
+    try:
+        from core.ffmpeg_setup import ensure_ffmpeg
+
+        ensure_ffmpeg(on_log=print)
+    except Exception:
+        pass
     for _idx, _epub_arg in enumerate(args.epub, 1):
         epub_path = Path(_epub_arg)
         if not epub_path.exists():
