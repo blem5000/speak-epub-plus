@@ -966,7 +966,11 @@ async def tts_text_to_mp3(
             if rate:
                 kwargs["rate"] = rate
             communicate = edge_tts.Communicate(text, voice, **kwargs)
-            await communicate.save(output_path)
+            # No timeout here historically froze the whole global queue on a
+            # websocket stall (real-book production test, v0.3.7): edge save
+            # normally streams 5+ min of audio well under a minute.
+            _timeout = max(300.0, min(1200.0, len(text) * 0.35))
+            await asyncio.wait_for(communicate.save(output_path), timeout=_timeout)
             ok, reason = verify_part_audio(output_path, text, rate=rate)
             if ok:
                 return

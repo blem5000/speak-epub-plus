@@ -160,7 +160,7 @@
 
 - [Review][Defer] Header comment drift — core/tts.py:14 "Pure: no subprocess" a dodano shutil/subprocess [`Speak-EPUB-1.0.0/core/tts.py:14`] — deferred, pre-existing — evidence: acceptance-auditor info; fix: zaktualizować komentarz nagłówka
 - [Review][Defer] Empty audio_entries → build_m4b woła ffmpeg z pustym concat — [`Speak-EPUB-1.0.0/core/tts.py:444`] — deferred, pre-existing — evidence: spec-3-3:73 defer low "empty plans → build_m4b creates empty concat and ffmpeg errors"
-- [Review][Defer] Brak timeout na edge_tts Communicate.save — [`Speak-EPUB-1.0.0/core/tts.py:192`] — deferred, pre-existing — evidence: spec-3-3 deferred medium "No timeout on edge_tts save still present after merge"
+- [Review][Defer] Brak timeout na edge_tts Communicate.save — [`Speak-EPUB-1.0.0/core/tts.py:192`] — RESOLVED 2026-10-18 — production test zamarł na WebSocket stallu (21 parts, +0 przez 90 s); run_tts_job teraz asyncio.wait_for(save, max(240, min(600, len(text)*0.3))) z retry loop.
 
 ## Deferred from: code review (2026-10-16)
 
