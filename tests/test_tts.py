@@ -902,13 +902,15 @@ def test_concat_mp3_files_success(tmp_path):
             assert f"file '{safe}'\n" in content
         # simulate ffmpeg creating the temp output (atomic publish on success)
         Path(args[-1]).write_bytes(b"merged")
+        # .tmp output needs an explicit muxer (ffmpeg cannot infer from .tmp)
+        assert args[-3:-1] == ["-f", "mp3"]
         return MagicMock(returncode=0)
 
     with patch("core.tts.shutil.which", return_value="/usr/bin/ffmpeg"):
         with patch("core.tts.subprocess.run", side_effect=fake_run) as mock_run:
             concat_mp3_files(input_paths, str(output))
 
-    assert captured["args"] == ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file, "-c", "copy", tmp_output]
+    assert captured["args"] == ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file, "-c", "copy", "-f", "mp3", tmp_output]
     mock_run.assert_called_once()
     # concat_file cleaned up, temp published atomically, no stray .tmp left
     assert not os.path.exists(concat_file)
@@ -2898,7 +2900,7 @@ def test_check_build_identity_missing_manifest_is_fresh(tmp_path):
     assert (wiped, fresh) == (False, True)
     with open(tmp_path / ".speak-epub-build.json", encoding="utf-8") as f:
         stored = json.load(f)
-    assert stored["rate"] == "+0%" and stored["plan"] == 2
+    assert stored["rate"] == "+0%" and stored["plan"] == 3
 
 
 def test_check_build_identity_matching_is_pure_resume(tmp_path):
@@ -3180,6 +3182,11 @@ def test_postprocess_chapter_file_flags(tmp_path):
     assert "loudnorm" in cmds[0] and "silenceremove" not in cmds[0]
     assert "silenceremove" in cmds[1] and "loudnorm" not in cmds[1]
     assert cmds[0].count("24000") >= 1 and "32k" in cmds[0]
+    # trim must NOT use stop_periods (verified destructive: removes ALL
+    # silence >= threshold anywhere in the stream in ffmpeg 8) — the repaired
+    # chain trims via areverse + leading-only filter, keeping natural pacing
+    assert "stop_periods" not in cmds[1]
+    assert cmds[1].count("areverse") == 2 and "start_silence=2.0" in cmds[1]
 
 
 def test_postprocess_chapter_file_failure_keeps_original(tmp_path, capsys):

@@ -158,7 +158,7 @@ The default voice is `en-US-AndrewNeural` (American male). Run `--list-voices` t
 | `--local-voice` | default voice | Piper voice for the local engine, e.g. `pl_PL-darkman-medium` (downloaded on demand into `Documents\speak-epub\models`) |
 | `--dialogue-voice` | off | Second Edge TTS voice for quoted dialogue („…", "…", «…»); narration keeps `--voice`. Edge engine only. A 1-second pause is appended after each chapter title that is attached to them |
 | `--normalize-audio` | off | Normalize chapter loudness to podcast levels (FFmpeg loudnorm, requires FFmpeg) |
-| `--trim-silence` | off | Trim leading/trailing digital silence of each chapter (below -60 dB; dramatic mid-chapter pauses are kept) |
+| `--trim-silence` | off | Trim long (>2 s) leading/trailing digital silence of each chapter (below -60 dB; speech pacing and mid-chapter pauses are kept) |
 | `--keep-parts` | off | Keep the temporary `_parts` MP3 files after merging |
 | `--list-voices` | – | List English voices (`--all-languages`: every language) |
 

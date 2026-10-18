@@ -581,9 +581,11 @@ def _append_silence(part_path: str, pause_path: str) -> None:
 #: instead of silently reusing wrong audio (rate/voice/engine changes).
 BUILD_IDENTITY_FILENAME = ".speak-epub-build.json"
 
-#: Manifest schema/layout version. Bump when the artifact layout changes
-#: (v2: title parts + pause); a mismatch wipes and rebuilds like any change.
-BUILD_IDENTITY_VERSION = 2
+#: Manifest schema/layout version. Bump when artifact semantics change
+#: (v2: title parts + pause; v3: repaired trim filter — old outputs may
+#: have been over-trimmed by the broken silenceremove chain). A mismatch
+#: wipes and rebuilds like any change.
+BUILD_IDENTITY_VERSION = 3
 
 #: Params that define generated audio. A change in any of them invalidates
 #: existing part/chapter files (different speed, voice, engine, processing).
@@ -683,10 +685,11 @@ def check_build_identity(
 def postprocess_chapter_file(path: str, normalize_audio: bool = False, trim_silence: bool = False) -> bool:
     """Apply loudness normalization and/or silence trimming in place.
 
-    Loudness: single-pass loudnorm (podcast levels). Silence: leading and
-    trailing digital silence trimmed (dramatic mid-chapter pauses are kept).
-    Returns True when the file was re-encoded. Never raises: failures warn
-    and leave the original file untouched.
+    Loudness: single-pass loudnorm (podcast levels). Silence: only long
+    leading/trailing silence (>~2 s) is trimmed; natural speech pauses and
+    the post-title pause survive intact. Returns True when the file was
+    re-encoded. Never raises: failures warn and leave the original file
+    untouched.
     """
     if not (normalize_audio or trim_silence):
         return False
@@ -697,10 +700,14 @@ def postprocess_chapter_file(path: str, normalize_audio: bool = False, trim_sile
     if normalize_audio:
         filters.append("loudnorm=I=-16:TP=-1.5:LRA=11")
     if trim_silence:
-        filters.append(
-            "silenceremove=start_periods=1:start_duration=0.5:start_threshold=-60dB:"
-            "stop_periods=1:stop_duration=0.5:stop_threshold=-60dB"
+        # this build's silenceremove stop_periods removes ALL silence >= the
+        # threshold anywhere in the stream (verified against ffmpeg 8.0), so
+        # trim trailing by reversing the stream and reusing leading-trim.
+        trim_lead = (
+            "silenceremove=start_periods=1:start_duration=0:"
+            "start_silence=2.0:start_threshold=-60dB"
         )
+        filters.append(f"{trim_lead},areverse,{trim_lead},areverse")
     try:
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
@@ -712,6 +719,7 @@ def postprocess_chapter_file(path: str, normalize_audio: bool = False, trim_sile
                 "-i", path,
                 "-codec:a", "libmp3lame", "-b:a", "32k", "-ac", "1", "-ar", "24000",
                 "-af", ",".join(filters),
+                "-f", "mp3",
                 tmp,
             ],
             check=True,
@@ -1637,7 +1645,7 @@ def concat_mp3_files(input_paths: List[str], output_path: str) -> None:
                 f.write(f"file '{safe}'\n")
 
         subprocess.run(
-            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file, "-c", "copy", tmp_output],
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file, "-c", "copy", "-f", "mp3", tmp_output],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
