@@ -1,7 +1,7 @@
-[package]
+﻿[package]
 name = "speak-epub"
-version = "0.3.6"
-description = "Speak EPUB — EPUB to audiobook via Edge TTS"
+version = "0.3.7"
+description = "Speak EPUB â€” EPUB to audiobook via Edge TTS"
 authors = ["Speak EPUB"]
 edition = "2021"
 rust-version = "1.77.2"
