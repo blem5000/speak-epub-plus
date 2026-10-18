@@ -314,6 +314,17 @@ describe("Settings 4.2 — form + persist + i18n", () => {
       "settings.helper.scrapeDelay",
       "settings.helper.safeMode",
       "settings.helper.outputs",
+      "settings.audio.dialogue",
+      "settings.audio.dialogueNone",
+      "settings.audio.normalize",
+      "settings.audio.trim",
+      "settings.helper.dialogue",
+      "settings.helper.normalize",
+      "settings.helper.trim",
+      "settings.sample.play",
+      "settings.sample.stop",
+      "settings.sample.loading",
+      "settings.sample.error",
       "settings.toast.saved",
       "settings.gear",
     ];
@@ -386,5 +397,85 @@ describe("Settings 4.2 — form + persist + i18n", () => {
     // wait for auto-hide ~1500ms (allow 1700)
     await new Promise((r) => setTimeout(r, 1700));
     await waitFor(() => expect(screen.queryByTestId("settings-toast")).not.toBeInTheDocument());
+  });
+
+  it("dialogue voice persists ('none' stores empty string, off = default)", async () => {
+    const user = userEvent.setup();
+    render(<Settings open={true} onClose={vi.fn()} />);
+    await waitFor(() => expect(mockGetStore).toHaveBeenCalled());
+    const sel = screen.getByTestId("settings-audio-dialogue") as HTMLSelectElement;
+    expect(sel.value).toBe("none");
+    await user.selectOptions(sel, "pl-PL-MarekNeural");
+    await waitFor(() => expect(mockSetStore).toHaveBeenCalledWith({ dialogueVoice: "pl-PL-MarekNeural" }));
+    // back to none -> "" (single voice again)
+    await waitFor(() => expect(sel.value).toBe("pl-PL-MarekNeural"));
+    await user.selectOptions(sel, "none");
+    await waitFor(() => expect(mockSetStore).toHaveBeenCalledWith({ dialogueVoice: "" }));
+  });
+
+  it("dialogue voice custom entry persists via blur", async () => {
+    const user = userEvent.setup();
+    render(<Settings open={true} onClose={vi.fn()} />);
+    await waitFor(() => expect(mockGetStore).toHaveBeenCalled());
+    await user.selectOptions(screen.getByTestId("settings-audio-dialogue"), "custom");
+    const input = await screen.findByTestId("settings-audio-dialogue-custom");
+    await user.type(input, "en-GB-RyanNeural");
+    fireEvent.blur(input);
+    await waitFor(() => expect(mockSetStore).toHaveBeenCalledWith({ dialogueVoice: "en-GB-RyanNeural" }));
+  });
+
+  it("normalizeAudio + trimSilence toggles persist", async () => {
+    const user = userEvent.setup();
+    render(<Settings open={true} onClose={vi.fn()} />);
+    await waitFor(() => expect(mockGetStore).toHaveBeenCalled());
+    expect(screen.getByTestId("settings-audio-normalize")).not.toBeChecked();
+    expect(screen.getByTestId("settings-audio-trim")).not.toBeChecked();
+    await user.click(screen.getByTestId("settings-audio-normalize"));
+    await waitFor(() => expect(mockSetStore).toHaveBeenCalledWith({ normalizeAudio: true }));
+    await user.click(screen.getByTestId("settings-audio-trim"));
+    await waitFor(() => expect(mockSetStore).toHaveBeenCalledWith({ trimSilence: true }));
+    // store value preloads the checkbox
+    mockGetStore.mockResolvedValueOnce({
+      id: "1",
+      result: { ...defaultStore(), normalizeAudio: true },
+    });
+  });
+
+  it("sample button synthesizes and replays the cached clip per voice/rate", async () => {
+    const user = userEvent.setup();
+    const mockPreview = vi.fn().mockResolvedValue({
+      id: "1",
+      result: { path: "C:/out/_preview/voice_sample.mp3", engine: "edge", durationMs: 3000 },
+    });
+    // re-mock the sidecar module with previewVoice attached
+    const mod = await import("@/lib/sidecar");
+    const spy = vi.spyOn(mod, "previewVoice").mockImplementation(mockPreview as never);
+    const { unmount } = render(<Settings open={true} onClose={vi.fn()} />);
+    await waitFor(() => expect(mockGetStore).toHaveBeenCalled());
+    const btn = screen.getByTestId("settings-sample-play");
+    expect(btn).toBeInTheDocument();
+    await user.click(btn);
+    await waitFor(() => expect(mockPreview).toHaveBeenCalled());
+    expect(await screen.findByTestId("settings-sample-player")).toBeInTheDocument();
+    unmount();
+    spy.mockRestore();
+  });
+
+  it("sample error surfaces the backend message", async () => {
+    const user = userEvent.setup();
+    const mod = await import("@/lib/sidecar");
+    const mockPreview = vi.fn().mockResolvedValue({
+      id: "1",
+      error: { code: "VALUE_ERROR", message: "local voice not downloaded" },
+    });
+    const spy = vi.spyOn(mod, "previewVoice").mockImplementation(mockPreview as never);
+    const { unmount } = render(<Settings open={true} onClose={vi.fn()} />);
+    await waitFor(() => expect(mockGetStore).toHaveBeenCalled());
+    await user.click(screen.getByTestId("settings-sample-play"));
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-sample-error").textContent).toContain("local voice not downloaded")
+    );
+    unmount();
+    spy.mockRestore();
   });
 });

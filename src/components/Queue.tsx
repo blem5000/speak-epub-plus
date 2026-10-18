@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChapterInfo } from "@/hooks/useChapterList";
 import type { PartStatusEvent } from "@/lib/sidecar";
 import ThrottleBadge from "./ThrottleBadge";
@@ -32,6 +32,14 @@ export default function Queue({
 }: QueueProps): JSX.Element {
   const listRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+
+  // simple linear ETA: elapsed time scaled by the remaining fraction
+  const etaSec = useMemo<number | null>(() => {
+    if (!progress || progress.total <= 0) return null;
+    if (!elapsedSec || elapsedSec <= 0) return null;
+    if (progress.done <= 0 || progress.done >= progress.total) return null;
+    return Math.round((elapsedSec * (progress.total - progress.done)) / progress.done);
+  }, [progress?.done, progress?.total, elapsedSec]);
 
   const toggleExpand = (ch: number) => {
     setExpanded((prev) => {
@@ -112,6 +120,11 @@ export default function Queue({
             <span data-testid="progress-label">
               {progress.done}/{progress.total} ({progress.percent}%)
             </span>
+            {etaSec != null ? (
+              <span data-testid="eta-label" className="tabular-nums">
+                ~{t("queue.eta", { s: etaSec })}
+              </span>
+            ) : null}
           </div>
           <ProgressTrack done={progress.done} total={progress.total} />
         </div>

@@ -483,6 +483,10 @@ export type AudioParams = {
   retries?: number;
   chunkSize?: number;
   format?: string;
+  dialogueVoice?: string | null;
+  author?: string | null;
+  normalizeAudio?: boolean | null;
+  trimSilence?: boolean | null;
   outputDir?: string | null;
 };
 export type AudioChapter = { number: number; title: string; path: string };
@@ -524,6 +528,16 @@ export async function buildAudio(params: AudioParams, opts?: { signal?: AbortSig
     if (!v) throw new Error("voice must be non-empty");
     payload.voice = v.slice(0, 100);
   }
+  if (params.dialogueVoice !== undefined && params.dialogueVoice !== null) {
+    const dv = String(params.dialogueVoice).trim().slice(0, 100);
+    if (dv) payload.dialogueVoice = dv; // "" stays unset -> backend applies the store fallback
+  }
+  if (params.author !== undefined && params.author !== null) {
+    const a = String(params.author).trim().slice(0, 200);
+    if (a) payload.author = a;
+  }
+  if (params.normalizeAudio !== undefined && params.normalizeAudio !== null) payload.normalizeAudio = Boolean(params.normalizeAudio);
+  if (params.trimSilence !== undefined && params.trimSilence !== null) payload.trimSilence = Boolean(params.trimSilence);
   if (params.parallel !== undefined && params.parallel !== null) payload.parallel = Math.trunc(Number(params.parallel));
   if (params.retries !== undefined && params.retries !== null) payload.retries = Math.trunc(Number(params.retries));
   if (params.chunkSize !== undefined && params.chunkSize !== null)
@@ -592,6 +606,9 @@ export async function revealPath(path: string): Promise<void> {
  * - `outputDir` / `output_dir` string ≤260 ("" = backend default; no `..`/NUL)
  * - `engine` "auto" | "edge" | "local" (auto = local Piper on fast CPUs once downloaded)
  * - `localVoice` curated Piper voice id ("" = default voice)
+ * - `dialogueVoice` Edge voice id quoted dialogue is read with ("" = single voice)
+ * - `normalizeAudio` bool — loudnorm -16 LUFS podcast level per finished chapter
+ * - `trimSilence` bool — trim leading/trailing ≥-60 dB silence per chapter
  * Persist via atomic `.tmp` replace — no polling, no direct frontend file write.
  */
 export async function getStore(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
@@ -608,6 +625,46 @@ export async function setStore(
 /** Local (Piper) TTS status: curated voices, download state, models dir. */
 export async function localVoices(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
   return callSidecar("localVoices", {}, opts);
+}
+
+/**
+ * Synthesize a short sample of a voice so Settings can play it before a
+ * full build. Backend writes `_preview/voice_sample.mp3` next to the
+ * default output and returns { path, engine, durationMs }; the caller
+ * plays `convertFileSrc(path)`.
+ * - engine omitted → store fallback; "local" requires a downloaded Piper voice
+ * - text ≤500 chars, non-empty (backend truncates)
+ */
+export async function previewVoice(
+  params: {
+    text?: string;
+    voice?: string | null;
+    rate?: string | null;
+    engine?: string | null;
+    localVoice?: string | null;
+  },
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  const payload: Record<string, unknown> = {};
+  if (params.text !== undefined && params.text !== null) {
+    const t = String(params.text).trim();
+    if (!t) throw new Error("text must be non-empty");
+    payload.text = t.slice(0, 500);
+  }
+  if (params.voice !== undefined && params.voice !== null) {
+    const v = String(params.voice).trim().slice(0, 100);
+    if (v) payload.voice = v;
+  }
+  if (params.rate !== undefined && params.rate !== null && String(params.rate).trim()) payload.rate = String(params.rate).trim();
+  if (params.engine !== undefined && params.engine !== null) {
+    const e = String(params.engine).trim().toLowerCase();
+    if (e) payload.engine = e;
+  }
+  if (params.localVoice !== undefined && params.localVoice !== null) {
+    const lv = String(params.localVoice).trim();
+    if (lv) payload.localVoice = lv;
+  }
+  return callSidecar("previewVoice", payload, opts);
 }
 
 /** Download a curated Piper voice (~63–115 MB) into the models directory. */

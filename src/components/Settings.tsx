@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { t } from "@/i18n";
-import { getStore, setStore, localVoices, downloadLocalVoice } from "@/lib/sidecar";
+import { getStore, setStore, localVoices, downloadLocalVoice, previewVoice } from "@/lib/sidecar";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentVersion, manualCheck } from "@/lib/updater";
 
 type SettingsProps = {
@@ -62,6 +63,21 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
   const [defaultLocalVoice, setDefaultLocalVoice] = useState<string>("en_US-lessac-medium");
   const [localBusy, setLocalBusy] = useState<boolean>(false);
   const [localMsg, setLocalMsg] = useState<string>("");
+
+  // dialogue voice (Edge only) + chapter audio post-processing
+  const [dialogueVoice, setDialogueVoice] = useState<string>("");
+  const [dialogueCustom, setDialogueCustom] = useState<string>("");
+  const [isDialogueCustom, setIsDialogueCustom] = useState(false);
+  const [normalizeAudio, setNormalizeAudio] = useState<boolean>(false);
+  const [trimSilence, setTrimSilence] = useState<boolean>(false);
+
+  // voice sample preview (Settings plays one short synthesized clip)
+  const [sampleBusy, setSampleBusy] = useState<boolean>(false);
+  const [samplePlaying, setSamplePlaying] = useState<boolean>(false);
+  const [sampleError, setSampleError] = useState<string>("");
+  const [sampleReady, setSampleReady] = useState<boolean>(false);
+  const [sampleVoiceKey, setSampleVoiceKey] = useState<string>("");
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // prev for revert
   const prevRef = useRef<Record<string, unknown>>({});
@@ -197,6 +213,18 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
         const lvVal = typeof data.localVoice === "string" ? (data.localVoice as string).trim() : "";
         setLocalVoice(lvVal);
         prevRef.current["localVoice"] = lvVal;
+        // dialogue voice + post-processing flags
+        const dvVal = typeof data.dialogueVoice === "string" ? (data.dialogueVoice as string).trim() : "";
+        setDialogueVoice(dvVal);
+        setDialogueCustom(dvVal);
+        setIsDialogueCustom(Boolean(dvVal) && !VOICE_OPTIONS.includes(dvVal));
+        prevRef.current["dialogueVoice"] = dvVal;
+        const naVal = data.normalizeAudio === true;
+        setNormalizeAudio(naVal);
+        prevRef.current["normalizeAudio"] = naVal;
+        const tsVal = data.trimSilence === true;
+        setTrimSilence(tsVal);
+        prevRef.current["trimSilence"] = tsVal;
         void refreshLocalVoices();
         setLoading(false);
       } catch {
@@ -300,6 +328,14 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
           else if (revertKey === "audioBitrate") setAudioBitrate(String(revertVal));
           else if (revertKey === "engine") setEngine(String(revertVal));
           else if (revertKey === "localVoice") setLocalVoice(String(revertVal));
+          else if (revertKey === "dialogueVoice") {
+            const rv = String(revertVal);
+            setDialogueVoice(rv);
+            setDialogueCustom(rv);
+            setIsDialogueCustom(Boolean(rv) && !VOICE_OPTIONS.includes(rv));
+          }
+          else if (revertKey === "normalizeAudio") setNormalizeAudio(Boolean(revertVal));
+          else if (revertKey === "trimSilence") setTrimSilence(Boolean(revertVal));
         }
         return;
       }
@@ -335,6 +371,14 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
         else if (revertKey === "audioBitrate") setAudioBitrate(String(revertVal));
         else if (revertKey === "engine") setEngine(String(revertVal));
         else if (revertKey === "localVoice") setLocalVoice(String(revertVal));
+        else if (revertKey === "dialogueVoice") {
+          const rv = String(revertVal);
+          setDialogueVoice(rv);
+          setDialogueCustom(rv);
+          setIsDialogueCustom(Boolean(rv) && !VOICE_OPTIONS.includes(rv));
+        }
+        else if (revertKey === "normalizeAudio") setNormalizeAudio(Boolean(revertVal));
+        else if (revertKey === "trimSilence") setTrimSilence(Boolean(revertVal));
       }
     }
   };
@@ -410,6 +454,91 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
     setLocalVoice(val);
     setLocalMsg("");
     void persist({ localVoice: val }, "localVoice", prev);
+  };
+
+  const handleDialogueVoiceChange = async (e: React.ChangeEvent<HTMLSelectElement>): Promise<void> => {
+    const val = e.target.value;
+    if (val === "custom") {
+      setIsDialogueCustom(true);
+      setDialogueVoice("custom");
+      setTimeout(() => {
+        const el = document.querySelector<HTMLInputElement>('[data-testid="settings-audio-dialogue-custom"]');
+        if (el) el.focus();
+      }, 0);
+      return;
+    }
+    const prev = prevRef.current["dialogueVoice"];
+    const stored = val === "none" ? "" : val;
+    setDialogueVoice(stored);
+    setDialogueCustom(stored);
+    setIsDialogueCustom(false);
+    void persist({ dialogueVoice: stored }, "dialogueVoice", prev);
+  };
+
+  const handleDialogueCustomBlur = (e: React.FocusEvent<HTMLInputElement>): void => {
+    const vv = e.target.value.trim();
+    const prev = prevRef.current["dialogueVoice"];
+    const stored = vv;
+    setDialogueCustom(vv);
+    setDialogueVoice(vv);
+    setIsDialogueCustom(Boolean(vv) && !VOICE_OPTIONS.includes(vv));
+    void persist({ dialogueVoice: stored }, "dialogueVoice", prev);
+  };
+
+  const handleNormalizeToggle = (): void => {
+    const next = !normalizeAudio;
+    const prev = prevRef.current["normalizeAudio"];
+    setNormalizeAudio(next);
+    void persist({ normalizeAudio: next }, "normalizeAudio", prev);
+  };
+
+  const handleTrimToggle = (): void => {
+    const next = !trimSilence;
+    const prev = prevRef.current["trimSilence"];
+    setTrimSilence(next);
+    void persist({ trimSilence: next }, "trimSilence", prev);
+  };
+
+  const handlePlaySample = async (): Promise<void> => {
+    if (sampleBusy) return;
+    setSampleError("");
+    const el = previewAudioRef.current;
+    // replay/pause the cached clip — but only while voice/rate/engine are
+    // unchanged; any change re-synthesizes so the sample matches the UI
+    const voiceKey = `${isVoiceCustom ? voiceCustom : voice}|${rateNum}|${engine}|${localVoice}`;
+    if (el && sampleReady && sampleVoiceKey === voiceKey) {
+      if (el.paused) {
+        void el.play().catch(() => setSampleError(t("settings.sample.error") as string));
+      } else {
+        el.pause();
+      }
+      return;
+    }
+    setSampleBusy(true);
+    try {
+      const res = await previewVoice({});
+      if (res.error) {
+        const msg = (res.error as { message?: string }).message ?? String(res.error);
+        setSampleError(msg);
+        return;
+      }
+      const r = res.result as { path?: unknown } | null;
+      const path = r && typeof r.path === "string" ? r.path : "";
+      if (!path) {
+        setSampleError(t("settings.sample.error") as string);
+        return;
+      }
+      if (el) {
+        el.src = convertFileSrc(path);
+        setSampleReady(true);
+        setSampleVoiceKey(voiceKey);
+        void el.play().catch(() => setSampleError(t("settings.sample.error") as string));
+      }
+    } catch (e) {
+      setSampleError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSampleBusy(false);
+    }
   };
 
   const handleDownloadLocalVoice = async (): Promise<void> => {
@@ -678,6 +807,67 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                     </label>
                   ) : null}
 
+                  <div className="flex items-end justify-between gap-3">
+                    <button
+                      type="button"
+                      data-testid="settings-sample-play"
+                      disabled={sampleBusy}
+                      onClick={() => void handlePlaySample()}
+                      className="h-9 shrink-0 rounded-md border border-input bg-card px-3 text-body hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {sampleBusy
+                        ? (t("settings.sample.loading") as string)
+                        : samplePlaying
+                          ? (t("settings.sample.stop") as string)
+                          : (t("settings.sample.play") as string)}
+                    </button>
+                    {sampleError ? (
+                      <span data-testid="settings-sample-error" className="text-body-sm text-red-600">
+                        {sampleError}
+                      </span>
+                    ) : null}
+                    <audio
+                      ref={previewAudioRef}
+                      data-testid="settings-sample-player"
+                      hidden={true}
+                      onPlay={() => setSamplePlaying(true)}
+                      onPause={() => setSamplePlaying(false)}
+                      onEnded={() => setSamplePlaying(false)}
+                    />
+                  </div>
+
+                  <label className="flex flex-col gap-1">
+                    <span className="text-body-sm font-medium">{t("settings.audio.dialogue")}</span>
+                    <select
+                      data-testid="settings-audio-dialogue"
+                      value={isDialogueCustom ? "custom" : dialogueVoice === "" ? "none" : dialogueVoice}
+                      onChange={(e) => void handleDialogueVoiceChange(e)}
+                      className="h-9 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <option value="none">{t("settings.audio.dialogueNone")}</option>
+                      {VOICE_OPTIONS.map((opt) => (
+                        <option key={opt} value={opt}>
+                          {opt}
+                        </option>
+                      ))}
+                      <option value="custom">{t("settings.scrape.custom")}</option>
+                    </select>
+                    <span className="text-body-sm text-muted-foreground">{t("settings.helper.dialogue")}</span>
+                  </label>
+                  {isDialogueCustom ? (
+                    <label className="flex flex-col gap-1">
+                      <span className="text-body-sm font-medium">{t("settings.scrape.custom")}</span>
+                      <input
+                        data-testid="settings-audio-dialogue-custom"
+                        value={dialogueCustom}
+                        placeholder="pl-PL-MarekNeural"
+                        onChange={(e) => setDialogueCustom(e.target.value)}
+                        onBlur={handleDialogueCustomBlur}
+                        className="h-9 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      />
+                    </label>
+                  ) : null}
+
                   <div className="flex flex-col gap-2">
                     <span className="text-body-sm font-medium">{t("settings.audio.rate")}</span>
                     <div className="flex items-center gap-3">
@@ -725,6 +915,34 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                       ))}
                     </select>
                     <span className="text-body-sm text-muted-foreground">{t("settings.helper.bitrate")}</span>
+                  </label>
+
+                  <label className="flex flex-col gap-1">
+                    <span className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        data-testid="settings-audio-normalize"
+                        checked={normalizeAudio}
+                        onChange={handleNormalizeToggle}
+                        className="h-4 w-4 accent-accent"
+                      />
+                      <span className="text-body-sm font-medium">{t("settings.audio.normalize")}</span>
+                    </span>
+                    <span className="text-body-sm text-muted-foreground">{t("settings.helper.normalize")}</span>
+                  </label>
+
+                  <label className="flex flex-col gap-1">
+                    <span className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        data-testid="settings-audio-trim"
+                        checked={trimSilence}
+                        onChange={handleTrimToggle}
+                        className="h-4 w-4 accent-accent"
+                      />
+                      <span className="text-body-sm font-medium">{t("settings.audio.trim")}</span>
+                    </span>
+                    <span className="text-body-sm text-muted-foreground">{t("settings.helper.trim")}</span>
                   </label>
                 </div>
               </section>

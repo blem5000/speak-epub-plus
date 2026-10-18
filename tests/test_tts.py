@@ -1,5 +1,6 @@
 """Tests for core/tts.py — I/O matrix Story 3.1 (ratyfikacja brownfield) + 3.2 Edge TTS + parallel + retries."""
 import asyncio
+import json
 import os
 import re
 import subprocess
@@ -18,6 +19,12 @@ from core.tts import (
     resolve_output_dir,
     sanitize_filename,
     split_text_for_tts,
+    split_dialogue,
+    split_title_body,
+    ensure_pause_file,
+    check_build_identity,
+    postprocess_chapter_file,
+    TITLE_PAUSE_SEC,
     tts_text_to_mp3,
     verify_part_audio,
     ffmpeg_available,
@@ -1348,7 +1355,7 @@ def test_speak_delegation_parity_merge(monkeypatch, tmp_path):
         called["escape"] = s
         return "esc_" + s
 
-    def fake_finalize(plans, keep):
+    def fake_finalize(plans, keep, **kw):
         called["finalize"] = (plans, keep)
         return [(1, "T", "/tmp/a.mp3")]
 
@@ -1675,7 +1682,7 @@ def test_convert_wiring(tmp_path, monkeypatch):
         called["extract"] = (epub_path, start_chapter, end_chapter)
         return chapters
 
-    def fake_build_plan(chapters_arg, output_dir_arg, chunk_size_arg, rate=None):
+    def fake_build_plan(chapters_arg, output_dir_arg, chunk_size_arg, rate=None, dialogue_voice=None, migrate_titles=False):
         called["build_plan"] = (output_dir_arg, chunk_size_arg, rate)
         # return plans with single-chunk chapters to simplify
         plans = [
@@ -1688,11 +1695,11 @@ def test_convert_wiring(tmp_path, monkeypatch):
     async def fake_run_jobs(jobs, voice, parallel, retries, rate=None, engine="edge", local_voice=None):
         called["run_jobs"] = (voice, parallel, retries, len(jobs), rate, engine, local_voice)
 
-    def fake_finalize(plans, keep_parts):
+    def fake_finalize(plans, keep_parts, normalize_audio=False, trim_silence=False):
         called["finalize"] = (len(plans), keep_parts)
         return [(36, "Ch36", "/tmp/036_Ch36.mp3"), (37, "Ch37", "/tmp/037_Ch37.mp3")]
 
-    def fake_build_m4b(output_dir_arg, entries, book_title_arg, ext_arg="m4b", bitrate="32k"):
+    def fake_build_m4b(output_dir_arg, entries, book_title_arg, ext_arg="m4b", bitrate="32k", cover_path=None, artist=None):
         called["build_m4b"] = (output_dir_arg, entries, book_title_arg, ext_arg, bitrate)
 
     monkeypatch.setattr(speak_mod, "extract_chapters", fake_extract)
@@ -1750,9 +1757,8 @@ def test_convert_ffmpeg_missing_warns_and_local_errors(tmp_path, monkeypatch, ca
     monkeypatch.setattr(speak_mod, "extract_chapters", lambda *a, **k: chapters)
     monkeypatch.setattr(speak_mod, "build_generation_plan", lambda *a, **k: ([], []))
     monkeypatch.setattr(speak_mod, "run_part_jobs", fake_run_jobs)
-    monkeypatch.setattr(speak_mod, "finalize_chapter_audio", lambda plans, keep_parts=False: [])
+    monkeypatch.setattr(speak_mod, "finalize_chapter_audio", lambda plans, keep_parts=False, **kw: [])
     monkeypatch.setattr(speak_mod, "_core_ffmpeg", lambda: False)
-
     asyncio.run(speak_mod.convert(str(fake_epub), str(tmp_path / "o1"), voice="v", m4b=False, m4a=False))
     assert "ffmpeg not found" in capsys.readouterr().out
     assert ran.get("jobs") is True  # warning only: the build proceeds
@@ -2776,4 +2782,499 @@ def test_run_part_jobs_legacy_callers_keep_strict_kwargs(tmp_path):
 
     asyncio.run(_run())
     assert seen_retries == [5, 5]
+
+
+# ---------------------------------------------------------------------------
+# Feature pack: dialogue voices, title pause, build identity, post-processing,
+# M4B metadata (artist/cover) — core-level tests
+# ---------------------------------------------------------------------------
+
+def test_split_dialogue_segments_polish_and_straight_quotes():
+    text = 'Narration. „Yes, hello,” he said. Then more. "Second voice here." End.'
+    segs = split_dialogue(text)
+    flags = [d for _, d in segs]
+    # whole input covered: rejoin matches original modulo whitespace-only pieces
+    assert "".join(s for s, _ in segs) == text
+    assert any("„Yes, hello,”" in s and d for s, d in segs)
+    assert any('"Second voice here."' in s and d for s, d in segs)
+    assert any("Narration." in s and not d for s, d in segs)
+    assert any("Then more." in s and not d for s, d in segs)
+
+
+def test_split_dialogue_unmatched_quotes_stay_narration():
+    text = 'He said: „never closed. Keep going.'
+    segs = split_dialogue(text)
+    assert len(segs) == 1
+    assert segs[0][0] == text and segs[0][1] is False
+
+
+def test_split_dialogue_no_dialogue_returns_input_untouched():
+    text = "Plain narration without any quotes at all."
+    segs = split_dialogue(text)
+    assert segs == [(text, False)]
+    assert split_dialogue("") == []
+    assert split_dialogue(None) == []
+
+
+def test_split_title_body_splits_matching_prefix():
+    title = "Rozdział 12"
+    body = "Rozdział 12\n\nNad morzem wiało."
+    t, rest = split_title_body(title, body)
+    assert t == "Rozdział 12"
+    assert rest.startswith("Nad morzem")
+
+
+def test_split_title_body_no_match_keeps_text_intact():
+    title = "The Long Title"
+    body = "Different opening sentence entirely."
+    t, rest = split_title_body(title, body)
+    assert t is None
+    assert rest == body  # untouched canonical body
+
+
+def test_split_title_body_strip_only_leading_title():
+    title = "Rozdzial"
+    body = "Intro. Midnight struck."
+    t, rest = split_title_body(title, "Rozdzial. Intro. Midnight struck.")
+    assert t == "Rozdzial"
+    assert rest == "Intro. Midnight struck."
+    # trailing match not honored: title must be a *prefix*
+    t2, rest2 = split_title_body(title, "Midnight struck at Rozdzial")
+    assert t2 is None and rest2 == "Midnight struck at Rozdzial"
+
+
+def test_ensure_pause_file_generated_once(tmp_path):
+    calls = []
+
+    def fake_run(args, check=True, **kwargs):
+        calls.append(args)
+        Path(args[-1]).write_bytes(b"silence")
+
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.shutil.which", return_value="ffmpeg"):
+            with patch("core.tts.subprocess.run", side_effect=fake_run):
+                p1 = ensure_pause_file(str(tmp_path), 1.0)
+                p2 = ensure_pause_file(str(tmp_path), 1.0)
+
+    assert p1 == p2 == str(tmp_path / "_pause_1s.mp3")
+    assert Path(p1).is_file()
+    assert len(calls) == 1  # cached on the second call
+    cmd = " ".join(calls[0])
+    assert "anullsrc" in cmd and "24000" in cmd
+    # different duration gets its own file
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.shutil.which", return_value="ffmpeg"):
+            with patch("core.tts.subprocess.run", side_effect=lambda a, **k: Path(a[-1]).write_bytes(b"s")):
+                ensure_pause_file(str(tmp_path), 2.0)
+    assert (tmp_path / "_pause_2s.mp3").is_file()
+
+
+def test_ensure_pause_file_no_ffmpeg_returns_none(tmp_path):
+    with patch("core.tts.ffmpeg_available", return_value=False):
+        assert ensure_pause_file(str(tmp_path)) is None
+
+
+def test_append_silence_concat_replaces_atomically(tmp_path):
+    part = tmp_path / "title.mp3"
+    pause = tmp_path / "_pause_1s.mp3"
+    part.write_text("title", encoding="utf-8")
+    pause.write_text("…", encoding="utf-8")
+
+    def fake_concat(inputs, outp):
+        Path(outp).write_text("|".join(inputs), encoding="utf-8")
+
+    with patch("core.tts.concat_mp3_files", side_effect=fake_concat):
+        from core.tts import _append_silence
+
+        _append_silence(str(part), str(pause))
+
+    # final file has the silence appended, tmp gone
+    assert part.read_text(encoding="utf-8") == f"{part}|{pause}"
+    assert not (tmp_path / "title.mp3.pausetmp").exists()
+
+
+def test_check_build_identity_missing_manifest_is_fresh(tmp_path):
+    wiped, fresh = check_build_identity(str(tmp_path), {"rate": "+0%", "voice": "V"})
+    assert (wiped, fresh) == (False, True)
+    with open(tmp_path / ".speak-epub-build.json", encoding="utf-8") as f:
+        stored = json.load(f)
+    assert stored["rate"] == "+0%" and stored["plan"] == 2
+
+
+def test_check_build_identity_matching_is_pure_resume(tmp_path):
+    check_build_identity(str(tmp_path), {"rate": "+0%", "voice": "V"})
+    wiped, fresh = check_build_identity(str(tmp_path), {"rate": "+0%", "voice": "V"})
+    assert (wiped, fresh) == (False, False)
+
+
+def test_check_build_identity_change_wipes_generated_audio(tmp_path):
+    identity = {"rate": "+0%", "voice": "V1"}
+    check_build_identity(str(tmp_path), identity)
+    parts = tmp_path / "_parts"
+    parts.mkdir()
+    (parts / "039_Ch_part001.mp3").write_bytes(b"x")
+    (parts / "040_Ch.title.mp3").write_bytes(b"x")
+    (tmp_path / "039_Ch.mp3").write_bytes(b"x")
+    (tmp_path / "book.m4b").write_bytes(b"x")
+    (tmp_path / "cover.jpg").write_bytes(b"x")  # never wiped (not generated)
+    (tmp_path / "book.epub").write_bytes(b"x")  # never wiped
+
+    wiped, fresh = check_build_identity(str(tmp_path), {"rate": "+25%", "voice": "V1"})
+    assert wiped is True and fresh is False
+    assert not (parts / "039_Ch_part001.mp3").exists()
+    assert not (parts / "040_Ch.title.mp3").exists()
+    assert not (tmp_path / "039_Ch.mp3").exists()
+    assert not (tmp_path / "book.m4b").exists()
+    assert (tmp_path / "cover.jpg").exists()
+    assert (tmp_path / "book.epub").exists()
+    with open(tmp_path / ".speak-epub-build.json", encoding="utf-8") as f:
+        stored = json.load(f)
+    assert stored["rate"] == "+25%"
+
+
+def test_check_build_identity_corrupt_manifest_counts_as_fresh(tmp_path):
+    (tmp_path / ".speak-epub-build.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "001_Ch.mp3").write_bytes(b"x")
+    wiped, fresh = check_build_identity(str(tmp_path), {"rate": "+0%", "voice": "V"})
+    # grandparented: existing files kept, no wipe
+    assert (wiped, fresh) == (False, True)
+    assert (tmp_path / "001_Ch.mp3").exists()
+
+
+def test_check_build_identity_unwritable_manifest_never_wipes(tmp_path):
+    check_build_identity(str(tmp_path), {"rate": "+0%", "voice": "V"})
+    parts = tmp_path / "_parts"
+    parts.mkdir()
+    (parts / "040_Ch_part001.mp3").write_bytes(b"x")
+    (tmp_path / "040_Ch.mp3").write_bytes(b"x")
+
+    # recording the new identity fails -> nothing is deleted
+    with patch("core.tts.json.dump", side_effect=OSError("denied")):
+        wiped, fresh = check_build_identity(str(tmp_path), {"rate": "+50%", "voice": "V2"}, on_log=lambda m: None)
+
+    assert (wiped, fresh) == (False, False)
+    assert (parts / "040_Ch_part001.mp3").exists()
+    assert (tmp_path / "040_Ch.mp3").exists()
+
+
+def test_split_title_body_only_when_ffmpeg(tmp_path):
+    """Without ffmpeg the legacy layout is kept byte-for-byte (no pause plan)."""
+    chapters = [(7, "Rozdzial 7", "Rozdzial 7. Body text here. " * 30)]
+    safe = sanitize_filename("Rozdzial 7", fallback="Chapter_007")
+    with patch("core.tts.ffmpeg_available", return_value=False):
+        plans, jobs = build_generation_plan(chapters, str(tmp_path / "out"), 3500)
+    assert len(plans) == 1
+    pdf = tmp_path / "out" / f"007_{safe}.mp3"
+    assert plans[0].part_paths == [str(pdf)]
+    assert plans[0].title_part_path is None
+
+
+def test_build_generation_plan_dialogue_voice_override(tmp_path):
+    chapters = [(5, "Ch5", 'Narration one, quite short. „Yes, hello,” she replied. Then narration two.')]
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts._ensure_valid_or_drop", return_value=False):
+            plans, jobs = build_generation_plan(
+                chapters, str(tmp_path / "out"), 3500, dialogue_voice="pl_PL-darkman-medium"
+            )
+    assert len(plans) == 1
+    voices = [(j.part_number, j.voice, j.append_silence_sec) for j in jobs]
+    # three parts: narration, dialogue (override), narration
+    assert [v for _, v, _ in voices] == [None, "pl_PL-darkman-medium", None]
+    assert all(s == 0.0 for _, _, s in voices)
+    assert [p for p, _, _ in voices] == [1, 2, 3]
+    # dialogue text preserved in the dialogue part
+    dlg_job = [j for j in jobs if j.voice][0]
+    assert "Yes, hello," in dlg_job.text
+
+
+def test_build_generation_plan_dialogue_voice_ignores_when_unset(tmp_path):
+    chapters = [(5, "Ch5", 'Narration one. „Yes, hello,” she replied.')]
+    plans, jobs = build_generation_plan(chapters, str(tmp_path / "out"), 3500)
+    # legacy fast path: narration+dialogue in one chunk, no overrides
+    assert plans[0].title_part_path is None
+    assert len(jobs) == 1
+    assert jobs[0].voice is None
+
+
+def test_build_generation_plan_title_split_creates_title_part_with_pause(tmp_path, capsys):
+    text = "Rozdzial 12. " + "Nad morzem wialo. " * 150
+    chapters = [(12, "Rozdzial 12", text)]
+    safe = sanitize_filename("Rozdzial 12", fallback="Chapter_012")
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts._ensure_valid_or_drop", return_value=False):
+            plans, jobs = build_generation_plan(chapters, str(tmp_path / "out"), 3500)
+    assert len(plans) == 1
+    plan = plans[0]
+    out = tmp_path / "out"
+    title_part = plan.title_part_path
+    assert title_part == str(out / f"012_{safe}.title.mp3")
+    assert plan.part_paths == [str(out / "_parts" / f"012_{safe}_part001.mp3")]
+    # exactly one title job (part 0) with the built-in 1 s pause, no override
+    title_jobs = [j for j in jobs if j.output_path == title_part]
+    assert len(title_jobs) == 1
+    assert title_jobs[0].part_number == 0
+    assert title_jobs[0].append_silence_sec == TITLE_PAUSE_SEC == 1.0
+    assert title_jobs[0].voice is None
+    assert title_jobs[0].text.strip().startswith("Rozdzial 12")
+    # body text no longer contains the title (never read twice)
+    body_jobs = [j for j in jobs if j is not title_jobs[0]]
+    assert all(not j.text.strip().startswith("Rozdzial 12") for j in body_jobs)
+
+
+def test_build_generation_plan_title_no_prefix_match_keeps_legacy(tmp_path):
+    body = "Something else entirely opens the chapter. " * 60
+    chapters = [(13, "Very Different Heading", body)]
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts._ensure_valid_or_drop", return_value=False):
+            plans, jobs = build_generation_plan(chapters, str(tmp_path / "out"), 3500)
+    assert plans[0].title_part_path is None
+    assert all(j.get("part_number", 0) != 0 if isinstance(j, dict) else j.part_number != 0 for j in jobs)
+
+
+def test_build_generation_plan_migrate_titles_drops_stale_first_part(tmp_path, capsys):
+    text = "Rozdzial 14. " + "Nad morzem wialo. " * 200
+    chapters = [(14, "Rozdzial 14", text)]
+    out = tmp_path / "out"
+    parts = out / "_parts"
+    parts.mkdir(parents=True)
+    safe = sanitize_filename("Rozdzial 14", fallback="Chapter_014")
+    first_body = parts / f"014_{safe}_part001.mp3"
+    first_body.write_bytes(b"legacy title baked in")
+
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts._ensure_valid_or_drop", return_value=False):
+            build_generation_plan(chapters, str(out), 3500, migrate_titles=True)
+
+    assert not first_body.exists()  # deleted once: title audio baked in
+    assert "title split off" in capsys.readouterr().out
+
+    # a later run (no manifest/fresh semantics here) does NOT delete on its own
+    first_body.write_bytes(b"fresh body part")
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts._ensure_valid_or_drop", return_value=False):
+            build_generation_plan(chapters, str(out), 3500, migrate_titles=False)
+    assert first_body.exists()
+
+
+def test_finalize_chapter_audio_merges_title_part_first(tmp_path):
+    out = tmp_path
+    title_part = out / "009_C9.title.mp3"
+    body_part = out / "_parts" / "009_C9_part001.mp3"
+    body_part.parent.mkdir(parents=True)
+    title_part.write_bytes(b"title")
+    body_part.write_bytes(b"body")
+    plan = ChapterPlan(
+        9,
+        "C9",
+        str(out / "009_C9.mp3"),
+        [str(body_part)],
+        [(9, "C9 - title", str(title_part)), (9, "C9 - part 1", str(body_part))],
+        title_part_path=str(title_part),
+    )
+
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch(
+            "core.tts.concat_mp3_files",
+            side_effect=lambda inputs, outp: Path(outp).write_text("|".join(inputs), encoding="utf-8"),
+        ):
+            entries = finalize_chapter_audio([plan], keep_parts=True)
+
+    merged = (out / "009_C9.mp3").read_text(encoding="utf-8")
+    # audio order: title (with pause already appended) -> body
+    assert merged.split("|") == [str(title_part), str(body_part)]
+    # title part survives keep_parts (only body parts are cleaned)
+    entries_expect = [(9, "C9", str(out / "009_C9.mp3"))]
+    assert entries == entries_expect
+
+
+def test_finalize_chapter_audio_discovers_plan_with_title_fallback():
+    # planning-level guard: ChapterPlan with title part still lists the
+    # chapter file as the single entry, not separate title/part files
+    plan = ChapterPlan(9, "C9", "/x/009_C9.mp3", ["/x/009_C9.mp3"], [], title_part_path=None)
+    with patch("core.tts.ffmpeg_available", return_value=False):
+        with patch("os.path.isfile", side_effect=lambda p: False):
+            entries = finalize_chapter_audio([plan], keep_parts=True)
+    assert entries == []  # missing -> warning only (no invention)
+
+
+def test_run_part_jobs_voice_override_and_title_silence(tmp_path):
+    out = tmp_path / "out"
+    parts = out / "_parts"
+    parts.mkdir(parents=True)
+    title_path = out / "041_C41.title.mp3"
+    dlg_path = parts / "041_C41_part001.mp3"
+    jobs = [
+        PartJob(
+            chapter_number=41, chapter_title="C41", part_number=0, part_count=2,
+            text="Tytul rozdzialu", output_path=str(title_path),
+            is_final_chapter_file=False, append_silence_sec=1.0,
+        ),
+        PartJob(
+            chapter_number=41, chapter_title="C41", part_number=1, part_count=2,
+            text="„Hej, witaj,”", output_path=str(dlg_path),
+            is_final_chapter_file=False, voice="pl_PL-darkman-medium",
+        ),
+    ]
+    seen = []
+
+    async def fake_tts(text, output_path, voice, retries=5):
+        seen.append((output_path, voice))
+        Path(output_path).write_bytes(b"audio")
+
+    pause_calls = []
+    with patch("core.tts.tts_text_to_mp3", new=fake_tts):
+        with patch("core.tts.ensure_pause_file", side_effect=lambda d, s: str(tmp_path / "pause.mp3") if pause_calls.append((d, s)) is None else ""):
+            with patch("core.tts._append_silence", side_effect=lambda a, b: pause_calls.append(("append", a, b))):
+                asyncio.run(run_part_jobs(jobs, voice="en-US-AndrewNeural", parallel=1, retries=5))
+
+    # dialogue job used its override, title job fell back to the run voice
+    assert seen == [
+        (str(title_path), "en-US-AndrewNeural"),
+        (str(dlg_path), "pl_PL-darkman-medium"),
+    ]
+    # silence appended only to the title part
+    appends = [c for c in pause_calls if c[0] == "append"]
+    assert [a for _, a, _ in appends] == [str(title_path)]
+
+
+def test_run_part_jobs_title_pause_skipped_without_ffmpeg(tmp_path, capsys):
+    out = tmp_path / "out"
+    out.mkdir()
+    title_path = out / "042_C42.title.mp3"
+    jobs = [
+        PartJob(
+            chapter_number=42, chapter_title="C42", part_number=0, part_count=1,
+            text="T", output_path=str(title_path),
+            is_final_chapter_file=False, append_silence_sec=1.0,
+        )
+    ]
+    logs = []
+
+    async def fake_tts(text, output_path, voice, retries=5):
+        Path(output_path).write_bytes(b"audio")
+
+    with patch("core.tts.tts_text_to_mp3", new=fake_tts):
+        with patch("core.tts.ensure_pause_file", return_value=None):
+            asyncio.run(run_part_jobs(jobs, voice="v", parallel=1, retries=5, on_log=logs.append))
+
+    assert Path(title_path).read_bytes() == b"audio"  # part kept, pause dropped
+    assert any("no pause appended" in l for l in logs)
+
+
+def test_postprocess_chapter_file_flags(tmp_path):
+    path = tmp_path / "009_C9.mp3"
+    path.write_bytes(b"x")
+    cmds = []
+
+    def fake_run(args, check=True, **kwargs):
+        cmds.append(" ".join(args))
+        Path(args[-1]).write_bytes(b"processed")
+
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.shutil.which", return_value="ffmpeg"):
+            with patch("core.tts.subprocess.run", side_effect=fake_run):
+                assert postprocess_chapter_file(str(path), normalize_audio=True, trim_silence=False) is True
+                assert postprocess_chapter_file(str(path), normalize_audio=False) is False  # nothing to do
+                assert postprocess_chapter_file(str(path), normalize_audio=False, trim_silence=True) is True
+
+    assert "loudnorm" in cmds[0] and "silenceremove" not in cmds[0]
+    assert "silenceremove" in cmds[1] and "loudnorm" not in cmds[1]
+    assert cmds[0].count("24000") >= 1 and "32k" in cmds[0]
+
+
+def test_postprocess_chapter_file_failure_keeps_original(tmp_path, capsys):
+    path = tmp_path / "010_C10.mp3"
+    path.write_bytes(b"original")
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.shutil.which", return_value="ffmpeg"):
+            with patch("core.tts.subprocess.run", side_effect=subprocess.CalledProcessError(1, "ffmpeg")):
+                assert postprocess_chapter_file(str(path), normalize_audio=True) is False
+    assert path.read_bytes() == b"original"
+    assert "keeping original" in capsys.readouterr().out
+
+
+def test_build_m4b_cover_and_artist_metadata(tmp_path, capsys):
+    out = tmp_path / "out_m4b_cov"
+    out.mkdir()
+    a = out / "001_Ch1.mp3"
+    b = out / "002_Ch2.mp3"
+    a.write_bytes(b"a")
+    b.write_bytes(b"b")
+    cover = out / "cover.jpg"
+    cover.write_bytes(b"coverbytes")
+    audio_entries = [(1, "Ch1", str(a)), (2, "Ch2", str(b))]
+
+    camera = []
+
+    def fake_run(args, check=True, **kwargs):
+        camera.append(args)
+        meta = (out / "_metadata.txt").read_text(encoding="utf-8")
+        assert "artist=Jane Writer" in meta
+        (out / "book.m4b").write_bytes(b"m4b" * 1024)
+        return MagicMock(returncode=0)
+
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.ffprobe_available", return_value=True):
+            with patch("core.tts.get_duration_ms", side_effect=[1000, 1000]):
+                with patch("core.tts.subprocess.run", side_effect=fake_run):
+                    build_m4b(
+                        str(out), audio_entries, "book", ext="m4b",
+                        cover_path=str(cover), artist="Jane Writer",
+                    )
+
+    args = camera[0]
+    assert "-i" in args and str(cover) in args
+    assert "-map" in args and "2:v" in args
+    assert "-disposition:v" in args and "attached_pic" in args
+    assert args.count("coverbytes_map") == 0
+    assert (out / "book.m4b").exists()
+
+
+def test_build_m4b_cover_retry_without_cover(tmp_path, capsys):
+    out = tmp_path / "out_m4b_retry"
+    out.mkdir()
+    a = out / "001_Ch1.mp3"
+    a.write_bytes(b"a")
+    cover = out / "cover.png"
+    cover.write_bytes(b"png")
+    attempts = []
+
+    def fake_run(args, check=True, **kwargs):
+        attempts.append(list(args))
+        if len(attempts) == 2:
+            (out / "book.m4b").write_bytes(b"ok")
+            return MagicMock(returncode=0)
+        raise RuntimeError("cover encode broke")
+
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.ffprobe_available", return_value=True):
+            with patch("core.tts.get_duration_ms", side_effect=[1000]):
+                with patch("core.tts.subprocess.run", side_effect=fake_run):
+                    build_m4b(str(out), [(1, "Ch1", str(a))], "book", ext="m4b", cover_path=str(cover))
+
+    assert len(attempts) == 2
+    assert str(cover) in attempts[0]  # first try with cover
+    assert str(cover) not in attempts[1]  # fallback without
+    assert (out / "book.m4b").exists()
+
+
+def test_build_m4b_no_artist_no_metadata_line(tmp_path):
+    out = tmp_path / "out_m4b_noartist"
+    out.mkdir()
+    a = out / "001_Ch1.mp3"
+    a.write_bytes(b"a")
+
+    def fake_run(args, check=True, **kwargs):
+        metadata_path = out / "_metadata.txt"
+        meta = metadata_path.read_text(encoding="utf-8")
+        assert "artist=" not in meta
+        (out / "book.m4b").write_bytes(b"m4b")
+        return MagicMock(returncode=0)
+
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.ffprobe_available", return_value=True):
+            with patch("core.tts.get_duration_ms", side_effect=[1000]):
+                with patch("core.tts.subprocess.run", side_effect=fake_run):
+                    build_m4b(str(out), [(1, "Ch1", str(a))], "book", ext="m4b")
+
 

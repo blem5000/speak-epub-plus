@@ -124,4 +124,33 @@ describe("Queue live — per-chapter row + pill + mini progress + part dots + lo
     expect(screen.getByTestId("elapsed")).toBeInTheDocument();
     expect(screen.getByTestId("elapsed").textContent).toContain("42");
   });
+
+  it("ETA appears from elapsed + partial progress, hidden at 0 or 100%", () => {
+    const chapters = makeChapters(4);
+    // half done after 10s -> ~10s remaining
+    const { rerender } = render(
+      <Queue chapterList={chapters} statuses={{} as Record<number, string>} partStatuses={{}} progress={{ done: 2, total: 4, percent: 50 }} throttle={null} badge={null} logs={[]} elapsedSec={10} />
+    );
+    const eta = screen.getByTestId("eta-label");
+    expect(eta).toBeInTheDocument();
+    expect(eta.textContent).toContain("10");
+
+    // done==0: no basis to estimate — must be absent
+    rerender(
+      <Queue chapterList={chapters} statuses={{} as Record<number, string>} partStatuses={{}} progress={{ done: 0, total: 4, percent: 0 }} throttle={null} badge={null} logs={[]} elapsedSec={10} />
+    );
+    expect(screen.queryByTestId("eta-label")).not.toBeInTheDocument();
+
+    // all done: ETA gone
+    rerender(
+      <Queue chapterList={chapters} statuses={{} as Record<number, string>} partStatuses={{}} progress={{ done: 4, total: 4, percent: 100 }} throttle={null} badge={null} logs={[]} elapsedSec={99} />
+    );
+    expect(screen.queryByTestId("eta-label")).not.toBeInTheDocument();
+
+    // no elapsed yet: hidden even with partial progress
+    rerender(
+      <Queue chapterList={chapters} statuses={{} as Record<number, string>} partStatuses={{}} progress={{ done: 2, total: 4, percent: 50 }} throttle={null} badge={null} logs={[]} />
+    );
+    expect(screen.queryByTestId("eta-label")).not.toBeInTheDocument();
+  });
 });

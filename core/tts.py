@@ -17,6 +17,7 @@ Pure: only os/re/dataclasses/pathlib/typing — no adapters/*, no speak, no edge
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -257,6 +258,12 @@ class PartJob:
     text: str
     output_path: str
     is_final_chapter_file: bool
+    #: Edge voice override for this part (dialogue in a second voice);
+    #: None = the run's voice. Ignored by the local engine.
+    voice: Optional[str] = None
+    #: Seconds of silence appended to this part after synthesis (1.0 s pause
+    #: after a chapter-title part). 0 = none.
+    append_silence_sec: float = 0.0
 
 
 @dataclass
@@ -266,6 +273,9 @@ class ChapterPlan:
     chapter_mp3: str
     part_paths: List[str]
     marker_entries_if_unmerged: List[AudioEntry]
+    #: Title part path (1 s pause appended) merged ahead of part_paths;
+    #: None = legacy layout (no title part). Never deleted by keep_parts.
+    title_part_path: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -455,8 +465,279 @@ def split_text_for_tts(text: str, max_chars: int = 3500) -> List[str]:
     return chunks
 
 
+#: Pause (s) between a chapter-title part and the chapter body. The title is
+#: synthesized as its own leading part and this silence is appended to it,
+#: so listeners hear "Chapter title … <pause> … text" instead of one run-on.
+TITLE_PAUSE_SEC = 1.0
+
+#: Dialogue splitter: Polish „…" (either typographic close), straight "…",
+#: «…», ‹…› (DOTALL, non-greedy). Unmatched quotes stay narration — never
+#: lose or mislabel text.
+_DIALOGUE_RE = re.compile(r"(„.+?[“”]|\".+?\"|«.+?»|‹.+?›)", re.DOTALL)
+
+
+def split_dialogue(text: str) -> List[Tuple[str, bool]]:
+    """Split text into (segment, is_dialogue) at quotation marks.
+
+    Returns [(text, False)] untouched when there are no quotes. Segments
+    cover the whole input (only whitespace-only pieces are dropped, which
+    chunking would collapse anyway).
+    """
+    out: List[Tuple[str, bool]] = []
+    pos = 0
+    for m in _DIALOGUE_RE.finditer(text or ""):
+        if m.start() > pos:
+            out.append((text[pos:m.start()], False))
+        out.append((m.group(0), True))
+        pos = m.end()
+    if pos < len(text or ""):
+        out.append((text[pos:], False))
+    if not out:
+        return [(text, False)] if (text or "").strip() else []
+    return [(s, d) for s, d in out if s.strip()]
+
+
+def split_title_body(title: Optional[str], text: str) -> Tuple[Optional[str], str]:
+    """Split a leading chapter title off the body text.
+
+    Returns (title_text_or_None, body_text). The title is split off only when
+    the body actually starts with it (normalized comparison) — otherwise the
+    title is returned as None and the text is untouched, so no new audio is
+    ever invented and nothing is ever read twice.
+    """
+    body = (text or "").strip()
+    t = (title or "").strip()
+    if not t or not body:
+        return None, body
+    norm = lambda s: re.sub(r"\s+", " ", s).strip()
+    title_n, body_n = norm(t), norm(body)
+    if body_n.startswith(title_n):
+        rest = body_n[len(title_n):].lstrip(" .:;-–—")
+        if rest:
+            return t, rest
+    return None, body
+
+
+def ensure_pause_file(part_dir: str, seconds: float = TITLE_PAUSE_SEC) -> Optional[str]:
+    """Path to a silence MP3 (24 kHz mono, like part files), generating it once.
+
+    Returns None when ffmpeg is unavailable or generation fails — callers
+    then skip the pause instead of failing the build.
+    """
+    if not ffmpeg_available():
+        return None
+    try:
+        name = f"_pause_{seconds:g}s.mp3"
+    except Exception:
+        return None
+    path = os.path.join(part_dir, name)
+    try:
+        if os.path.isfile(path) and os.path.getsize(path) > 0:
+            return path
+    except OSError:
+        pass
+    try:
+        os.makedirs(part_dir, exist_ok=True)
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return None
+        subprocess.run(
+            [
+                ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+                "-t", str(float(seconds)),
+                "-codec:a", "libmp3lame", "-b:a", "32k", "-ac", "1", "-ar", "24000",
+                path,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **subprocess_kwargs(),
+        )
+    except Exception:
+        return None
+    try:
+        return path if os.path.isfile(path) else None
+    except OSError:
+        return None
+
+
+def _append_silence(part_path: str, pause_path: str) -> None:
+    """Append a silence MP3 to a part file, atomically (tmp + replace)."""
+    tmp = part_path + ".pausetmp"
+    try:
+        concat_mp3_files([part_path, pause_path], tmp)
+        os.replace(tmp, part_path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+
+
+#: Build-identity manifest: records the synthesis params an output directory
+#: was generated with, so a later run with different params regenerates
+#: instead of silently reusing wrong audio (rate/voice/engine changes).
+BUILD_IDENTITY_FILENAME = ".speak-epub-build.json"
+
+#: Manifest schema/layout version. Bump when the artifact layout changes
+#: (v2: title parts + pause); a mismatch wipes and rebuilds like any change.
+BUILD_IDENTITY_VERSION = 2
+
+#: Params that define generated audio. A change in any of them invalidates
+#: existing part/chapter files (different speed, voice, engine, processing).
+BUILD_IDENTITY_KEYS = (
+    "rate",
+    "voice",
+    "engine",
+    "local_voice",
+    "dialogue_voice",
+    "normalize_audio",
+    "trim_silence",
+)
+
+
+def check_build_identity(
+    audio_dir: str, identity: Dict[str, Any], on_log: Optional[Callable[[str], None]] = None
+) -> Tuple[bool, bool]:
+    """Ensure the build manifest matches; returns (wiped, fresh).
+
+    - no manifest yet → write it, report fresh=True (caller migrates
+      title-split chapters once); existing files are grandparented, not wiped
+    - params match → (False, False), pure resume
+    - params differ → delete generated artifacts (_parts/*.mp3, chapter
+      *.mp3, *.m4b/*.m4a in this dir), rewrite the manifest, report wiped
+    A manifest that cannot be read/written degrades to (False, False) with
+    a warning — never wipe what cannot be recorded.
+    """
+
+    def _log(msg: str) -> None:
+        if on_log:
+            try:
+                on_log(msg)
+            except Exception:
+                pass
+        else:
+            print(msg)
+
+    manifest = os.path.join(audio_dir, BUILD_IDENTITY_FILENAME)
+    wanted = {k: identity.get(k) for k in BUILD_IDENTITY_KEYS}
+    wanted["plan"] = BUILD_IDENTITY_VERSION
+    try:
+        os.makedirs(audio_dir, exist_ok=True)
+    except OSError:
+        pass
+    try:
+        with open(manifest, "r", encoding="utf-8") as f:
+            stored = json.load(f)
+    except Exception:
+        stored = None
+    if not isinstance(stored, dict):
+        try:
+            with open(manifest, "w", encoding="utf-8") as f:
+                json.dump(wanted, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            _log(f"warning: cannot write build manifest: {e}")
+            return False, False
+        return False, True
+    same = all(stored.get(k) == v for k, v in wanted.items())
+    if same:
+        return False, False
+    # record the new identity BEFORE wiping: never wipe what cannot be
+    # recorded — a failed manifest write leaves the old audio intact
+    try:
+        with open(manifest, "w", encoding="utf-8") as f:
+            json.dump(wanted, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        _log(f"warning: cannot write build manifest: {e}")
+        return False, False
+    # params changed: wipe generated audio so it regenerates with the new ones
+    wiped: List[str] = []
+    try:
+        parts_dir = os.path.join(audio_dir, "_parts")
+        if os.path.isdir(parts_dir):
+            for name in os.listdir(parts_dir):
+                if name.lower().endswith(".mp3"):
+                    try:
+                        os.remove(os.path.join(parts_dir, name))
+                        wiped.append(name)
+                    except OSError:
+                        pass
+        for name in os.listdir(audio_dir):
+            low = name.lower()
+            if low.endswith((".mp3", ".m4b", ".m4a")) and os.path.isfile(os.path.join(audio_dir, name)):
+                try:
+                    os.remove(os.path.join(audio_dir, name))
+                    wiped.append(name)
+                except OSError:
+                    pass
+    except OSError as e:
+        _log(f"warning: build identity wipe failed: {e}")
+        return True, False
+    changed = sorted({f"{k}: {stored.get(k)!r} -> {v!r}" for k, v in wanted.items() if stored.get(k) != v})
+    _log(f"build parameters changed ({'; '.join(changed)}) — regenerating {len(wiped)} audio file(s)")
+    return True, False
+
+
+def postprocess_chapter_file(path: str, normalize_audio: bool = False, trim_silence: bool = False) -> bool:
+    """Apply loudness normalization and/or silence trimming in place.
+
+    Loudness: single-pass loudnorm (podcast levels). Silence: leading and
+    trailing digital silence trimmed (dramatic mid-chapter pauses are kept).
+    Returns True when the file was re-encoded. Never raises: failures warn
+    and leave the original file untouched.
+    """
+    if not (normalize_audio or trim_silence):
+        return False
+    if not ffmpeg_available():
+        print("Warning: audio post-processing needs ffmpeg on PATH — skipping.")
+        return False
+    filters: List[str] = []
+    if normalize_audio:
+        filters.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+    if trim_silence:
+        filters.append(
+            "silenceremove=start_periods=1:start_duration=0.5:start_threshold=-60dB:"
+            "stop_periods=1:stop_duration=0.5:stop_threshold=-60dB"
+        )
+    try:
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return False
+        tmp = path + ".postmp"
+        subprocess.run(
+            [
+                ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                "-i", path,
+                "-codec:a", "libmp3lame", "-b:a", "32k", "-ac", "1", "-ar", "24000",
+                "-af", ",".join(filters),
+                tmp,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **subprocess_kwargs(),
+        )
+        os.replace(tmp, path)
+        return True
+    except Exception as e:
+        print(f"Warning: audio post-processing failed for {Path(path).name} ({e}) — keeping original.")
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+        return False
+
+
 def build_generation_plan(
-    chapters: List[Chapter], output_dir: str, chunk_size: int, rate: Optional[str] = None
+    chapters: List[Chapter],
+    output_dir: str,
+    chunk_size: int,
+    rate: Optional[str] = None,
+    dialogue_voice: Optional[str] = None,
+    migrate_titles: bool = False,
 ) -> Tuple[List[ChapterPlan], List[PartJob]]:
     """
     Build global PartJob queue in reading order.
@@ -472,6 +753,18 @@ def build_generation_plan(
       skipped forever; single-chunk guard applies to chapter_mp3 directly
     - `rate` scales the guard's duration floor for faster speech, so resume
       at high rates does not mistake complete fast files for truncation
+    - chapter titles are synthesized as their own leading part
+      (`{nnn}_{safe}.title.mp3` beside the chapter file) with a 1 s pause
+      appended — but only when the title is already read as part of the
+      text (normalized prefix match) and ffmpeg is available; otherwise the
+      legacy layout is kept byte-for-byte. Body part numbering never
+      changes, so existing part files stay resume-compatible. When the title
+      is split off, the stale first body part (title audio baked in) is
+      re-queued — on `migrate_titles` (first run with a build manifest) it
+      is deleted outright since duration checks cannot tell it apart
+    - `dialogue_voice`: quoted dialogue segments (Polish „…", "…", «…», ‹…›)
+      become their own part jobs with a voice override (Edge engine only);
+      narration keeps the run voice. Without it the plan is unchanged
     - ChapterPlan mirror speak.py:75
     - empty chunks -> plan with [],[] and no jobs
     I/O only (os + ffprobe resume validation), no edge_tts.
@@ -483,62 +776,133 @@ def build_generation_plan(
     # dying later in makedirs with WinError 5.
     output_dir = str(resolve_output_dir(output_dir))
     part_dir = os.path.join(output_dir, "_parts")
+    dlg_voice = dialogue_voice.strip() if isinstance(dialogue_voice, str) and dialogue_voice.strip() else None
+    can_pause = ffmpeg_available()
 
     for chapter_number, title, text in chapters:
         safe_title = sanitize_filename(title, fallback=f"Chapter_{chapter_number:03d}")
         chapter_mp3 = os.path.join(output_dir, f"{chapter_number:03d}_{safe_title}.mp3")
-        chunks = split_text_for_tts(text, max_chars=chunk_size)
 
-        if not chunks:
+        # 1 s title pause: split a leading title off the body. Only when the
+        # title is actually read as part of the text — never invent audio.
+        title_text: Optional[str] = None
+        body_text = text
+        if can_pause:
+            title_text, body_text = split_title_body(title, text)
+
+        # dialogue segmentation per body (narration keeps the run voice)
+        segments = split_dialogue(body_text) if dlg_voice else [(body_text, False)]
+        pieces: List[Tuple[str, Optional[str]]] = []
+        for seg_text, is_dlg in segments:
+            for chunk in split_text_for_tts(seg_text, max_chars=chunk_size):
+                pieces.append((chunk, dlg_voice if (is_dlg and dlg_voice) else None))
+
+        label = f"Chapter {chapter_number:03d}"
+        if not pieces and title_text is None:
             plans.append(ChapterPlan(chapter_number, title, chapter_mp3, [], []))
             continue
 
-        if len(chunks) == 1:
+        # Legacy single-chunk fast path: no title, one body piece -> the
+        # chapter file IS the part (works without ffmpeg, resume-stable).
+        if title_text is None and len(pieces) == 1:
+            chunk_text, chunk_voice = pieces[0]
             plans.append(
                 ChapterPlan(chapter_number, title, chapter_mp3, [chapter_mp3], [(chapter_number, title, chapter_mp3)])
             )
-            if not _ensure_valid_or_drop(chapter_mp3, chunks[0], f"Chapter {chapter_number:03d}", rate=rate):
+            if not _ensure_valid_or_drop(chapter_mp3, chunk_text, label, rate=rate):
                 jobs.append(
                     PartJob(
                         chapter_number=chapter_number,
                         chapter_title=title,
                         part_number=1,
                         part_count=1,
-                        text=chunks[0],
+                        text=chunk_text,
                         output_path=chapter_mp3,
                         is_final_chapter_file=True,
+                        voice=chunk_voice,
                     )
                 )
             continue
 
+        # Title + multi-piece layout: title part beside the chapter file,
+        # body parts numbered exactly as before (resume-compatible).
         os.makedirs(part_dir, exist_ok=True)
-        part_paths: List[str] = []
+        body_paths: List[str] = []
         marker_entries: List[AudioEntry] = []
+        body_pieces = pieces  # (chunk_text, voice_override)
+        total_count = len(body_pieces) + (1 if title_text is not None else 0)
+
+        if title_text is not None and migrate_titles:
+            # first run with the title layout: the old first body part has
+            # title audio baked in, which duration checks cannot tell apart —
+            # drop it once so it regenerates title-free (later runs have a
+            # manifest and skip this; missing files are simply re-queued)
+            first_body = os.path.join(part_dir, f"{chapter_number:03d}_{safe_title}_part001.mp3")
+            try:
+                if os.path.isfile(first_body):
+                    os.remove(first_body)
+                    print(f"{label}: title split off for the pause — regenerating first part")
+            except OSError:
+                pass
+
+        title_path: Optional[str] = None
+        title_ok = True
+        if title_text is not None:
+            title_path = os.path.join(output_dir, f"{chapter_number:03d}_{safe_title}.title.mp3")
+            marker_entries.append((chapter_number, title, title_path))
+            title_ok = _ensure_valid_or_drop(title_path, title_text, f"{label} title", rate=rate)
+            if not title_ok:
+                jobs.append(
+                    PartJob(
+                        chapter_number=chapter_number,
+                        chapter_title=title,
+                        part_number=0,
+                        part_count=total_count,
+                        text=title_text,
+                        output_path=title_path,
+                        is_final_chapter_file=False,
+                        voice=None,
+                        append_silence_sec=TITLE_PAUSE_SEC,
+                    )
+                )
 
         # A merged chapter file with gaps (built from truncated parts by an
-        # older run) must not shadow its parts: verify against the full text.
-        merged_ok = _ensure_valid_or_drop(chapter_mp3, text, f"Chapter {chapter_number:03d}", rate=rate)
-        for part_number, chunk in enumerate(chunks, 1):
+        # older run) must not shadow its parts: verify against the body text.
+        # The merge is also stale whenever the title part is (re)generated:
+        # it was built without the title+pause.
+        merged_ok = _ensure_valid_or_drop(chapter_mp3, body_text, label, rate=rate) and title_ok
+        if title_path is not None and not merged_ok:
+            # drop a stale merge so finalize rebuilds it (cheap concat; parts
+            # are reused) — a valid chapter without the title+pause must not
+            # shadow the freshly generated title part
+            try:
+                if os.path.isfile(chapter_mp3):
+                    os.remove(chapter_mp3)
+            except OSError:
+                pass
+
+        for part_number, (chunk_text, chunk_voice) in enumerate(body_pieces, 1):
             part_path = os.path.join(part_dir, f"{chapter_number:03d}_{safe_title}_part{part_number:03d}.mp3")
-            part_paths.append(part_path)
+            body_paths.append(part_path)
             marker_entries.append((chapter_number, f"{title} - part {part_number}", part_path))
 
             if not merged_ok and not _ensure_valid_or_drop(
-                part_path, chunk, f"Chapter {chapter_number:03d} part {part_number:03d}", rate=rate
+                part_path, chunk_text, f"{label} part {part_number:03d}", rate=rate
             ):
                 jobs.append(
                     PartJob(
                         chapter_number=chapter_number,
                         chapter_title=title,
                         part_number=part_number,
-                        part_count=len(chunks),
-                        text=chunk,
+                        part_count=total_count,
+                        text=chunk_text,
                         output_path=part_path,
                         is_final_chapter_file=False,
+                        voice=chunk_voice,
                     )
                 )
 
-        plans.append(ChapterPlan(chapter_number, title, chapter_mp3, part_paths, marker_entries))
+        plans.append(ChapterPlan(chapter_number, title, chapter_mp3, body_paths, marker_entries, title_path))
 
     return plans, jobs
 
@@ -1094,7 +1458,10 @@ async def run_part_jobs(
                         else:
                             if gate is not None:
                                 tts_kwargs["on_retry"] = _on_retry
-                            await tts_text_to_mp3(job.text, job.output_path, voice, **tts_kwargs)
+                            # dialogue voice override (Edge engine only; the
+                            # local engine ignores per-part voices)
+                            eff_voice = job.voice or voice
+                            await tts_text_to_mp3(job.text, job.output_path, eff_voice, **tts_kwargs)
                     except asyncio.CancelledError:
                         # cancelled mid-save: drop truncated file so resume heals (H6)
                         try:
@@ -1120,6 +1487,29 @@ async def run_part_jobs(
                                 except Exception:
                                     pass
                         raise
+                    # title pause: append silence to the finished part so the
+                    # chapter merge plays "title … pause … text". A failed
+                    # append only drops the pause (loud warning), never the part.
+                    try:
+                        silence_sec = float(job.append_silence_sec or 0.0)
+                    except Exception:
+                        silence_sec = 0.0
+                    if silence_sec > 0:
+                        pause_path = ensure_pause_file(
+                            os.path.dirname(job.output_path) or ".", silence_sec
+                        )
+                        if pause_path is None:
+                            _emit_log(
+                                f"warning: no pause appended to Chapter {job.chapter_number:03d} title "
+                                f"(ffmpeg unavailable)"
+                            )
+                        else:
+                            try:
+                                _append_silence(job.output_path, pause_path)
+                            except Exception as e:
+                                _emit_log(
+                                    f"warning: title pause skipped for Chapter {job.chapter_number:03d}: {e}"
+                                )
                     try:
                         size_kb = os.path.getsize(job.output_path) // 1024
                     except OSError:
@@ -1314,11 +1704,17 @@ def finalize_chapter_audio(
     plans: List[ChapterPlan],
     keep_parts: bool,
     on_chapter: Optional[Callable[[int, int], None]] = None,
+    normalize_audio: bool = False,
+    trim_silence: bool = False,
 ) -> List[AudioEntry]:
     """Merge part files into per-chapter MP3s (or keep parts without ffmpeg).
 
     `on_chapter(done, total)` fires once per plan (all exit paths) so long
     batch jobs can show merge progress. Optional — CLI/tests omit it.
+
+    With `normalize_audio`/`trim_silence`, each finished chapter file is
+    re-encoded through loudnorm and/or leading/trailing silence trimming
+    (postprocess_chapter_file) before it is listed.
     """
     audio_entries: List[AudioEntry] = []
     has_ffmpeg = ffmpeg_available()
@@ -1342,11 +1738,17 @@ def finalize_chapter_audio(
             _emit_chapter()
             continue
 
+        # merge inputs: title part (with its appended pause) ahead of bodies
+        title_part = getattr(plan, "title_part_path", None)
+        merge_inputs = ([title_part] if title_part else []) + list(plan.part_paths)
+
         # Single-chunk chapter.
         if len(plan.part_paths) == 1 and plan.part_paths[0] == plan.chapter_mp3:
             # validate exists and non-empty / is file
             try:
                 if os.path.isfile(plan.chapter_mp3) and os.path.getsize(plan.chapter_mp3) > 0:
+                    if normalize_audio or trim_silence:
+                        postprocess_chapter_file(plan.chapter_mp3, normalize_audio, trim_silence)
                     audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
                 else:
                     # zero-byte or not a file -> treat as missing
@@ -1391,7 +1793,7 @@ def finalize_chapter_audio(
             except OSError:
                 pass
 
-        missing_parts = [p for p in plan.part_paths if not os.path.exists(p)]
+        missing_parts = [p for p in merge_inputs if not os.path.exists(p)]
         if missing_parts:
             print(f"Warning: Chapter {plan.chapter_number:03d} has missing part files; keeping available parts only.")
             for entry in (plan.marker_entries_if_unmerged or []):
@@ -1404,9 +1806,11 @@ def finalize_chapter_audio(
             continue
 
         if has_ffmpeg:
-            print(f"Chapter {plan.chapter_number:03d}: merging {len(plan.part_paths)} part(s)")
+            print(f"Chapter {plan.chapter_number:03d}: merging {len(merge_inputs)} part(s)")
             try:
-                concat_mp3_files(plan.part_paths, plan.chapter_mp3)
+                concat_mp3_files(merge_inputs, plan.chapter_mp3)
+                if normalize_audio or trim_silence:
+                    postprocess_chapter_file(plan.chapter_mp3, normalize_audio, trim_silence)
                 audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
                 if not keep_parts:
                     for part_path in plan.part_paths:
@@ -1489,6 +1893,8 @@ def build_m4b(
     bitrate: str = "32k",
     on_progress: Optional[Callable[[int, int], None]] = None,
     on_probe: Optional[Callable[[int, int], None]] = None,
+    cover_path: Optional[str] = None,
+    artist: Optional[str] = None,
 ) -> None:
     # defensive ext whitelist
     if ext not in ("m4b", "m4a"):
@@ -1527,7 +1933,10 @@ def build_m4b(
 
         with open(metadata_file, "w", encoding="utf-8") as f:
             f.write(";FFMETADATA1\n")
-            f.write(f"title={escape_ffmeta(book_title)}\n\n")
+            f.write(f"title={escape_ffmeta(book_title)}\n")
+            if isinstance(artist, str) and artist.strip():
+                f.write(f"artist={escape_ffmeta(artist.strip()[:200])}\n")
+            f.write("\n")
             cursor = 0
             _probe_total = len(audio_entries)
             for _probe_i, (chapter_number, marker_title, path) in enumerate(audio_entries, 1):
@@ -1575,8 +1984,16 @@ def build_m4b(
         _prog_thread = threading.Thread(target=_poll_output_size, daemon=True)
         _prog_thread.start()
 
-        subprocess.run(
-            [
+        cover_ok: Optional[str] = None
+        if isinstance(cover_path, str) and cover_path.strip():
+            _cp = cover_path.strip()
+            if os.path.isfile(_cp) and os.path.splitext(_cp)[1].lower() in (".jpg", ".jpeg", ".png"):
+                cover_ok = _cp
+            else:
+                print(f"Warning: cover art not usable (need .jpg/.png), continuing without it: {cover_path}")
+
+        def _encode_args(with_cover: Optional[str]) -> list:
+            args = [
                 "ffmpeg",
                 "-y",
                 "-f",
@@ -1587,17 +2004,32 @@ def build_m4b(
                 concat_file,
                 "-i",
                 metadata_file,
-                "-map_metadata",
-                "1",
-                "-c:a",
-                "aac",
-                "-b:a",
-                bitrate,
-                out_path,
-            ],
-            check=True,
-            **subprocess_kwargs(),
-        )
+            ]
+            if with_cover:
+                args += ["-i", with_cover]
+            args += ["-map_metadata", "1", "-map", "0:a"]
+            if with_cover:
+                args += ["-map", "2:v", "-c:v", "copy", "-disposition:v", "attached_pic"]
+            args += ["-c:a", "aac", "-b:a", bitrate, out_path]
+            return args
+
+        try:
+            subprocess.run(
+                _encode_args(cover_ok),
+                check=True,
+                **subprocess_kwargs(),
+            )
+        except Exception as e:
+            if cover_ok is None:
+                raise
+            # cover-related encode failure must not lose the audiobook:
+            # retry the exact same encode without cover art
+            print(f"Warning: {ext.upper()} encode with cover failed ({e}) — retrying without cover art.")
+            subprocess.run(
+                _encode_args(None),
+                check=True,
+                **subprocess_kwargs(),
+            )
     finally:
         try:
             _prog_stop.set()
@@ -1633,6 +2065,14 @@ __all__ = [
     "MIN_DURATION_RATIO",
     "MIN_TEXT_LEN_FOR_DURATION_CHECK",
     "TRUNC_SPLIT_FLOOR",
+    "TITLE_PAUSE_SEC",
+    "verify_part_audio",
+    "split_text_for_tts",
+    "split_dialogue",
+    "split_title_body",
+    "ensure_pause_file",
+    "check_build_identity",
+    "postprocess_chapter_file",
     "verify_part_audio",
     "split_text_for_tts",
     "build_generation_plan",

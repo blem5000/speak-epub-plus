@@ -12,6 +12,7 @@ import {
   type AudioResult,
   type MergeProgressEvent,
 } from "@/lib/sidecar";
+import { notifyBuildDone } from "@/lib/notify";
 import ProgressTrack from "./ProgressTrack";
 
 type AudiobookProps = {
@@ -212,15 +213,22 @@ const Audiobook = forwardRef<AudiobookHandle, AudiobookProps>(function Audiobook
         return;
       }
       if (isAudioResult(res)) {
-        setResult(res.result as unknown as AudioResult);
+        const done = res.result as unknown as AudioResult;
+        setResult(done);
         setError(null);
+        void notifyBuildDone(
+          t("audio.title") as string,
+          t("notify.audio.done", { n: done.chapter_count }) as string
+        );
       } else {
         setError("unknown audio result");
+        void notifyBuildDone(t("audio.title") as string, t("notify.audio.failed") as string);
       }
     } catch (e) {
       if (stopRequestedRef.current) return;
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
+      void notifyBuildDone(t("audio.title") as string, t("notify.audio.failed") as string);
     } finally {
       stopRequestedRef.current = false;
       abortRef.current = null;

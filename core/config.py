@@ -63,6 +63,9 @@ DEFAULT_STORE: Dict[str, Any] = {
     "locale": "",
     "engine": "auto",
     "localVoice": "",
+    "dialogueVoice": "",
+    "normalizeAudio": False,
+    "trimSilence": False,
 }
 
 # Simple in-memory cache for listChapters url -> serialized list (FR2) — KEEP per re-review decision
@@ -2233,6 +2236,102 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         except Exception as e:
             return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
 
+    if method in ("previewVoice", "preview_voice"):
+        params = request.get("params") or {}
+        if not isinstance(params, dict):
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "params must be object"}}
+        text_pv = params.get("text", "")
+        if not isinstance(text_pv, str) or not text_pv.strip():
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "text must be non-empty"}}
+        text_pv = text_pv.strip()[:500]
+        voice_pv = params.get("voice")
+        rate_pv = params.get("rate")
+        engine_pv = params.get("engine")
+        local_voice_pv = params.get("localVoice", params.get("local_voice"))
+        try:
+            store_pv = load_store()
+        except Exception:
+            store_pv = {}
+        if not isinstance(store_pv, dict):
+            store_pv = {}
+        if not isinstance(voice_pv, str) or not voice_pv.strip():
+            voice_pv = str(store_pv.get("voice", "en-US-AndrewNeural") or "en-US-AndrewNeural")
+        voice_pv = voice_pv.strip()[:100]
+        if rate_pv is None:
+            rate_pv = store_pv.get("rate", "+0%")
+        try:
+            from core.tts import normalize_tts_rate as _norm_pv
+
+            rate_pv = _norm_pv(rate_pv)
+        except Exception:
+            rate_pv = "+0%"
+        if engine_pv is None:
+            engine_pv = store_pv.get("engine", "auto")
+        engine_pv = engine_pv.strip().lower() if isinstance(engine_pv, str) else "auto"
+        if engine_pv not in ("auto", "edge", "local"):
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid engine {engine_pv}"}}
+        if local_voice_pv is None:
+            local_voice_pv = store_pv.get("localVoice") or None
+        local_voice_pv = local_voice_pv.strip() if isinstance(local_voice_pv, str) else None
+        if local_voice_pv == "":
+            local_voice_pv = None
+        try:
+            from core.tts_local import (
+                DEFAULT_LOCAL_VOICE as _DEF_PV,
+                _local_unavailable_message as _unavail_pv,
+                local_voice_ready as _ready_pv,
+                resolve_engine as _resolve_pv,
+                validate_local_voice as _validate_pv,
+            )
+            from core.tts import user_output_base as _uob_pv
+
+            _pv_voice = local_voice_pv or _DEF_PV
+            if local_voice_pv is not None:
+                _pv_voice = _validate_pv(local_voice_pv)
+            engine_used = _resolve_pv(engine_pv, local_voice_pv)
+            if engine_used == "local" and not _ready_pv(_pv_voice):
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": _unavail_pv(_pv_voice)}}
+            preview_dir = _uob_pv() / "_preview"
+            try:
+                preview_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                return {"id": rid, "error": {"code": "EXCEPTION", "message": f"cannot create preview dir: {e}"}}
+            out_pv = preview_dir / "voice_sample.mp3"
+
+            async def _preview_run():
+                if engine_used == "local":
+                    import asyncio as _aio_pv
+
+                    from core.tts_local import tts_text_to_mp3_local as _local_pv
+
+                    await _aio_pv.to_thread(_local_pv, text_pv, str(out_pv), _pv_voice, 3, rate_pv)
+                else:
+                    from core.tts import tts_text_to_mp3 as _edge_pv
+
+                    await _edge_pv(text_pv, str(out_pv), voice_pv, retries=3, rate=rate_pv)
+
+            import asyncio as _asyncio_pv
+
+            try:
+                _asyncio_pv.run(_preview_run())
+            except RuntimeError:
+                # already inside a loop (library use): drive on a fresh loop
+                import concurrent.futures as _cf_pv
+
+                with _cf_pv.ThreadPoolExecutor(max_workers=1) as _ex:
+                    _ex.submit(_asyncio_pv.run, _preview_run()).result()
+            try:
+                from core.tts import get_duration_ms as _dur_pv
+
+                dur = _dur_pv(str(out_pv))
+            except Exception:
+                dur = 0
+            return {"id": rid, "result": {"path": str(out_pv), "engine": engine_used, "durationMs": dur}}
+        except ValueError as e:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
     if method in ("buildAudio", "build_audio", "buildAudiobook"):
         import re as _re_audio
         from urllib.parse import urlparse as _up_audio
@@ -2247,9 +2346,13 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         outputDir_p = params.get("outputDir", params.get("output_dir", params.get("output")))
         urls_p = params.get("urls", params.get("chapterUrls", params.get("chapter_urls")))
         voice_p = params.get("voice", params.get("voiceName"))
+        author_p = params.get("author", params.get("authorName"))
         rate_p = params.get("rate")
         engine_p = params.get("engine")
         local_voice_p = params.get("localVoice", params.get("local_voice"))
+        dialogue_voice_p = params.get("dialogueVoice", params.get("dialogue_voice"))
+        normalize_audio_p = params.get("normalizeAudio", params.get("normalize_audio"))
+        trim_silence_p = params.get("trimSilence", params.get("trim_silence"))
         bitrate_p = params.get("audioBitrate", params.get("audio_bitrate", params.get("bitrate")))
         parallel_p = params.get("parallel")
         retries_p = params.get("retries")
@@ -2293,6 +2396,32 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 voice_p = str(store_audio.get("voice", "en-US-AndrewNeural"))
             except Exception:
                 voice_p = "en-US-AndrewNeural"
+        if isinstance(author_p, str):
+            author_p = author_p.strip()[:200] or None
+        else:
+            author_p = None
+        if dialogue_voice_p is None:
+            try:
+                dialogue_voice_p = store_audio.get("dialogueVoice", "") if isinstance(store_audio, dict) else ""
+            except Exception:
+                dialogue_voice_p = ""
+        dialogue_voice_p = dialogue_voice_p.strip()[:100] if isinstance(dialogue_voice_p, str) else ""
+        if not dialogue_voice_p:
+            dialogue_voice_p = None
+        if normalize_audio_p is None:
+            try:
+                normalize_audio_p = bool(store_audio.get("normalizeAudio", False)) if isinstance(store_audio, dict) else False
+            except Exception:
+                normalize_audio_p = False
+        else:
+            normalize_audio_p = bool(normalize_audio_p)
+        if trim_silence_p is None:
+            try:
+                trim_silence_p = bool(store_audio.get("trimSilence", False)) if isinstance(store_audio, dict) else False
+            except Exception:
+                trim_silence_p = False
+        else:
+            trim_silence_p = bool(trim_silence_p)
         if bitrate_p is None:
             try:
                 bitrate_p = str(store_audio.get("audioBitrate", "32k")) if isinstance(store_audio, dict) else "32k"
@@ -2465,11 +2594,15 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 rate=rate_p,
                 engine=engine_p,
                 local_voice=local_voice_p,
+                dialogue_voice=dialogue_voice_p,
+                author=author_p,
                 parallel=parallel_p,
                 retries=retries_p,
                 chunk_size=chunk_p,
                 audio_format=format_p or "m4b",
                 audio_bitrate=bitrate_p,
+                normalize_audio=normalize_audio_p,
+                trim_silence=trim_silence_p,
                 keep_parts=keep_parts_bool,
                 keep_mp3=None,
                 on_part_status=_emit_audio_part,
@@ -2554,6 +2687,12 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     return "engine"
                 if low in ("localvoice", "local_voice", "local-voice"):
                     return "localVoice"
+                if low in ("dialoguevoice", "dialogue_voice", "dialogue-voice"):
+                    return "dialogueVoice"
+                if low in ("normalizeaudio", "normalize_audio", "normalize-audio"):
+                    return "normalizeAudio"
+                if low in ("trimsilence", "trim_silence", "trim-silence"):
+                    return "trimSilence"
                 # direct canonicals keep case
                 if k in ("chunk-size", "chunk_size", "chunkSize"):
                     return "chunk-size"
@@ -2626,6 +2765,19 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                             sanitized[ck] = vv
                     else:
                         return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "localVoice must be string"}}
+                elif ck == "dialogueVoice":
+                    # second Edge voice for quoted dialogue; "" = single voice
+                    if v is None:
+                        sanitized[ck] = ""
+                    elif isinstance(v, str):
+                        vv = v.strip()
+                        sanitized[ck] = vv[:100] if len(vv) > 100 else vv
+                    else:
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "dialogueVoice must be string"}}
+                elif ck == "normalizeAudio":
+                    sanitized[ck] = _to_bool_store(v)
+                elif ck == "trimSilence":
+                    sanitized[ck] = _to_bool_store(v)
                 elif ck == "parallel":
                     if isinstance(v, bool):
                         return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "parallel must be integer"}}

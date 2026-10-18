@@ -199,8 +199,8 @@ def escape_ffmeta(s: str) -> str:
     return _core_escape(s)
 
 
-def build_generation_plan(chapters: list[Chapter], output_dir: str, chunk_size: int, rate: str | None = None) -> tuple[list[ChapterPlan], list[PartJob]]:
-    return _core_build_plan(chapters, output_dir, chunk_size, rate=rate)
+def build_generation_plan(chapters: list[Chapter], output_dir: str, chunk_size: int, rate: str | None = None, dialogue_voice: str | None = None, migrate_titles: bool = False) -> tuple[list[ChapterPlan], list[PartJob]]:
+    return _core_build_plan(chapters, output_dir, chunk_size, rate=rate, dialogue_voice=dialogue_voice, migrate_titles=migrate_titles)
 
 
 async def run_part_jobs(
@@ -219,12 +219,51 @@ async def run_part_jobs(
     )
 
 
-def finalize_chapter_audio(plans: list[ChapterPlan], keep_parts: bool) -> list[AudioEntry]:
-    return _core_finalize(plans, keep_parts)
+def finalize_chapter_audio(plans: list[ChapterPlan], keep_parts: bool, normalize_audio: bool = False, trim_silence: bool = False) -> list[AudioEntry]:
+    return _core_finalize(plans, keep_parts, normalize_audio=normalize_audio, trim_silence=trim_silence)
 
 
-def build_m4b(output_dir: str, audio_entries: list[AudioEntry], book_title: str, ext: str = "m4b", bitrate: str = "32k") -> None:
-    return _core_m4b(output_dir, audio_entries, book_title, ext, bitrate=bitrate)
+def build_m4b(output_dir: str, audio_entries: list[AudioEntry], book_title: str, ext: str = "m4b", bitrate: str = "32k", cover_path: str | None = None, artist: str | None = None) -> None:
+    return _core_m4b(output_dir, audio_entries, book_title, ext, bitrate=bitrate, cover_path=cover_path, artist=artist)
+
+
+def extract_cover_and_author(epub_path: str, output_dir: str) -> tuple[str | None, str | None]:
+    """Best-effort (cover_path, author) from EPUB metadata. Never raises."""
+    cover_path: str | None = None
+    author: str | None = None
+    try:
+        book = epub.read_epub(epub_path)
+    except Exception:
+        return None, None
+    try:
+        md = book.get_metadata("DC", "creator")
+        if md and md[0] and md[0][0]:
+            author = str(md[0][0]).strip() or None
+    except Exception:
+        pass
+    try:
+        image_type = getattr(ebooklib, "ITEM_IMAGE", "image")
+        for item in book.get_items():
+            try:
+                if item.get_type() != image_type:
+                    continue
+                name = f"{item.get_id() or ''} {item.get_name() or ''}".lower()
+                if "cover" not in name:
+                    continue
+                blob = item.get_content()
+                if not blob:
+                    continue
+                ext = ".jpg"
+                if name.endswith(".png") or "png" in (item.get_media_type() or ""):
+                    ext = ".png"
+                cover_path = str(Path(output_dir) / f"cover{ext}")
+                Path(cover_path).write_bytes(blob)
+                break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return cover_path, author
 
 
 async def convert(
@@ -243,6 +282,9 @@ async def convert(
     rate: str = "+0%",
     engine: str = "auto",
     local_voice: str | None = None,
+    dialogue_voice: str | None = None,
+    normalize_audio: bool = False,
+    trim_silence: bool = False,
 ) -> None:
     try:
         chapters = extract_chapters(epub_path, start_chapter=start_chapter, end_chapter=end_chapter)
@@ -276,6 +318,13 @@ async def convert(
     if engine and engine != "edge":
         suffix = f" ({local_voice})" if local_voice else ""
         print(f"TTS engine: {engine}{suffix}")
+    dialogue_voice = (dialogue_voice or "").strip() or None
+    if dialogue_voice:
+        print(f"Dialogue voice: {dialogue_voice}")
+    if normalize_audio:
+        print("Audio post-processing: loudness normalization on")
+    if trim_silence:
+        print("Audio post-processing: silence trimming on")
     print(f"Output folder: {output_dir}\n")
 
     # fail fast / warn upfront: truncation auto-repair, chapter merging and
@@ -286,12 +335,39 @@ async def convert(
             return
         print("Warning: ffmpeg not found on PATH — chapter merging, M4B/M4A and truncation auto-repair are disabled.")
 
+    # build identity: a changed rate/voice/engine must regenerate instead of
+    # silently reusing wrong audio (returns True when wiped, plus fresh flag
+    # for the one-time title-layout migration)
+    from core.tts import check_build_identity as _check_ident
+
+    _eng_norm = str(engine or "").strip().lower() or "auto"
+    if _eng_norm not in ("auto", "edge", "local"):
+        _eng_norm = "auto"
+    _wiped, _fresh = _check_ident(
+        output_dir,
+        {
+            "rate": rate,
+            "voice": voice,
+            "engine": _eng_norm,
+            "local_voice": (local_voice or "").strip() or None,
+            "dialogue_voice": dialogue_voice,
+            "normalize_audio": bool(normalize_audio),
+            "trim_silence": bool(trim_silence),
+        },
+    )
+
+    cover_path, book_author = extract_cover_and_author(epub_path, output_dir)
+    if cover_path:
+        print(f"Cover art: {cover_path}")
+    if book_author:
+        print(f"Author: {book_author}")
+
     for chapter_number, title, text in chapters:
         chunks = split_text_for_tts(text, max_chars=chunk_size)
         display_title = title[:60] if title else f"Chapter {chapter_number}"
         print(f"Chapter {chapter_number:03d}: {display_title} - {len(text):,} chars, {len(chunks)} part(s)")
 
-    plans, jobs = build_generation_plan(chapters, output_dir, chunk_size, rate=rate)
+    plans, jobs = build_generation_plan(chapters, output_dir, chunk_size, rate=rate, dialogue_voice=dialogue_voice, migrate_titles=_fresh)
     print(f"\nQueued {len(jobs)} new TTS part job(s).")
 
     try:
@@ -304,7 +380,9 @@ async def convert(
         print("Already generated MP3 files are kept. Re-run the same command to resume.")
         raise
 
-    audio_entries = finalize_chapter_audio(plans, keep_parts=keep_parts)
+    audio_entries = finalize_chapter_audio(
+        plans, keep_parts=keep_parts, normalize_audio=normalize_audio, trim_silence=trim_silence
+    )
     print(f"\nDone! {len(audio_entries)} audio file(s)/entry saved to: {output_dir}")
 
     if m4b or m4a:
@@ -315,13 +393,14 @@ async def convert(
             book_title = f"{base_book_title}_chapters_{start_chapter:03d}_to_{end_chapter:03d}"
         ext = "m4a" if m4a else "m4b"
         print(f"M4B/M4A bitrate: {bitrate}")
-        build_m4b(output_dir, audio_entries, book_title, ext, bitrate=bitrate)
+        build_m4b(output_dir, audio_entries, book_title, ext, bitrate=bitrate, cover_path=cover_path, artist=book_author)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Speak EPUB: convert an EPUB file to an audiobook")
-    parser.add_argument("epub", nargs="?", help="Path to the EPUB file")
+    parser.add_argument("epub", nargs="*", help="Path(s) to EPUB file(s) — several books convert sequentially, failures don't stop the queue")
     parser.add_argument("--voice", default="en-US-AndrewNeural", help="Edge TTS voice name. Default: en-US-AndrewNeural")
+    parser.add_argument("--dialogue-voice", default="", help="Edge voice for quoted dialogue (narration keeps --voice). Empty: single voice. Edge engine only.")
     parser.add_argument("--output", default=None, help="Output folder name. Default: <epub_name>_audiobook")
     parser.add_argument("--m4b", action="store_true", help="Combine MP3s into a single M4B audiobook file. Requires ffmpeg.")
     parser.add_argument("--m4a", action="store_true", help="Combine MP3s into a single M4A audiobook file. Requires ffmpeg.")
@@ -337,6 +416,8 @@ def main() -> None:
     parser.add_argument("--engine", choices=["auto", "edge", "local"], default="auto", help="TTS engine: auto (local Piper on fast CPUs when the model is downloaded, else Edge), edge (cloud), local (offline Piper). Default: auto.")
     parser.add_argument("--local-voice", default="", help="Piper voice for the local engine, e.g. pl_PL-darkman-medium. Empty: default voice.")
     parser.add_argument("--bitrate", default="32k", help="M4B/M4A audio bitrate like 32k (16k-128k, speech default: 32k).")
+    parser.add_argument("--normalize-audio", action="store_true", help="Normalize chapter loudness (podcast levels) after merging.")
+    parser.add_argument("--trim-silence", action="store_true", help="Trim leading/trailing silence of each chapter (dramatic pauses kept).")
 
     args = parser.parse_args()
 
@@ -348,9 +429,8 @@ def main() -> None:
         parser.print_help()
         sys.exit(1)
 
-    epub_path = Path(args.epub)
-    if not epub_path.exists():
-        print(f"File not found: {epub_path}")
+    if len(args.epub) > 1 and args.output:
+        print("Error: --output cannot be combined with multiple EPUB files (one folder per book).")
         sys.exit(1)
 
     if args.m4b and args.m4a:
@@ -394,27 +474,55 @@ def main() -> None:
         print("Error: --bitrate must be like 32k (16k-128k).")
         sys.exit(1)
 
-    output_dir = args.output or (epub_path.stem + "_audiobook")
+    dialogue_voice_arg = (args.dialogue_voice or "").strip() or None
 
-    asyncio.run(
-        convert(
-            str(epub_path),
-            output_dir,
-            args.voice,
-            args.m4b,
-            args.m4a,
-            start_chapter=args.start_chapter,
-            end_chapter=args.end_chapter,
-            chunk_size=args.chunk_size,
-            keep_parts=args.keep_parts,
-            parallel=args.parallel,
-            retries=args.retries,
-            bitrate=f"{int(_bitrate_match.group(1))}k",
-            rate=_core_norm_rate(args.rate),
-            engine=args.engine,
-            local_voice=local_voice_arg,
-        )
-    )
+    failures: list[str] = []
+    for _idx, _epub_arg in enumerate(args.epub, 1):
+        epub_path = Path(_epub_arg)
+        if not epub_path.exists():
+            print(f"File not found: {_epub_arg}")
+            failures.append(_epub_arg)
+            continue
+        if len(args.epub) > 1:
+            print(f"\n=== Book {_idx}/{len(args.epub)}: {_epub_arg} ===")
+        output_dir = args.output or (epub_path.stem + "_audiobook")
+
+        try:
+            asyncio.run(
+                convert(
+                    str(epub_path),
+                    output_dir,
+                    args.voice,
+                    args.m4b,
+                    args.m4a,
+                    start_chapter=args.start_chapter,
+                    end_chapter=args.end_chapter,
+                    chunk_size=args.chunk_size,
+                    keep_parts=args.keep_parts,
+                    parallel=args.parallel,
+                    retries=args.retries,
+                    bitrate=f"{int(_bitrate_match.group(1))}k",
+                    # raw rate: convert() canonicalizes bare numbers ("25" -> "+25%")
+                    rate=args.rate,
+                    engine=args.engine,
+                    local_voice=local_voice_arg,
+                    dialogue_voice=dialogue_voice_arg,
+                    normalize_audio=args.normalize_audio,
+                    trim_silence=args.trim_silence,
+                )
+            )
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as e:
+            print(f"\nERROR converting {_epub_arg}: {e}")
+            print("Already generated MP3 files are kept. Re-run the same command to resume.")
+            failures.append(_epub_arg)
+
+    if failures:
+        print(f"\n{len(failures)} of {len(args.epub)} book(s) failed: {', '.join(failures)}")
+        sys.exit(1)
+    if len(args.epub) > 1:
+        print(f"\nAll {len(args.epub)} book(s) converted successfully.")
 
 
 if __name__ == "__main__":

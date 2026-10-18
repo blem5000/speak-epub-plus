@@ -280,6 +280,8 @@ def build_audio(
     rate: str | None = None,
     engine: str | None = None,
     local_voice: str | None = None,
+    dialogue_voice: str | None = None,
+    author: str | None = None,
     parallel: int = 3,
     retries: int = 5,
     chunk_size: int = 3500,
@@ -288,6 +290,8 @@ def build_audio(
     keep_mp3: Optional[bool] = None,
     auto_boilerplate: bool | None = None,
     audio_bitrate: str | None = None,
+    normalize_audio: bool | None = None,
+    trim_silence: bool | None = None,
     on_part_status: Optional[Callable[[dict], None]] = None,
     on_log: Optional[Callable[[str], None]] = None,
     on_progress: Optional[Callable[[int, int], None]] = None,
@@ -360,6 +364,26 @@ def build_audio(
         local_voice = local_voice.strip() or None
     else:
         local_voice = None
+    if isinstance(dialogue_voice, str):
+        dialogue_voice = dialogue_voice.strip() or None
+    else:
+        dialogue_voice = None
+    if isinstance(author, str):
+        author = author.strip()[:200] or None
+    else:
+        author = None
+    if normalize_audio is None or trim_silence is None:
+        _store_flags: dict = {}
+        try:
+            from core.config import load_store  # dynamic, no cycles
+
+            _store_flags = load_store() or {}
+        except Exception:
+            _store_flags = {}
+        if normalize_audio is None:
+            normalize_audio = bool(_store_flags.get("normalizeAudio", False)) if isinstance(_store_flags, dict) else False
+        if trim_silence is None:
+            trim_silence = bool(_store_flags.get("trimSilence", False)) if isinstance(_store_flags, dict) else False
     try:
         parallel = max(1, min(6, int(parallel)))  # type: ignore[arg-type]
     except Exception:
@@ -468,7 +492,27 @@ def build_audio(
             raise RuntimeError("local TTS engine requires ffmpeg on PATH — install it and re-run")
         logs.append("warning: ffmpeg not found on PATH — chapter merging, M4B/M4A and truncation auto-repair are disabled")
 
-    plans, jobs = build_generation_plan(chapters, str(audio_dir), chunk_size, rate=rate)
+    # build identity: changed synthesis params regenerate instead of
+    # silently reusing wrong audio (fresh manifest => one-time title migration)
+    from core.tts import check_build_identity as _check_ident
+
+    _wiped, _fresh = _check_ident(
+        str(audio_dir),
+        {
+            "rate": rate,
+            "voice": voice,
+            "engine": engine,
+            "local_voice": local_voice,
+            "dialogue_voice": dialogue_voice,
+            "normalize_audio": bool(normalize_audio),
+            "trim_silence": bool(trim_silence),
+        },
+        on_log=logs.append,
+    )
+
+    plans, jobs = build_generation_plan(
+        chapters, str(audio_dir), chunk_size, rate=rate, dialogue_voice=dialogue_voice, migrate_titles=_fresh
+    )
     logs.append(f"queued {len(jobs)} TTS part job(s) for {len(chapters)} chapter(s)")
 
     def _emit_log(line: str) -> None:
@@ -547,6 +591,8 @@ def build_audio(
             plans,
             keep_parts=keep_parts,
             on_chapter=lambda d, t: _emit_phase("merging", d, t),
+            normalize_audio=bool(normalize_audio),
+            trim_silence=bool(trim_silence),
         )
         if not audio_entries:
             raise RuntimeError("TTS produced no audio files")
@@ -568,6 +614,7 @@ def build_audio(
                 bitrate=bitrate,
                 on_progress=lambda d, t: _emit_phase("multiplex", d, t),
                 on_probe=lambda d, t: _emit_phase("probing", d, t),
+                artist=author,
             )
             out_path = audio_dir / f"{book_title}.{fmt}"
             if out_path.is_file():

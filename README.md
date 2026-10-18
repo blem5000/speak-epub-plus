@@ -11,6 +11,11 @@ Convert any EPUB file into a spoken-word audiobook using Microsoft Edge's free n
 - **Chapter ranges** — convert the whole book or only selected chapters (`--start-chapter` / `--end-chapter`)
 - **No truncation** — long chapters are automatically split into parts and merged afterwards, so Edge TTS never cuts them off
 - **Parallel generation** — several TTS requests run at the same time via a global queue (`--parallel`)
+- **Listen to a sample before committing** — Settings synthesizes a short clip of the selected voice/engine/rate
+- **Two-voice dialogue mode** — quoted dialogue can switch to a second Edge voice (`--dialogue-voice`)
+- **Podcast-grade post-processing** — optional loudness normalization and edge-silence trimming of finished chapter files (`--normalize-audio`, `--trim-silence`)
+- **Metadata + cover in M4B** — author name and cover art are embedded in the audiobook file
+- **Batch mode** — convert several EPUBs in a single command (CLI)
 - **Resume anywhere** — finished chapters and parts are skipped on re-run; if a run fails, just repeat the same command
 - **Single-file audiobooks** — optional M4B/M4A output with real chapter markers (requires FFmpeg)
 - **Desktop app** — full GUI (find → preview → filters → EPUB build → TTS queue → M4B) driving the same core pipeline through a Python sidecar — see [Desktop app](#desktop-app-tauri--python-sidecar)
@@ -118,6 +123,15 @@ python speak.py "path/to/book.epub" --chunk-size 2000
 # Custom output folder name
 python speak.py "path/to/book.epub" --output my_audiobook
 
+# Second voice for quoted dialogue (narration keeps the main voice)
+python speak.py "path/to/book.epub" --dialogue-voice pl-PL-ZofiaNeural
+
+# Podcast-grade processing: loudness normalization + edge-silence trimming
+python speak.py "path/to/book.epub" --normalize-audio --trim-silence
+
+# Several books in one command (each gets its own output folder)
+python speak.py "book1.epub" "book2.epub" --m4b
+
 # List all available English voices
 python speak.py --list-voices
 
@@ -142,10 +156,15 @@ The default voice is `en-US-AndrewNeural` (American male). Run `--list-voices` t
 | `--rate` | `+0%` | Speech rate like `+25%` or `-10%` (clamped to ±100%) |
 | `--engine` | `auto` | TTS engine: `auto` (local Piper on fast CPUs once its voice is downloaded, else Edge), `edge` (cloud), `local` (offline Piper) |
 | `--local-voice` | default voice | Piper voice for the local engine, e.g. `pl_PL-darkman-medium` (downloaded on demand into `Documents\speak-epub\models`) |
+| `--dialogue-voice` | off | Second Edge TTS voice for quoted dialogue („…", "…", «…»); narration keeps `--voice`. Edge engine only. A 1-second pause is appended after each chapter title that is attached to them |
+| `--normalize-audio` | off | Normalize chapter loudness to podcast levels (FFmpeg loudnorm, requires FFmpeg) |
+| `--trim-silence` | off | Trim leading/trailing digital silence of each chapter (below -60 dB; dramatic mid-chapter pauses are kept) |
 | `--keep-parts` | off | Keep the temporary `_parts` MP3 files after merging |
 | `--list-voices` | – | List English voices (`--all-languages`: every language) |
 
 Chapter numbers are counted in spine (reading) order across the whole EPUB — near-empty pages like covers and TOCs are skipped.
+
+Re-running the same command resumes — generated files carry a build manifest (`.speak-epub-build.json`); changing rate/voice/engine/dialogue voice/processing flags between runs automatically wipes and regenerates the audio so old settings never leak into new files.
 
 ## Output
 
