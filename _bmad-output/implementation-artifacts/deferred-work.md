@@ -146,6 +146,7 @@
 - source_spec: _bmad-output/implementation-artifacts/spec-2-2-content-boundary-selektory-per-adapter-heuristic-preview-kor.md
   summary: Preview dangerouslySetInnerHTML bez sanitizacji — XSS w webview
   evidence: blind hunter src/components/Preview.tsx:344 dangerouslySetInnerHTML renderuje raw HTML bez DOMPurify allowlist; verification-gap nie wykrywa bo Preview.test mockuje sidecar
+  resolved: safePreviewHtml + DOMPurify (Preview.tsx, zarówno oryginalny jak i oczyszczony HTML przechodzą przez sanitizację) z testami pinującymi R3 (URI/tag policy) w Preview.test.tsx
 
 - source_spec: _bmad-output/implementation-artifacts/spec-2-2-content-boundary-selektory-per-adapter-heuristic-preview-kor.md
   summary: save_overrides atomic bez fsync i lock — crash zostawia truncated JSON
@@ -168,6 +169,6 @@
 
 ## Deferred from: code review round 2 (2026-10-16)
 
-- [Review][Defer] Zmiana --rate nie regeneruje istniejących MP3 (rate nie jest częścią tożsamości resume) [core/tts.py:build_generation_plan] — deferred — wymaga decyzji produktowej: auto-regeneracja vs flaga vs pliki per-rate.
+- [Review][Defer] Zmiana --rate nie regeneruje istniejących MP3 (rate nie jest częścią tożsamości resume) [core/tts.py:build_generation_plan] — RESOLVED 2026-10-18 — build-identity manifest `.speak-epub-build.json` (BUILD_IDENTITY_KEYS zawiera rate/voice/engine/local_voice/dialogue_voice/normalize_audio/trim_silence) wymusza regenerację przy zmianie; decision: auto-regeneracja z wipe.
 - [Review][Defer] mkdir output swallow w tts_text_to_mp3_local (pre-existing pattern) [core/tts_local.py] — deferred, pre-existing — błąd uprawnień powierzchnią później; nie ruszane w tej rundzie.
 

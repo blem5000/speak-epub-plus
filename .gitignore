@@ -62,3 +62,4 @@ _cache/*
 
 # Tool state
 .cline/
+.workbuddy-ai/

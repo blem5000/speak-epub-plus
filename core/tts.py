@@ -11,7 +11,9 @@ Ratifies speak.py semantics:
 - build_generation_plan global queue reading-order ch40 p1..20 before ch41 p1
 - sanitize_filename mirror speak.py:84 (no epub extra fallback)
 
-Pure: only os/re/dataclasses/pathlib/typing — no adapters/*, no speak, no edge-tts/subprocess.
+Pure: only os/re/dataclasses/pathlib/typing — no adapters/*, no speak.
+Subprocess (shutil/subprocess) is used exclusively for ffmpeg/ffprobe
+invocations: local encoding, merging, M4B/M4A and post-processing.
 """
 
 from __future__ import annotations
