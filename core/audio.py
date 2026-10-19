@@ -13,7 +13,11 @@ Pure Core module: static imports are stdlib-only or installed deps
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
+import os
 import re
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -21,10 +25,12 @@ from core.epub import sanitize_filename
 from core.fetch import get_cache_path, read_cache
 from core.filters import apply_filters, sanitize_filters
 from core.tts import (
+    acquire_resume_lock,
     build_generation_plan,
     build_m4b,
     ffmpeg_available,
     finalize_chapter_audio,
+    release_resume_lock,
     resolve_output_dir,
     run_part_jobs,
     split_text_for_tts,
@@ -34,6 +40,34 @@ ChapterText = Tuple[int, str, str]  # (chapter_number, title, text)
 
 MAX_AUDIO_RANGE = 500
 _HEARTBEAT_SEC = 20  # tests patch this down to ~0.2
+
+
+def _filters_digest_for(filters: Optional[List[Dict[str, Any]]]) -> str:
+    """Stable digest of the filter set (part of the build identity).
+
+    The spoken text depends on the filters, so a changed filter set must
+    invalidate the generated audio — otherwise the line the user just
+    filtered out stays in the audiobook.
+    """
+    try:
+        payload = json.dumps(
+            sorted(
+                [
+                    {
+                        "pattern": str(f.get("pattern", "")),
+                        "isRegex": bool(f.get("isRegex", False)),
+                    }
+                    for f in (filters or [])
+                    if isinstance(f, dict)
+                ],
+                key=lambda d: (d["pattern"], d["isRegex"]),
+            ),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    except Exception:
+        payload = repr(filters)
+    return hashlib.sha1(payload.encode("utf-8", "ignore")).hexdigest()[:16]
 
 
 @contextlib.contextmanager
@@ -482,38 +516,12 @@ def build_audio(
         logs.append("boilerplate skipped (need 2+ chapters)")
 
     slug = sanitize_filename(title or "book", fallback="book", max_len=60)
-    audio_dir = out_base / f"{slug}_audiobook"
+    # Output dir carries a short digest of the source: two different novels
+    # with the same title must not share one directory (they used to wipe
+    # each other's audio through the build-identity check).
+    _src_digest = hashlib.sha1(novel_url.encode("utf-8", "ignore")).hexdigest()[:8]
+    audio_dir = out_base / f"{slug}_{_src_digest}_audiobook"
     audio_dir.mkdir(parents=True, exist_ok=True)
-
-    # fail fast / warn upfront: truncation auto-repair, chapter merging and
-    # M4B/M4A all need ffmpeg — better to know before hours of synthesis
-    if not ffmpeg_available():
-        if str(engine or "").strip().lower() == "local":
-            raise RuntimeError("local TTS engine requires ffmpeg on PATH — install it and re-run")
-        logs.append("warning: ffmpeg not found on PATH — chapter merging, M4B/M4A and truncation auto-repair are disabled")
-
-    # build identity: changed synthesis params regenerate instead of
-    # silently reusing wrong audio (fresh manifest => one-time title migration)
-    from core.tts import check_build_identity as _check_ident
-
-    _wiped, _fresh = _check_ident(
-        str(audio_dir),
-        {
-            "rate": rate,
-            "voice": voice,
-            "engine": engine,
-            "local_voice": local_voice,
-            "dialogue_voice": dialogue_voice,
-            "normalize_audio": bool(normalize_audio),
-            "trim_silence": bool(trim_silence),
-        },
-        on_log=logs.append,
-    )
-
-    plans, jobs = build_generation_plan(
-        chapters, str(audio_dir), chunk_size, rate=rate, dialogue_voice=dialogue_voice, migrate_titles=_fresh
-    )
-    logs.append(f"queued {len(jobs)} TTS part job(s) for {len(chapters)} chapter(s)")
 
     def _emit_log(line: str) -> None:
         logs.append(line)
@@ -533,6 +541,136 @@ def build_audio(
             except Exception:
                 pass
 
+    # fail fast / warn upfront: truncation auto-repair, chapter merging and
+    # M4B/M4A all need ffmpeg — better to know before hours of synthesis
+    if not ffmpeg_available():
+        if str(engine or "").strip().lower() == "local":
+            raise RuntimeError("local TTS engine requires ffmpeg on PATH — install it and re-run")
+        logs.append("warning: ffmpeg not found on PATH — chapter merging, M4B/M4A and truncation auto-repair are disabled")
+
+    # The resume lock covers the WHOLE build: the identity wipe, the TTS run,
+    # the chapter merges and the M4B packaging. Previously the lock was taken
+    # only around the TTS queue, so a second run could wipe the artifacts of
+    # a running build (or merge into files another run was replacing).
+    _lock_stop = threading.Event()
+    _lock: Any = None
+    try:
+        _lock = acquire_resume_lock(str(audio_dir))
+    except RuntimeError as e:
+        raise RuntimeError(str(e))
+    if _lock is not None:
+        def _lock_heartbeat() -> None:
+            while not _lock_stop.wait(60):
+                try:
+                    os.utime(str(_lock), None)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_lock_heartbeat, daemon=True).start()
+
+    try:
+        return _build_audio_locked(
+            audio_dir=audio_dir,
+            slug=slug,
+            chapters=chapters,
+            novel_url=novel_url,
+            from_i=from_i,
+            to_i=to_i,
+            filters=filters,
+            auto_boilerplate=auto_boilerplate,
+            chunk_size=chunk_size,
+            rate=rate,
+            voice=voice,
+            engine=engine,
+            local_voice=local_voice,
+            dialogue_voice=dialogue_voice,
+            author=author,
+            parallel=parallel,
+            retries=retries,
+            fmt=audio_format,
+            bitrate=audio_bitrate,
+            keep_parts=keep_parts,
+            keep_mp3=keep_mp3,
+            normalize_audio=normalize_audio,
+            trim_silence=trim_silence,
+            on_part_status=on_part_status,
+            on_log=_emit_log,
+            on_progress=on_progress,
+            on_phase=_emit_phase,
+            resume_lock=_lock,
+            logs=logs,
+        )
+    finally:
+        _lock_stop.set()
+        release_resume_lock(_lock)
+
+
+def _build_audio_locked(
+    *,
+    audio_dir: Path,
+    slug: str,
+    chapters: List[ChapterText],
+    novel_url: str,
+    from_i: int,
+    to_i: int,
+    filters: Optional[List[Dict[str, Any]]],
+    auto_boilerplate: Optional[bool],
+    chunk_size: int,
+    rate: Optional[str],
+    voice: str,
+    engine: Optional[str],
+    local_voice: Optional[str],
+    dialogue_voice: Optional[str],
+    author: Optional[str],
+    parallel: int,
+    retries: int,
+    fmt: str,
+    bitrate: Optional[str],
+    keep_parts: bool,
+    keep_mp3: Optional[bool],
+    normalize_audio: Optional[bool],
+    trim_silence: Optional[bool],
+    on_part_status: Optional[Callable[[dict], None]],
+    on_log: Callable[[str], None],
+    on_progress: Optional[Callable[[int, int], None]],
+    on_phase: Callable[[str, int, int], None],
+    resume_lock: Any,
+    logs: List[str],
+) -> Dict[str, Any]:
+    """Build the audiobook while the resume lock is held (see build_audio)."""
+    import asyncio
+
+    # build identity: changed synthesis params regenerate instead of
+    # silently reusing wrong audio (fresh manifest => one-time title migration)
+    from core.tts import check_build_identity as _check_ident
+
+    _filters_digest = _filters_digest_for(filters)
+    _wiped, _fresh = _check_ident(
+        str(audio_dir),
+        {
+            "rate": rate,
+            "voice": voice,
+            "engine": engine,
+            "local_voice": local_voice,
+            "dialogue_voice": dialogue_voice,
+            "normalize_audio": bool(normalize_audio),
+            "trim_silence": bool(trim_silence),
+            "chunk_size": int(chunk_size),
+            "filters": _filters_digest,
+            "auto_boilerplate": bool(auto_boilerplate),
+            "source": novel_url,
+        },
+        on_log=logs.append,
+    )
+
+    plans, jobs = build_generation_plan(
+        chapters, str(audio_dir), chunk_size, rate=rate, dialogue_voice=dialogue_voice, migrate_titles=_fresh
+    )
+    logs.append(f"queued {len(jobs)} TTS part job(s) for {len(chapters)} chapter(s)")
+
+    _emit_log = on_log
+    _emit_phase = on_phase
+
     # run_part_jobs is async; drive it on a private loop (sidecar-safe,
     # same pattern as the runTtsJobs RPC branch)
     async def _runner() -> None:
@@ -540,6 +678,7 @@ def build_audio(
             jobs, voice, parallel, retries,
             on_part_status=on_part_status, on_log=_emit_log, on_progress=on_progress,
             rate=rate, adaptive=True, engine=engine, local_voice=local_voice,
+            resume_lock=resume_lock,
         )
 
     try:
@@ -593,6 +732,7 @@ def build_audio(
             on_chapter=lambda d, t: _emit_phase("merging", d, t),
             normalize_audio=bool(normalize_audio),
             trim_silence=bool(trim_silence),
+            on_log=_emit_log,
         )
         if not audio_entries:
             raise RuntimeError("TTS produced no audio files")
@@ -603,7 +743,13 @@ def build_audio(
 
         audiobook: Optional[Dict[str, Any]] = None
         if fmt in ("m4b", "m4a"):
-            book_title = f"{slug}_chapters_{from_i:03d}_to_{to_i:03d}"
+            # the file name advertises the range that was ACTUALLY produced:
+            # empty chapters are skipped, so the requested range can be wider
+            # than the content (a name saying 001-030 for 27 chapters lies)
+            _nums = [num for num, _t, _p in audio_entries]
+            _from_done = min(_nums) if _nums else from_i
+            _to_done = max(_nums) if _nums else to_i
+            book_title = f"{slug}_chapters_{_from_done:03d}_to_{_to_done:03d}"
             _emit_phase("multiplex", 0, 1)
             _emit_log(f"building {fmt.upper()} file...")
             build_m4b(
@@ -644,8 +790,14 @@ def build_audio(
 
     return {
         "audio_dir": str(audio_dir),
-        "chapter_count": len(chapters),
-        "part_count": sum(len(split_text_for_tts(t, chunk_size)) for _, _, t in chapters),
+        # distinct chapters that actually produced audio (the unmerged
+        # fallback lists one entry per part, so counting entries would
+        # multiply the chapter count)
+        "chapter_count": len({num for num, _t, _p in audio_entries}),
+        # the queued job count is the truth (it includes the title part and
+        # the dialogue segments); re-splitting the text here gave a different
+        # number than the progress the user watched
+        "part_count": len(jobs),
         "chapters": chapter_infos,
         "audiobook": audiobook,
         "format": fmt,

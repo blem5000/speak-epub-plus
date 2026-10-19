@@ -172,3 +172,119 @@
 - [Review][Defer] Zmiana --rate nie regeneruje istniejących MP3 (rate nie jest częścią tożsamości resume) [core/tts.py:build_generation_plan] — RESOLVED 2026-10-18 — build-identity manifest `.speak-epub-build.json` (BUILD_IDENTITY_KEYS zawiera rate/voice/engine/local_voice/dialogue_voice/normalize_audio/trim_silence) wymusza regenerację przy zmianie; decision: auto-regeneracja z wipe.
 - [Review][Defer] mkdir output swallow w tts_text_to_mp3_local (pre-existing pattern) [core/tts_local.py] — deferred, pre-existing — błąd uprawnień powierzchnią później; nie ruszane w tej rundzie.
 
+## Deferred from: code review (2026-10-19)
+
+Review pełnego backendu `core/` (8619 linii, 12 warstw: blind-hunter / edge-case-hunter / verification-gap × 4 grupy plików), tryb no-spec, każdy finding zweryfikowany odczytem kodu i realnych call-site'ów.
+
+- [Review][Defer] Politeness nie jest w Core — ścieżka fetch deleguje do `adapter.fetchChapter`, `core/http.py` używany tylko w fallbacku preview [core/fetch.py:9-18, core/http.py:3-4] — deferred, pre-existing — kontrakt "AD-3 politeness owned by Core" nie jest egzekwowany; polityki już się rozjechały (patrz patch: 4xx policy).
+- [Review][Defer] Core importuje konkretny adapter (naruszenie kontraktu core→ports→adapter; importlinter daje fałszywe poczucie bezpieczeństwa) [core/audio.py:186-194, core/epub.py:596,706] — deferred, pre-existing — wymaga nowej metody portu (`resolve_selectors`).
+- [Review][Defer] Brak obsługi robots.txt i brak limitu per-host [core/fetch.py:1-8] — deferred, pre-existing — dziś jedno źródło i globalny delay 3–5 s.
+- [Review][Defer] loudnorm jednoprzebiegowy (dynamic mode, bez pomiaru i `linear=true`) [core/tts.py:703] — deferred, pre-existing — ffmpeg dokumentuje niedokładność trybu dynamic; dwuprzebiegowy pomiar to większa zmiana.
+- [Review][Defer] `max_chars` > 5000 tylko ostrzega [core/tts.py:425-426] — deferred, pre-existing — GUI klamruje 500..5000, tylko CLI przepuszcza.
+- [Review][Defer] PID w lockfile nigdy nie jest czytany (żywotność rozstrzyga sam mtime + heartbeat) [core/tts.py:83, 96-111] — deferred, pre-existing — heartbeat odświeża mtime co 60 s, próg 600 s.
+- [Review][Defer] AdaptiveGate budzi tylko jednego czekającego na zmianę limitu [core/tts.py:1154-1159] — deferred, pre-existing — to latency, nie deadlock (anulowany future nie zgubi wake-upa).
+- [Review][Defer] Klucz cache pomija query string [core/fetch.py:53-72, core/config.py:103] — deferred, pre-existing — obecny adapter stripuje query z href, więc dziś bez skutku; zagrożenie dla przyszłych witryn z `?chapter=N`.
+- [Review][Defer] `runTtsJobs` (legacy RPC): 300 s timeout to dead code, malformed joby dropowane po cichu, `output_path` bez walidacji [core/config.py:919-1065] — deferred, pre-existing — brak konsumenta w `src/` i testach.
+- [Review][Defer] Ścieżki tylko-in-process w `core/audio.py` (limit 1800 s, wątek przeżywa TimeoutError, pętla zdarzeń nie domknięta) [core/audio.py:546-579] — deferred, pre-existing — GUI spawnuje świeżego `python -c` per RPC, CLI nie woła `build_audio`.
+- [Review][Defer] `getEpubStatus` dopasowuje plik fuzzy scoringiem + inline `run_epubcheck` [core/config.py:2151-2187] — deferred, pre-existing — metoda nieużywana przez GUI.
+- [Review][Defer] `getCacheStatus` robi pełne listowanie sieciowe mimo komentarza "diff without fetching" [core/config.py:679-691] — deferred, pre-existing — nieużywane przez GUI.
+- [Review][Defer] Polskie stringi zaszyte w Core + GUI pattern-matchuje polskie słowa do badge [core/config.py:740-742, core/fetch.py:794-800, src/hooks/useFetcher.ts:125,255] — deferred, pre-existing — pełna i18n to osobny temat.
+- [Review][Defer] Reguła zamiany from/to zaimplementowana 4× na różne sposoby [core/config.py:1097, 1166, 1829, 720] — deferred, pre-existing — dziś zgodne, ryzyko rozjazdu przy zmianie jednej kopii.
+- [Review][Defer] Allowlista hostów skopiowana 9× [core/config.py:344, 517, 1312, 1347, 1504, 1550, 1764, 1920, 2374] — deferred, pre-existing — dziś wszystkie kopie akceptują ten sam zbiór hostów; koszt to ryzyko konserwacji.
+- [Review][Defer] Brak logowania strukturalnego po stronie sidecara (brak `import logging`) [core/config.py:7-12] — deferred, pre-existing — warstwa Rust drainuje stderr do konsoli, brak pliku logu.
+- [Review][Defer] `saveSelectors` akceptuje dowolny syntaktycznie poprawny selektor [core/config.py:1519-1526] — deferred, pre-existing — GUI łagodzi to live podglądem przed zapisem.
+- [Review][Defer] `previewChapter` zwraca nieobcięty `originalHtml` [core/config.py:1480-1483] — deferred, pre-existing — realne ryzyko to pamięć/UI, nie poprawność.
+- [Review][Defer] Błąd pojedynczego rozdziału raportowany jako `LIST_FAILED` (adapter używa `FETCH_FAILED`) [core/fetch.py:486, 522, core/ports.py:52-57] — deferred, pre-existing — taksonomia kodów błędów nie ma jednego źródła.
+- [Review][Defer] `AdapterError` nie ma pola na szczegóły (workaround: monkey-patch `err.missing`) [core/ports.py:52-57, core/audio.py:152-156] — deferred, pre-existing — strukturalny brak DTO, nie bug wywołania.
+- [Review][Defer] Modele głosów Piper bez sumy kontrolnej / podpisu [core/tts_local.py:240-299] — deferred, pre-existing — mirror HuggingFace, brak oficjalnych checksum w źródle.
+- [Review][Defer] Nieeksponowane knoby Piper (`sentence_silence`, `noise_scale`, `noise_w`) [core/tts_local.py:430] — deferred, pre-existing — `length_scale` wystarcza do bieżących potrzeb.
+- [Review][Defer] `prune_cache(ttl_days=0)` kasuje cały cache, wartość ujemna wyłącza TTL, `cover.txt` zostaje osierocony [core/fetch.py:180-190] — deferred, pre-existing — semantyka wywołania, nie ścieżka produkcyjna.
+- [Review][Defer] `core/ports.py`: `ChapterInfo.title` wymagane, choć warstwy używają fallbacków; `Selectors` nie normalizuje białych znaków [core/ports.py:18-23, 36-40] — deferred, pre-existing — konsumenci neutralizują oba przypadki.
+
+## Deferred from: code review — part 2 (2026-10-19)
+
+Pakiety 1–4 + 12 (dane/atomowość/gates + testy) zaimplementowane w tym cyklu; pozostałe findingi z tego samego review czekają na kolejną partię. Wszystkie zweryfikowane odczytem kodu i realnych call-site'ów.
+
+### Pakiety 5, 13, 14 — liczniki, logi, hygiene, wynik builda
+
+- [Review][Defer] `logs.append` zamiast `_emit_log` — diagnostyki (np. "chapter skipped", "boilerplate templates") nigdy nie docierają do logu GUI [core/audio.py:255, 260, 463, 466, 472, 475, 482, 641]
+- [Review][Defer] `print` zamiast callbacku `on_log` w `_ensure_valid_or_drop` — GUI nie widzi powodu re-syntezy [core/tts.py:363]
+- [Review][Defer] Title part numerowany 0, ale liczony w part_count — UI pokazuje "part 0/3" [core/tts.py:869-870]
+- [Review][Defer] Planowanie segmentów dialogowych dla silnika local, który ignoruje `PartJob.voice` — marnuje pracę i myli metadane [core/tts.py:804-808 vs 1466-1471]
+- [Review][Defer] `ADAPTIVE_MAX_PARALLEL = 12` i dopuszczalne `parallel` do 6 — Edge TTS throttluje powyżej 3 [core/tts.py:1130, core/audio.py:388]
+- [Review][Defer] Wynik `build_audio` nie zwraca engine/rate/filtrom/czasu trwania/rozmiaru partów [core/audio.py:645-659]
+- [Review][Defer] M4B z aplikacji desktopowej bez okładki (GUI zna URL okładki) [core/audio.py:609-618]
+- [Review][Defer] `bool("false")` = True dla flag ze store (normalize/trim/keepMP3) [core/audio.py:384-386, 453, 631]
+- [Review][Defer] `keepMP3=false` usuwa pliki, ale `chapters[].path` wskazuje je dalej [core/audio.py:600-602, 634-641]
+- [Review][Defer] `coverUrl` >500 znaków obcinany w RPC, w `core/epub.py` dropowany — niespójna polityka [core/config.py:1798-1799]
+- [Review][Defer] `user_output_base` hardcoduje angielskie "Documents" — na zlokalizowanym Windowsie wyjście ląduje w złym katalogu [core/tts.py:157-160]
+- [Review][Defer] `Dict` użyte bez importu; `__all__` z duplikatami i brakami; martwe importy; mylący docstring "Pure" [core/tts.py:606, 2071-2103, 14, 79; core/config.py:12]
+- [Review][Defer] `extra_params` nigdy nie używany; martwy branch `isinstance(chunks, bytes)`; dwa formaty licznika retry; martwe ramię w mapowaniu błędów [core/epub.py:370, 902-909; core/fetch.py:437-441 vs 505-548, 680-682]
+
+### Pakiet 6 — filtry
+
+- [Review][Defer] Okna head/tail boilerplate zachodzą na siebie przy rozdziale <30 linii → cały rozdział może zniknąć [core/filters.py:123-126]
+- [Review][Defer] Auto-wykryty boilerplate bez weta — legitytne "The End" w 2 rozdziałach jest usuwane [core/filters.py:135-149]
+- [Review][Defer] Zduplikowany tekst z zagnieżdżonych bloków (toolbar linków mówiony 2×) [core/filters.py:54-61]
+- [Review][Defer] Jeden filtr może skasować cały content-wrapper (chronione tylko `div#chapter-content` i div z `<p>`) [core/filters.py:284-293]
+- [Review][Defer] Dwie kanonizacje `isRegex` (`{"type":"regex"}` / `"1"` vs `sanitize_filters`) [core/filters.py:157 vs 350-351]
+- [Review][Defer] `except` po nieudanym imporcie bs4 woła `BeautifulSoup` → NameError [core/filters.py:270-276]
+- [Review][Defer] Błędy filtrów połykane bez logu (audio i EPUB) [core/audio.py:252-257, core/epub.py:803-806]
+
+### Pakiet 7 — clean.py
+
+- [Review][Defer] `load_overrides` KASUJE plik ustawień przy jakimkolwiek błędzie odczytu [core/clean.py:115-120]
+- [Review][Defer] Katalog overrides w drzewie pakietu → read-only w Program Files, utrata po reinstalacji [core/clean.py:52]
+- [Review][Defer] Override całkowicie zastępuje domyślny `start` adaptera → pusty rozdział [core/clean.py:144-158]
+- [Review][Defer] Granica `end` ignorowana w fallbacku heurystycznym; sibling-walk połyka ogon strony; komentarz o truncacji niezgodny z kodem [core/clean.py:214-279, 241-258, 231-234]
+- [Review][Defer] `clean_html` bez diagnostyki — fallback na całe body narruje nawigację jako rozdział [core/clean.py:190-314]
+- [Review][Defer] Brak `header/footer/figure/figcaption` w noise tags; `a[rel='next']` case-sensitive [core/clean.py:22-40]
+
+### Pakiet 8 — EPUB
+
+- [Review][Defer] Nieważny EPUB publikowany i nigdy nie usuwany — „bramka" tylko opisuje, nie bramkuje [core/epub.py:1046-1059]
+- [Review][Defer] Pusty rozdział zapisywany do EPUB-a (ścieżka audio go pomija) [core/epub.py:810-812]
+- [Review][Defer] Fallback pustego rozdziału wstawia tekst sprzed filtrowania [core/epub.py:812]
+- [Review][Defer] EPUB nie jest samowystarczalny — przy nieudanym pobraniu zostaje zdalne `src` [core/epub.py:310-316]
+- [Review][Defer] Pobieranie obrazów bez allowlisty i z przekierowaniami (SSRF na adresy wewnętrzne) [core/epub.py:302-311]
+- [Review][Defer] WebP zapisywany jako `cover.jpg` z media type `image/jpg` [core/epub.py:937-961]
+- [Review][Defer] Stała nazwa pliku `.tmp` → dwa równoległe buildy kolidują [core/epub.py:1044-1047]
+- [Review][Defer] Język EPUB hardcodowany na "en" [core/epub.py:877, 1026]
+- [Review][Defer] `CACHE_MISS` z `build_epub` nie niesie listy brakujących rozdziałów [core/epub.py:676-694, core/ports.py:52-57]
+- [Review][Defer] `build_epub` bez postępu → sidecar ubijany po 300 s ciszy [core/epub.py:653, src-tauri/src/lib.rs:303]
+
+### Pakiet 9 — fetch/cache
+
+- [Review][Defer] Strona z captcha/blokadą trafia do cache na stałe i jest odtwarzana przy każdym runie [core/fetch.py:91, 449-455]
+- [Review][Defer] `prune_cache` nigdy niewołany — cache rośnie bez limitu, TTL nie działa [core/fetch.py:138-217]
+- [Review][Defer] `write_cache` rzuca ValueError → `write_cover` pomijany, wpis cache ginie [core/fetch.py:449-455]
+- [Review][Defer] `Retry-After` bez limitu → godzina zablokowanej kolejki [core/fetch.py:555-573]
+- [Review][Defer] Tier "safe" po 429 nigdy nie wraca do "polite" (10 s/opóźnienie do końca runu) [core/fetch.py:421, 809]
+- [Review][Defer] Badge pokazuje zakres liczony od 1 zamiast od `from_idx` [core/fetch.py:794-800]
+- [Review][Defer] Numeracja rozdziałów pozycyjna zamiast prawdziwych indeksów [core/fetch.py:812-820]
+- [Review][Defer] `from`/`to` ignorowane, gdy caller podaje listę URL-i [core/fetch.py:760-762]
+
+### Pakiet 10 — ffmpeg_setup / tts_local
+
+- [Review][Defer] `http.client.IncompleteRead` nie złapany → wyjątek ucieka z `ensure_ffmpeg` [core/ffmpeg_setup.py:176]
+- [Review][Defer] Istniejący `bin/ffmpeg` adoptowany bez weryfikacji [core/ffmpeg_setup.py:203-207]
+- [Review][Defer] Ekstrakcja wprost do żywego `bin/` — brak stagingu i atomic publish [core/ffmpeg_setup.py:134-164]
+- [Review][Defer] Sukces bez ffprobe → M4B pomijane, gate truncacji wyłączony [core/ffmpeg_setup.py:185-191]
+- [Review][Defer] `ensure_ffmpeg` z wątków workerów: globalny PATH i wspólny katalog bez blokady [core/tts_local.py:416-423, core/ffmpeg_setup.py:83-88]
+- [Review][Defer] Pobieranie bez deadline'u całkowitego (tylko per-socket) [core/ffmpeg_setup.py:119-131]
+- [Review][Defer] Clamp rate local (-25%) rozjeżdża się z Edge (-100%) [core/tts_local.py:357]
+- [Review][Defer] `.onnx.json` nigdy nie walidowany — uszkodzony config wybucha przy syntezie [core/tts_local.py:104-108]
+- [Review][Defer] `_piper_available()` sprawdza tylko spek modułu, nie importuje piper/onnxruntime [core/tts_local.py:76-81]
+
+### Pakiet 11 — config.py / store
+
+- [Review][Defer] Ścieżka `store.json` zależy od CWD procesu (może w read-only katalog instalacji) [core/config.py:163-178]
+- [Review][Defer] `save_store`: read-modify-write ze stałym `.tmp` → utrata update'ów przy równoległych setStore [core/config.py:195-214]
+- [Review][Defer] Uszkodzony store cicho wraca do defaultsów (całe ustawienia znikają) [core/config.py:185-191]
+- [Review][Defer] `search` połyka każdy błąd → pusta lista zamiast komunikatu [core/config.py:285-295]
+- [Review][Defer] `setSelection` po cichu odrzuca non-http URL, ale odpowiada "saved" [core/config.py:1178-1188]
+- [Review][Defer] Lista `selection` bez limitu długości i zakresu [core/config.py:1124-1133]
+- [Review][Defer] `previewVoice` bez timeoutu — wiszący Piper blokuje cały RPC [core/config.py:2316-2322]
+- [Review][Defer] Rate: preview normalizuje bzdury do "+0%", buildAudio je odrzuca [core/config.py:2262-2267 vs 2445-2451]
+- [Review][Defer] Pusty `localVoice` (domyślny) vs nieobecny — GUI nie może odróżnić [src/lib/sidecar.ts:661-664, core/config.py:2273-2274]
+

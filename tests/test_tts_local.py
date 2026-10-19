@@ -30,6 +30,9 @@ from core.tts_local import (  # noqa: E402
 def _models_dir(tmp_path, monkeypatch):
     models = tmp_path / "models"
     monkeypatch.setenv("SPEAK_EPUB_MODELS_DIR", str(models))
+    # isolate the portable ffmpeg install: a test must never download into
+    # the developer's real %LOCALAPPDATA%\speak-epub\ffmpeg
+    monkeypatch.setenv("SPEAK_EPUB_FFMPEG_DIR", str(tmp_path / "ffmpeg-install"))
     monkeypatch.setattr(tts_local, "_piper_available", lambda: True)
     tts_local._VOICE_CACHE.clear()
     return models
@@ -427,11 +430,40 @@ def test_tts_text_to_mp3_local_requires_ffmpeg(tmp_path):
 
     with patch("piper.PiperVoice", create=True) as mock_cls:
         mock_cls.load.return_value = _FakePiperVoice()
-        with patch("core.tts_local.shutil.which", return_value=None):
-            with pytest.raises(RuntimeError, match="ffmpeg not found"):
-                tts_text_to_mp3_local("hello", str(tmp_path / "y.mp3"), "pl_PL-darkman-medium")
+        # the self-heal is stubbed out: this test must not hit the network or
+        # touch the real portable ffmpeg install
+        with patch("core.ffmpeg_setup.ensure_ffmpeg", return_value=False) as mock_ensure:
+            with patch("core.tts_local.shutil.which", return_value=None):
+                with pytest.raises(RuntimeError, match="ffmpeg not found"):
+                    tts_text_to_mp3_local("hello", str(tmp_path / "y.mp3"), "pl_PL-darkman-medium")
+        # the repair was attempted before giving up
+        assert mock_ensure.called
     # failed run leaves no wav behind
     assert not list(tmp_path.glob("*.part.wav"))
+
+
+def test_tts_text_to_mp3_local_uses_ffmpeg_repaired_by_setup(tmp_path):
+    """ffmpeg missing on PATH but the self-heal provides it -> encode proceeds."""
+    models = Path(tts_local.local_models_root())
+    _fake_model(models, "pl_PL-darkman-medium")
+    out = tmp_path / "repaired.mp3"
+
+    which_calls = {"n": 0}
+
+    def _fake_which(_bin):
+        which_calls["n"] += 1
+        # first probe (pre-check) misses, the post-repair probe finds it
+        return None if which_calls["n"] == 1 else "ffmpeg"
+
+    with patch("piper.PiperVoice", create=True) as mock_cls:
+        mock_cls.load.return_value = _FakePiperVoice()
+        with patch("core.ffmpeg_setup.ensure_ffmpeg", return_value=True) as mock_ensure:
+            with patch("core.tts_local.shutil.which", side_effect=_fake_which):
+                with patch("core.tts_local.subprocess.run", side_effect=_fake_ffmpeg_run):
+                    with patch("core.tts_local.verify_part_audio", return_value=(True, "ok")):
+                        tts_text_to_mp3_local("hello", str(out), "pl_PL-darkman-medium")
+        assert mock_ensure.called
+    assert out.exists()
 
 
 def test_tts_text_to_mp3_local_invalid_output_cleaned(tmp_path):

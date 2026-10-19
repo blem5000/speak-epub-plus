@@ -939,15 +939,15 @@ def test_get_duration_ms_via_ffprobe(tmp_path):
             assert args[0] == "ffprobe"
             assert "-show_entries" in args
             assert "format=duration" in args
-    # ValueError -> 0
+    # unparsable output -> the probe FAILED (-1), not "no audio" (0)
     with patch("core.tts.shutil.which", return_value="/usr/bin/ffprobe"):
         mock_result2 = MagicMock(stdout="not_a_number\n")
         with patch("core.tts.subprocess.run", return_value=mock_result2):
-            assert get_duration_ms(str(dummy)) == 0
-    # which false -> 0, no subprocess call
+            assert get_duration_ms(str(dummy)) == -1
+    # no ffprobe at all -> probe failed (-1), no subprocess call
     with patch("core.tts.shutil.which", return_value=None):
         with patch("core.tts.subprocess.run") as mock_run2:
-            assert get_duration_ms(str(dummy)) == 0
+            assert get_duration_ms(str(dummy)) == -1
             mock_run2.assert_not_called()
 
 
@@ -1132,7 +1132,7 @@ def test_build_m4b_creates_with_markers(tmp_path, capsys):
         assert metadata_path.exists()
         concat_content = concat_path.read_text(encoding="utf-8")
         for _, _, p in audio_entries:
-            safe = os.path.abspath(p).replace("\\", "/").replace("'", "\\'")
+            safe = os.path.abspath(p).replace("\\", "/").replace("'", "'\\''")
             assert f"file '{safe}'\n" in concat_content
         meta = metadata_path.read_text(encoding="utf-8")
         assert ";FFMETADATA1" in meta
@@ -1146,14 +1146,14 @@ def test_build_m4b_creates_with_markers(tmp_path, capsys):
         # chapter titles escaped
         assert "title=001 - Ch1" in meta
         assert "title=002 - Ch2" in meta
-        # simulate ffmpeg creating output
-        out_path = out / f"{book_title}.m4b"
-        out_path.write_bytes(b"m4bcontent" * 1024)
+        # simulate ffmpeg creating output (atomic publish: ffmpeg writes the
+        # .tmp sidecar, build_m4b moves it into place afterwards)
+        Path(args[-1]).write_bytes(b"m4bcontent" * 1024)
         return MagicMock(returncode=0)
 
     with patch("core.tts.ffmpeg_available", return_value=True):
         with patch("core.tts.ffprobe_available", return_value=True):
-            with patch("core.tts.get_duration_ms", side_effect=[1000, 1000]):
+            with patch("core.tts.probe_duration_ms", side_effect=[1000, 1000]):
                 with patch("core.tts.subprocess.run", side_effect=fake_run) as mock_run:
                     build_m4b(str(out), audio_entries, book_title, ext="m4b")
 
@@ -1164,10 +1164,12 @@ def test_build_m4b_creates_with_markers(tmp_path, capsys):
     assert "-map_metadata" in args and "1" in args
     assert "-c:a" in args and "aac" in args and "-b:a" in args and "32k" in args
     expected_out = str(out / f"{book_title}.m4b")
-    assert args[-1] == expected_out
+    # ffmpeg writes the sidecar; the final name is published atomically
+    assert args[-1] == expected_out + ".tmp"
     # temps removed
     assert not (out / "_concat.txt").exists()
     assert not (out / "_metadata.txt").exists()
+    assert not (out / f"{book_title}.m4b.tmp").exists()
     assert (out / f"{book_title}.m4b").exists()
     assert "M4B saved" in capsys.readouterr().out
 
@@ -1201,12 +1203,12 @@ def test_build_m4b_bitrate_passthrough_and_validation(tmp_path):
 
     def fake_run(args, check=True, **kwargs):
         captured["args"] = args
-        (out / "book.m4b").write_bytes(b"x" * 100)
+        Path(args[-1]).write_bytes(b"x" * 100)
         return MagicMock(returncode=0)
 
     with patch("core.tts.ffmpeg_available", return_value=True):
         with patch("core.tts.ffprobe_available", return_value=True):
-            with patch("core.tts.get_duration_ms", return_value=1000):
+            with patch("core.tts.probe_duration_ms", return_value=1000):
                 with patch("core.tts.subprocess.run", side_effect=fake_run):
                     build_m4b(str(out), entries, "book", ext="m4b", bitrate="48k")
     assert "-b:a" in captured["args"] and "48k" in captured["args"]
@@ -1233,7 +1235,7 @@ def test_build_m4b_progress_poll_reports_size(tmp_path):
 
     def fake_slow_run(args, check=True, **kwargs):
         # simulate a 4.5s encode with a growing output file
-        target = out / "book.m4b"
+        target = Path(args[-1])
         for _ in range(9):
             with open(target, "ab") as f:
                 f.write(b"x" * 50000)
@@ -1242,7 +1244,7 @@ def test_build_m4b_progress_poll_reports_size(tmp_path):
 
     with patch("core.tts.ffmpeg_available", return_value=True):
         with patch("core.tts.ffprobe_available", return_value=True):
-            with patch("core.tts.get_duration_ms", return_value=60000):
+            with patch("core.tts.probe_duration_ms", return_value=60000):
                 with patch("core.tts.subprocess.run", side_effect=fake_slow_run):
                     build_m4b(str(out), entries, "book", ext="m4b",
                               on_progress=lambda d, t: seen.append((d, t)))
@@ -1264,12 +1266,12 @@ def test_build_m4b_probe_reports_per_file(tmp_path):
     probed = []
 
     def fake_run(args, check=True, **kwargs):
-        (out / "book.m4b").write_bytes(b"z")
+        Path(args[-1]).write_bytes(b"z")
         return MagicMock(returncode=0)
 
     with patch("core.tts.ffmpeg_available", return_value=True):
         with patch("core.tts.ffprobe_available", return_value=True):
-            with patch("core.tts.get_duration_ms", return_value=1000):
+            with patch("core.tts.probe_duration_ms", return_value=1000):
                 with patch("core.tts.subprocess.run", side_effect=fake_run):
                     build_m4b(str(out), entries, "book", ext="m4b",
                               on_probe=lambda d, t: probed.append((d, t)))
@@ -1299,27 +1301,58 @@ def test_build_m4b_no_ffprobe_skip(tmp_path, capsys):
 
 
 def test_build_m4b_ffprobe_duration_zero(tmp_path, capsys):
-    # ffprobe returns 0 for each, metadata still written with START 0 END 0
+    # a chapter whose duration cannot be determined must ABORT the packaging:
+    # writing START=0/END=0 markers shifts every later chapter boundary
     out = tmp_path / "out_zero"
     out.mkdir()
     a = out / "001.mp3"
     a.write_bytes(b"x")
     audio_entries = [(1, "Ch1", str(a))]
-    captured_meta = {}
-
-    def fake_run(args, check=True, **kwargs):
-        meta_path = out / "_metadata.txt"
-        captured_meta["content"] = meta_path.read_text(encoding="utf-8")
-        Path(out / "book.m4b").write_bytes(b"x" * 1024)
-        return MagicMock(returncode=0)
 
     with patch("core.tts.ffmpeg_available", return_value=True):
         with patch("core.tts.ffprobe_available", return_value=True):
-            with patch("core.tts.get_duration_ms", return_value=0):
-                with patch("core.tts.subprocess.run", side_effect=fake_run):
-                    build_m4b(str(out), audio_entries, "book", ext="m4b")
-    assert "START=0" in captured_meta["content"]
-    assert "END=0" in captured_meta["content"]
+            with patch("core.tts.probe_duration_ms", return_value=0):
+                with patch("core.tts.subprocess.run"):
+                    try:
+                        build_m4b(str(out), audio_entries, "book", ext="m4b")
+                    except RuntimeError as e:
+                        assert "duration" in str(e)
+                    else:
+                        raise AssertionError("expected a RuntimeError for a zero-duration chapter")
+    # nothing was published
+    assert not (out / "book.m4b").exists()
+
+
+def test_build_m4b_ffprobe_failure_aborts(tmp_path):
+    # a failed probe is not a zero-length file — it must abort too
+    out = tmp_path / "out_probe_fail"
+    out.mkdir()
+    a = out / "001.mp3"
+    a.write_bytes(b"x")
+    with patch("core.tts.ffmpeg_available", return_value=True):
+        with patch("core.tts.ffprobe_available", return_value=True):
+            with patch("core.tts.probe_duration_ms", return_value=None):
+                with patch("core.tts.subprocess.run"):
+                    try:
+                        build_m4b(str(out), [(1, "Ch1", str(a))], "book", ext="m4b")
+                    except RuntimeError as e:
+                        assert "duration" in str(e)
+                    else:
+                        raise AssertionError("expected a RuntimeError when ffprobe fails")
+    assert not (out / "book.m4b").exists()
+
+
+def test_build_m4b_empty_entries_rejected(tmp_path):
+    from core.tts import build_m4b
+
+    out = tmp_path / "out_empty"
+    out.mkdir()
+    try:
+        build_m4b(str(out), [], "book", ext="m4b")
+    except ValueError as e:
+        assert "no audio entries" in str(e)
+    else:
+        raise AssertionError("expected a ValueError for an empty chapter list")
 
 
 def test_speak_delegation_parity_merge(monkeypatch, tmp_path):
@@ -1429,34 +1462,35 @@ def test_concat_mp3_files_parent_makedirs(tmp_path):
 def test_get_duration_ms_broad_exceptions(tmp_path):
     dummy = tmp_path / "dummy.mp3"
     dummy.write_bytes(b"x")
-    # Timeout -> 0
+    # every probe failure reports -1 ("unknown"), never 0 ("probed, no audio")
+    # Timeout -> -1
     with patch("core.tts.shutil.which", return_value="/usr/bin/ffprobe"):
         with patch("core.tts.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="ffprobe", timeout=15)):
-            assert get_duration_ms(str(dummy)) == 0
-    # FileNotFoundError race -> 0
+            assert get_duration_ms(str(dummy)) == -1
+    # FileNotFoundError race -> -1
     with patch("core.tts.shutil.which", return_value="/usr/bin/ffprobe"):
         with patch("core.tts.subprocess.run", side_effect=FileNotFoundError()):
-            assert get_duration_ms(str(dummy)) == 0
-    # Non-zero returncode -> 0
+            assert get_duration_ms(str(dummy)) == -1
+    # Non-zero returncode -> -1
     with patch("core.tts.shutil.which", return_value="/usr/bin/ffprobe"):
         mock_res = MagicMock(stdout="12.3\n", returncode=1)
         with patch("core.tts.subprocess.run", return_value=mock_res):
-            assert get_duration_ms(str(dummy)) == 0
-    # inf Overflow -> 0
+            assert get_duration_ms(str(dummy)) == -1
+    # inf Overflow -> -1
     with patch("core.tts.shutil.which", return_value="/usr/bin/ffprobe"):
         mock_res2 = MagicMock(stdout="inf\n", returncode=0)
         with patch("core.tts.subprocess.run", return_value=mock_res2):
-            assert get_duration_ms(str(dummy)) == 0
-    # None stdout -> 0
+            assert get_duration_ms(str(dummy)) == -1
+    # None stdout -> -1 (probe could not tell)
     with patch("core.tts.shutil.which", return_value="/usr/bin/ffprobe"):
         mock_res3 = MagicMock(stdout=None, returncode=0)
         with patch("core.tts.subprocess.run", return_value=mock_res3):
-            assert get_duration_ms(str(dummy)) == 0
-    # empty stdout -> 0
+            assert get_duration_ms(str(dummy)) == -1
+    # empty stdout -> -1 (probe could not tell)
     with patch("core.tts.shutil.which", return_value="/usr/bin/ffprobe"):
         mock_res4 = MagicMock(stdout="   \n", returncode=0)
         with patch("core.tts.subprocess.run", return_value=mock_res4):
-            assert get_duration_ms(str(dummy)) == 0
+            assert get_duration_ms(str(dummy)) == -1
 
 
 def test_escape_ffmeta_defensive(tmp_path):
@@ -1590,12 +1624,12 @@ def test_build_m4b_escape_integration(tmp_path, capsys):
     def fake_run(args, check=True, **kwargs):
         meta_path = out / "_metadata.txt"
         captured["meta"] = meta_path.read_text(encoding="utf-8")
-        Path(out / f"{sanitize_filename(book_title, fallback='audiobook', max_len=120)}.m4b").write_bytes(b"x" * 1024)
+        Path(args[-1]).write_bytes(b"x" * 1024)
         return MagicMock(returncode=0)
 
     with patch("core.tts.ffmpeg_available", return_value=True):
         with patch("core.tts.ffprobe_available", return_value=True):
-            with patch("core.tts.get_duration_ms", return_value=1000):
+            with patch("core.tts.probe_duration_ms", return_value=1000):
                 with patch("core.tts.subprocess.run", side_effect=fake_run):
                     build_m4b(str(out), audio_entries, book_title, ext="m4b")
     # sanitized book_title
@@ -1613,14 +1647,14 @@ def test_build_m4b_output_dir_and_ext_whitelist(tmp_path, capsys):
 
     def fake_run(args, check=True, **kwargs):
         # out_path should be m4b even when ext is traversal
-        assert args[-1].endswith(".m4b")
+        assert args[-1].endswith(".m4b.tmp")
         Path(args[-1]).parent.mkdir(parents=True, exist_ok=True)
         Path(args[-1]).write_bytes(b"x" * 1024)
         return MagicMock(returncode=0)
 
     with patch("core.tts.ffmpeg_available", return_value=True):
         with patch("core.tts.ffprobe_available", return_value=True):
-            with patch("core.tts.get_duration_ms", return_value=500):
+            with patch("core.tts.probe_duration_ms", return_value=500):
                 with patch("core.tts.subprocess.run", side_effect=fake_run):
                     build_m4b(str(out), entries, "book/title\\test", ext="../evil")
     # output_dir created
@@ -2556,6 +2590,48 @@ def test_tts_text_to_mp3_omits_rate_when_none(tmp_path):
     assert "rate" not in seen["kwargs"]
 
 
+def test_tts_text_to_mp3_abandons_hanging_save(tmp_path):
+    """A stalled Edge websocket must not pin the worker forever.
+
+    Regression: the whole global queue froze when save() never returned
+    (production test, v0.3.7) — the attempt has to be abandoned and retried.
+    """
+    out = tmp_path / "hang.mp3"
+    attempts = []
+    retries_seen = []
+
+    class HangingCommunicate:
+        def __init__(self, text, voice_arg, **kwargs):
+            attempts.append(1)
+
+        async def save(self, path):
+            await asyncio.sleep(30)  # never finishes in time
+
+    async def fake_sleep(_seconds):
+        return None
+
+    def on_retry(attempt, err):
+        retries_seen.append((attempt, type(err).__name__))
+
+    async def _run():
+        with patch("edge_tts.Communicate", HangingCommunicate):
+            with patch("core.tts.EDGE_SAVE_TIMEOUT_MIN", 0.05):
+                with patch("core.tts.EDGE_SAVE_TIMEOUT_MAX", 0.05):
+                    with patch("core.tts.EDGE_SAVE_TIMEOUT_PER_CHAR", 0.0):
+                        with patch("core.tts.asyncio.sleep", side_effect=fake_sleep):
+                            with pytest.raises(RuntimeError):
+                                await tts_text_to_mp3(
+                                    "hello", str(out), "en-US-AriaNeural", retries=2, on_retry=on_retry
+                                )
+
+    asyncio.run(_run())
+    # the hanging save was abandoned and the attempt retried
+    assert len(attempts) == 2
+    assert retries_seen, "the abandoned attempt must be reported through on_retry"
+    # no partial file was left behind
+    assert not out.exists()
+
+
 def test_tts_text_to_mp3_on_retry_callback(tmp_path):
     out = tmp_path / "retry_cb.mp3"
     retries_seen = []
@@ -2900,7 +2976,10 @@ def test_check_build_identity_missing_manifest_is_fresh(tmp_path):
     assert (wiped, fresh) == (False, True)
     with open(tmp_path / ".speak-epub-build.json", encoding="utf-8") as f:
         stored = json.load(f)
-    assert stored["rate"] == "+0%" and stored["plan"] == 3
+    assert stored["rate"] == "+0%" and stored["plan"] == 4
+    # the identity covers everything that changes the spoken audio
+    for key in ("rate", "voice", "engine", "chunk_size", "filters", "auto_boilerplate", "source"):
+        assert key in stored
 
 
 def test_check_build_identity_matching_is_pure_resume(tmp_path):
@@ -3181,12 +3260,16 @@ def test_postprocess_chapter_file_flags(tmp_path):
 
     assert "loudnorm" in cmds[0] and "silenceremove" not in cmds[0]
     assert "silenceremove" in cmds[1] and "loudnorm" not in cmds[1]
-    assert cmds[0].count("24000") >= 1 and "32k" in cmds[0]
+    assert cmds[0].count("24000") >= 1 and "48k" in cmds[0]
     # trim must NOT use stop_periods (verified destructive: removes ALL
     # silence >= threshold anywhere in the stream in ffmpeg 8) — the repaired
     # chain trims via areverse + leading-only filter, keeping natural pacing
     assert "stop_periods" not in cmds[1]
     assert cmds[1].count("areverse") == 2 and "start_silence=2.0" in cmds[1]
+    # the output file has no usable extension (".postmp") — ffmpeg cannot infer
+    # a muxer from it, so the format must be given explicitly (regression:
+    # "Unable to choose an output format" killed every post-processed chapter)
+    assert "-f mp3" in cmds[0] and "-f mp3" in cmds[1]
 
 
 def test_postprocess_chapter_file_failure_keeps_original(tmp_path, capsys):
@@ -3217,7 +3300,7 @@ def test_build_m4b_cover_and_artist_metadata(tmp_path, capsys):
         camera.append(args)
         meta = (out / "_metadata.txt").read_text(encoding="utf-8")
         assert "artist=Jane Writer" in meta
-        (out / "book.m4b").write_bytes(b"m4b" * 1024)
+        Path(args[-1]).write_bytes(b"m4b" * 1024)
         return MagicMock(returncode=0)
 
     with patch("core.tts.ffmpeg_available", return_value=True):
@@ -3249,7 +3332,7 @@ def test_build_m4b_cover_retry_without_cover(tmp_path, capsys):
     def fake_run(args, check=True, **kwargs):
         attempts.append(list(args))
         if len(attempts) == 2:
-            (out / "book.m4b").write_bytes(b"ok")
+            Path(args[-1]).write_bytes(b"ok")
             return MagicMock(returncode=0)
         raise RuntimeError("cover encode broke")
 
@@ -3275,7 +3358,7 @@ def test_build_m4b_no_artist_no_metadata_line(tmp_path):
         metadata_path = out / "_metadata.txt"
         meta = metadata_path.read_text(encoding="utf-8")
         assert "artist=" not in meta
-        (out / "book.m4b").write_bytes(b"m4b")
+        Path(args[-1]).write_bytes(b"m4b")
         return MagicMock(returncode=0)
 
     with patch("core.tts.ffmpeg_available", return_value=True):

@@ -15,7 +15,7 @@ PARENT = ROOT.parent
 if str(PARENT) not in sys.path:
     sys.path.insert(0, str(PARENT))
 
-from core.audio import build_audio
+from core.audio import _filters_digest_for, build_audio
 from core.config import handle_rpc
 from core.fetch import write_cache
 from core.ports import AdapterError
@@ -32,7 +32,8 @@ def _seed(tmp_path, url=CH1, title="Chapter 1", body="Short text one."):
 
 
 async def _fake_run(jobs, voice, parallel, retries, on_part_status=None, on_log=None, on_progress=None,
-                    rate=None, adaptive=False, parallel_max=None, engine="edge", local_voice=None):
+                    rate=None, adaptive=False, parallel_max=None, engine="edge", local_voice=None,
+                    resume_lock=None):
     for j in jobs:
         Path(j.output_path).parent.mkdir(parents=True, exist_ok=True)
         Path(j.output_path).write_bytes(b"FAKEMP3" * 100)
@@ -151,7 +152,8 @@ class TestBuildAudio:
         seen_texts = []
 
         async def _capture(jobs, voice, parallel, retries, on_part_status=None, on_log=None, on_progress=None,
-                           rate=None, adaptive=False, parallel_max=None, engine="edge", local_voice=None):
+                           rate=None, adaptive=False, parallel_max=None, engine="edge", local_voice=None,
+                           resume_lock=None):
             for j in jobs:
                 seen_texts.append(j.text)
             await _fake_run(jobs, voice, parallel, retries, on_part_status, on_log, on_progress)
@@ -187,6 +189,154 @@ def test_merge_phase_events(tmp_path):
         )
     merging = [p for p in phases if p.get("phase") == "merging"]
     assert [(p["done"], p["total"]) for p in merging] == [(1, 2), (2, 2)]
+
+
+class TestBuildAudioWiring:
+    """The build_audio -> tts wiring must be pinned (a silent regression here
+    ships un-normalized audio, a missing cover or an ignored voice)."""
+
+    def test_normalize_and_trim_reach_finalize(self, tmp_path):
+        _seed(tmp_path, CH1, "Chapter 1", "Short text one.")
+        seen = {}
+
+        def _fake_finalize(plans, keep_parts, on_chapter=None, normalize_audio=False, trim_silence=False, on_log=None):
+            seen["normalize"] = normalize_audio
+            seen["trim"] = trim_silence
+            return []
+
+        with patch("core.audio.run_part_jobs", side_effect=_fake_run):
+            with patch("core.audio.finalize_chapter_audio", side_effect=_fake_finalize):
+                try:
+                    build_audio(
+                        "https://www.novelphoenix.com/novel/123", from_idx=1, to_idx=1,
+                        title="T", output_dir=tmp_path / "out", cache_dir=tmp_path,
+                        chapter_urls=[CH1], audio_format="mp3",
+                        normalize_audio=True, trim_silence=True,
+                    )
+                except RuntimeError:
+                    pass  # the fake finalize returns no audio
+        assert seen.get("normalize") is True
+        assert seen.get("trim") is True
+
+    def test_build_manifest_written_into_audio_dir(self, tmp_path):
+        _seed(tmp_path, CH1, "Chapter 1", "Short text one.")
+        with patch("core.audio.run_part_jobs", side_effect=_fake_run):
+            res = build_audio(
+                "https://www.novelphoenix.com/novel/123", from_idx=1, to_idx=1,
+                title="T", output_dir=tmp_path / "out", cache_dir=tmp_path,
+                chapter_urls=[CH1], audio_format="mp3",
+            )
+        manifest = Path(res["audio_dir"]) / ".speak-epub-build.json"
+        assert manifest.is_file()
+        import json as _json
+
+        stored = _json.loads(manifest.read_text(encoding="utf-8"))
+        assert stored["source"] == "https://www.novelphoenix.com/novel/123"
+        assert stored["chunk_size"] == 3500
+        assert "filters" in stored and "auto_boilerplate" in stored
+
+    def test_author_reaches_m4b_metadata(self, tmp_path):
+        _seed(tmp_path, CH1, "Chapter 1", "Short text one.")
+        captured = {}
+
+        def _fake_m4b(output_dir, audio_entries, book_title, fmt, **kwargs):
+            captured["artist"] = kwargs.get("artist")
+
+        with patch("core.audio.run_part_jobs", side_effect=_fake_run):
+            with patch("core.audio.build_m4b", side_effect=_fake_m4b):
+                build_audio(
+                    "https://www.novelphoenix.com/novel/123", from_idx=1, to_idx=1,
+                    title="T", output_dir=tmp_path / "out", cache_dir=tmp_path,
+                    chapter_urls=[CH1], audio_format="m4b", author="Jane Writer",
+                )
+        assert captured.get("artist") == "Jane Writer"
+
+    def test_dialogue_voice_reaches_generation_plan(self, tmp_path):
+        _seed(tmp_path, CH1, "Chapter 1", "Short text one.")
+        captured = {}
+
+        def _fake_plan(chapters, output_dir, chunk_size, rate=None, dialogue_voice=None, migrate_titles=False):
+            captured["dialogue_voice"] = dialogue_voice
+            return [], []
+
+        with patch("core.audio.run_part_jobs", side_effect=_fake_run):
+            with patch("core.audio.build_generation_plan", side_effect=_fake_plan):
+                try:
+                    build_audio(
+                        "https://www.novelphoenix.com/novel/123", from_idx=1, to_idx=1,
+                        title="T", output_dir=tmp_path / "out", cache_dir=tmp_path,
+                        chapter_urls=[CH1], audio_format="mp3",
+                        dialogue_voice="pl-PL-ZofiaNeural",
+                    )
+                except RuntimeError:
+                    pass  # the stubbed plan produces no audio
+        assert captured.get("dialogue_voice") == "pl-PL-ZofiaNeural"
+
+    def test_filter_change_invalidates_previous_audio(self, tmp_path):
+        _seed(tmp_path, CH1, "Chapter 1", "Short text one.")
+        common = dict(
+            title="T", output_dir=tmp_path / "out", cache_dir=tmp_path,
+            chapter_urls=[CH1], audio_format="mp3",
+        )
+        with patch("core.audio.run_part_jobs", side_effect=_fake_run):
+            res = build_audio("https://www.novelphoenix.com/novel/123", from_idx=1, to_idx=1, **common)
+        manifest = Path(res["audio_dir"]) / ".speak-epub-build.json"
+        import json as _json
+
+        stored = _json.loads(manifest.read_text(encoding="utf-8"))
+        assert stored["filters"] == _filters_digest_for([])
+
+        # a changed filter set must change the identity -> regeneration
+        assert _filters_digest_for([{"pattern": "xyz", "isRegex": False}]) != stored["filters"]
+
+    def test_resume_lock_spans_the_whole_build(self, tmp_path):
+        """The lock must be taken BEFORE the identity wipe and held through
+        the merge/packaging — a second run must not wipe a running build."""
+        _seed(tmp_path, CH1, "Chapter 1", "Short text one.")
+        events = []
+        lock = object()
+
+        def _fake_acquire(root):
+            events.append(("acquire", str(root)))
+            return lock
+
+        def _fake_release(lk):
+            events.append(("release", lk is lock))
+
+        async def _fake_run_with_lock(jobs, voice, parallel, retries, resume_lock=None, **kwargs):
+            events.append(("jobs", resume_lock is lock))
+            for j in jobs:
+                Path(j.output_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(j.output_path).write_bytes(b"FAKEMP3" * 100)
+
+        with patch("core.audio.acquire_resume_lock", side_effect=_fake_acquire):
+            with patch("core.audio.release_resume_lock", side_effect=_fake_release):
+                with patch("core.audio.run_part_jobs", side_effect=_fake_run_with_lock):
+                    build_audio(
+                        "https://www.novelphoenix.com/novel/123", from_idx=1, to_idx=1,
+                        title="T", output_dir=tmp_path / "out", cache_dir=tmp_path,
+                        chapter_urls=[CH1], audio_format="mp3",
+                    )
+        kinds = [e[0] for e in events]
+        assert kinds[0] == "acquire", "the lock must be taken before anything else"
+        assert ("jobs", True) in events, "the TTS run must run under the lock"
+        assert kinds[-1] == "release", "the lock must be released at the end"
+        assert events[-1][1] is True
+
+    def test_concurrent_run_is_rejected(self, tmp_path):
+        _seed(tmp_path, CH1, "Chapter 1", "Short text one.")
+
+        def _boom(root):
+            raise RuntimeError("concurrent resume detected")
+
+        with patch("core.audio.acquire_resume_lock", side_effect=_boom):
+            with pytest.raises(RuntimeError) as exc:
+                build_audio(
+                    "https://www.novelphoenix.com/novel/123", from_idx=1, to_idx=1,
+                    title="T", output_dir=tmp_path / "out", cache_dir=tmp_path,
+                    chapter_urls=[CH1], audio_format="mp3",
+                )
+        assert "concurrent resume" in str(exc.value)
 
 
 class TestBuildAudioRpc:
@@ -239,7 +389,7 @@ class TestBuildAudioRpc:
 
         async def _capture(jobs, voice, parallel, retries, on_part_status=None, on_log=None,
                            on_progress=None, rate=None, adaptive=False, parallel_max=None,
-                           engine="edge", local_voice=None):
+                           engine="edge", local_voice=None, resume_lock=None):
             captured["rate"] = rate
             captured["adaptive"] = adaptive
             await _fake_run(jobs, voice, parallel, retries, on_part_status, on_log, on_progress)
@@ -320,7 +470,7 @@ class TestBuildAudioRpc:
 
         async def _capture(jobs, voice, parallel, retries, on_part_status=None, on_log=None,
                            on_progress=None, rate=None, adaptive=False, parallel_max=None,
-                           engine="edge", local_voice=None):
+                           engine="edge", local_voice=None, resume_lock=None):
             captured["engine"] = engine
             captured["localVoice"] = local_voice
             await _fake_run(jobs, voice, parallel, retries, on_part_status, on_log, on_progress)

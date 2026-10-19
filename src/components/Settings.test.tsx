@@ -459,11 +459,40 @@ describe("Settings 4.2 — form + persist + i18n", () => {
     // regression pin (v0.3.7): the sample request must carry a non-empty
     // text plus the current voice/rate/engine — an empty payload made the
     // backend answer "text must be non-empty"
-    const payload = mockPreview.mock.calls[0][0] as { text?: string; rate?: string; engine?: string };
+    const payload = mockPreview.mock.calls[0][0] as {
+      text?: string;
+      rate?: string;
+      engine?: string;
+      voice?: string;
+      localVoice?: string;
+    };
     expect(payload.text && payload.text.trim().length).toBeTruthy();
-    expect(payload.rate).toMatch(/^[+-]?\d+%$/);
+    expect(payload.rate).toBe("+0%");
     expect(payload.engine).toBeTruthy();
+    expect(payload.voice).toBeTruthy();
     expect(await screen.findByTestId("settings-sample-player")).toBeInTheDocument();
+    unmount();
+    spy.mockRestore();
+  });
+
+  it("sample request carries the signed rate of a non-zero slider value", async () => {
+    const user = userEvent.setup();
+    const mockPreview = vi.fn().mockResolvedValue({
+      id: "1",
+      result: { path: "C:/out/_preview/voice_sample.mp3", engine: "edge", durationMs: 3000 },
+    });
+    const mod = await import("@/lib/sidecar");
+    const spy = vi.spyOn(mod, "previewVoice").mockImplementation(mockPreview as never);
+    const { unmount } = render(<Settings open={true} onClose={vi.fn()} />);
+    await waitFor(() => expect(mockGetStore).toHaveBeenCalled());
+    // a negative rate must be sent as "-20%" — a sign-inverted implementation
+    // ("+0%" is the same for both branches of the ternary) would slip through
+    const slider = screen.getByTestId("settings-audio-rate-slider") as HTMLInputElement;
+    fireEvent.change(slider, { target: { value: "-20" } });
+    await user.click(screen.getByTestId("settings-sample-play"));
+    await waitFor(() => expect(mockPreview).toHaveBeenCalled());
+    const payload = mockPreview.mock.calls[0][0] as { rate?: string };
+    expect(payload.rate).toBe("-20%");
     unmount();
     spy.mockRestore();
   });

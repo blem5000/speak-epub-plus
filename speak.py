@@ -353,6 +353,13 @@ async def convert(
             "dialogue_voice": dialogue_voice,
             "normalize_audio": bool(normalize_audio),
             "trim_silence": bool(trim_silence),
+            # the spoken audio also depends on the chunk size and the source
+            # book — a changed chunk size must regenerate instead of reusing
+            # parts that were cut at a different boundary
+            "chunk_size": int(chunk_size),
+            "filters": "",
+            "auto_boilerplate": False,
+            "source": str(epub_path),
         },
     )
 

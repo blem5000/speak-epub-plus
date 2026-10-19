@@ -8,7 +8,9 @@ Design notes:
 - heavy deps (piper / onnxruntime) are imported lazily so Edge-only runs and
   app startup never pay for them
 - synthesis happens fully offline; part MP3s are encoded with ffmpeg at the
-  same 32k mono profile as Edge output, so resume/verify/merge stay identical
+  same 48k mono profile as Edge output, so resume/verify/merge stay identical
+  (a single profile matters: parts are merged with ``-c copy``, which cannot
+  mix bitrates)
 - ``rate`` keeps its Edge meaning ("+25%" = 1.25x speed) and maps onto Piper's
   ``length_scale``; the effective speed is clamped to 0.75–2.0, and the
   duration-based verification scales its floor with the requested rate so
@@ -385,7 +387,7 @@ def tts_text_to_mp3_local(
     ffmpeg_bin: str = "ffmpeg",
     on_retry: Optional[Callable[[int, Exception], None]] = None,
 ) -> None:
-    """Synthesize `text` fully offline into an MP3 part (32k mono, like Edge).
+    """Synthesize `text` fully offline into an MP3 part (48k mono, like Edge).
 
     Synchronous like the Piper API itself. Transient synthesis/encoding
     failures (file locks, flaky disk) are retried with backoff using
@@ -435,7 +437,7 @@ def tts_text_to_mp3_local(
                 [
                     ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
                     "-i", str(wav_path),
-                    "-codec:a", "libmp3lame", "-b:a", "32k", "-ac", "1", "-ar", "24000",
+                    "-codec:a", "libmp3lame", "-b:a", "48k", "-ac", "1", "-ar", "24000",
                     str(output),
                 ],
                 capture_output=True,

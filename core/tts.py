@@ -391,9 +391,11 @@ def verify_part_audio(path: str, text: Optional[str] = None, rate: Optional[str]
         return True, "ok_no_duration_check"
     if not ffprobe_available():
         return True, "ok_no_duration_check"
-    try:
-        duration_ms = get_duration_ms(path)
-    except Exception:
+    duration_ms = get_duration_ms(path)
+    if duration_ms < 0:
+        # the probe itself failed (ffprobe timeout/crash) — the file may be
+        # perfectly fine, so KEEP it: deleting valid audio on a transient
+        # probe failure costs a full re-synthesis
         return True, "ok_no_duration_check"
     if duration_ms <= 0:
         return False, "no_duration"
@@ -411,12 +413,42 @@ def verify_part_audio(path: str, text: Optional[str] = None, rate: Optional[str]
     return True, "ok"
 
 
+#: Dot-guard for sentence chunking: a dot that must not end a sentence
+#: (abbreviations, decimals) is replaced by this sentinel before splitting
+#: and restored afterwards.
+_SENT_DOT_SENTINEL = "\u0000"
+
+#: Abbreviations that end with a dot but do not end a sentence. Splitting
+#: after them cut "Mr." / "e.g." / "3." off the following word, so the TTS
+#: heard two fragments instead of one phrase.
+_SENT_ABBREVIATIONS = (
+    "e.g", "i.e", "etc", "vs", "mr", "mrs", "ms", "dr", "prof", "sr", "jr",
+    "st", "no", "fig", "vol", "pp", "ca", "approx", "dept", "est", "gen",
+    "lt", "col", "capt", "sgt", "ltd", "inc", "co", "al", "jan", "feb",
+    "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+)
+_SENT_ABBR_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(a) for a in sorted(_SENT_ABBREVIATIONS, key=len, reverse=True)) + r")\.",
+    re.IGNORECASE,
+)
+
+
+def _protect_sentence_dots(text: str) -> str:
+    """Mask dots that do not end a sentence (decimals, known abbreviations)."""
+    # decimals: 3.5 -> 3<sentinel>5
+    text = re.sub(r"(?<=\d)\.(?=\d)", _SENT_DOT_SENTINEL, text)
+    # abbreviations: "Mr. Smith" -> "Mr<sentinel> Smith"
+    text = _SENT_ABBR_RE.sub(lambda m: m.group(0)[:-1] + _SENT_DOT_SENTINEL, text)
+    return text
+
+
 def split_text_for_tts(text: str, max_chars: int = 3500) -> List[str]:
     """
     Sentence-boundary chunking with hard-cut fallback.
 
     - whitespace collapse re.sub r"\\s+" then strip
-    - split at (?<=[.!?;:])\\s+
+    - split at (?<=[.!?;:])\\s+ — but never after a decimal point or a known
+      abbreviation ("3. 5" and "Mr. Smith" stay in one piece)
     - current flush, len(sentence)>max_chars -> hard cut while start
     - all chunks <=max_chars, order preserved via chunks.append
     """
@@ -430,14 +462,15 @@ def split_text_for_tts(text: str, max_chars: int = 3500) -> List[str]:
     if len(text) <= max_chars:
         return [text]
 
-    sentences = re.split(r"(?<=[.!?;:])\s+", text)
+    guarded = _protect_sentence_dots(text)
+    sentences = re.split(r"(?<=[.!?;:])\s+", guarded)
     chunks: List[str] = []
     current = ""
 
     def flush_current() -> None:
         nonlocal current
         if current.strip():
-            chunks.append(current.strip())
+            chunks.append(current.strip().replace(_SENT_DOT_SENTINEL, "."))
             current = ""
 
     for sentence in sentences:
@@ -451,7 +484,7 @@ def split_text_for_tts(text: str, max_chars: int = 3500) -> List[str]:
             while start < len(sentence):
                 part = sentence[start : start + max_chars].strip()
                 if part:
-                    chunks.append(part)
+                    chunks.append(part.replace(_SENT_DOT_SENTINEL, "."))
                 start += max_chars
             continue
 
@@ -466,6 +499,15 @@ def split_text_for_tts(text: str, max_chars: int = 3500) -> List[str]:
     flush_current()
     return chunks
 
+
+#: Deadline for a single Edge TTS `save()` call. A stalled websocket used to
+#: pin the worker forever (the whole queue froze with no progress), so every
+#: attempt is bounded. The budget scales with the text length: a 3500-char
+#: part normally streams in well under a minute, a big one gets more room.
+#: Module constants so tests can shrink them.
+EDGE_SAVE_TIMEOUT_MIN = 300.0
+EDGE_SAVE_TIMEOUT_MAX = 1200.0
+EDGE_SAVE_TIMEOUT_PER_CHAR = 0.35
 
 #: Pause (s) between a chapter-title part and the chapter body. The title is
 #: synthesized as its own leading part and this silence is appended to it,
@@ -514,9 +556,19 @@ def split_title_body(title: Optional[str], text: str) -> Tuple[Optional[str], st
     norm = lambda s: re.sub(r"\s+", " ", s).strip()
     title_n, body_n = norm(t), norm(body)
     if body_n.startswith(title_n):
-        rest = body_n[len(title_n):].lstrip(" .:;-–—")
-        if rest:
-            return t, rest
+        rest = body_n[len(title_n):]
+        # the title must be a WHOLE word in the body: "It" + "It was..." leaves
+        # " was..." (boundary ok), but "I" + "It was..." leaves "t was..." —
+        # stripping that amputates the first letter of the first word
+        if not (rest[:1].isspace() or rest[:1] in ".:;-–—"):
+            return None, body
+        # very short titles are not split off at all — the risk of eating the
+        # beginning of the body outweighs the benefit of a separate title part
+        if len(title_n) < 3:
+            return None, body
+        tail = rest.lstrip(" .:;-–—")
+        if tail:
+            return t, tail
     return None, body
 
 
@@ -548,7 +600,7 @@ def ensure_pause_file(part_dir: str, seconds: float = TITLE_PAUSE_SEC) -> Option
                 ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
                 "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
                 "-t", str(float(seconds)),
-                "-codec:a", "libmp3lame", "-b:a", "32k", "-ac", "1", "-ar", "24000",
+                "-codec:a", "libmp3lame", "-b:a", "48k", "-ac", "1", "-ar", "24000",
                 path,
             ],
             check=True,
@@ -585,12 +637,14 @@ BUILD_IDENTITY_FILENAME = ".speak-epub-build.json"
 
 #: Manifest schema/layout version. Bump when artifact semantics change
 #: (v2: title parts + pause; v3: repaired trim filter — old outputs may
-#: have been over-trimmed by the broken silenceremove chain). A mismatch
-#: wipes and rebuilds like any change.
-BUILD_IDENTITY_VERSION = 3
+#: have been over-trimmed by the broken silenceremove chain; v4: identity
+#: now also covers chunk size, filters and the source book, so a changed
+#: chunk size / filter set no longer reuses stale audio).
+BUILD_IDENTITY_VERSION = 4
 
 #: Params that define generated audio. A change in any of them invalidates
-#: existing part/chapter files (different speed, voice, engine, processing).
+#: existing part/chapter files (different speed, voice, engine, processing,
+#: chunking, text filtering or source book).
 BUILD_IDENTITY_KEYS = (
     "rate",
     "voice",
@@ -599,6 +653,10 @@ BUILD_IDENTITY_KEYS = (
     "dialogue_voice",
     "normalize_audio",
     "trim_silence",
+    "chunk_size",
+    "filters",
+    "auto_boilerplate",
+    "source",
 )
 
 
@@ -611,7 +669,11 @@ def check_build_identity(
       title-split chapters once); existing files are grandparented, not wiped
     - params match → (False, False), pure resume
     - params differ → delete generated artifacts (_parts/*.mp3, chapter
-      *.mp3, *.m4b/*.m4a in this dir), rewrite the manifest, report wiped
+      *.mp3, *.m4b/*.m4a in this dir), then publish the new manifest, report
+      wiped. The manifest is written to a temp file FIRST (so an unwritable
+      directory never triggers a wipe) but published only AFTER a complete
+      wipe — a half-finished wipe keeps the old identity, so the leftovers
+      are wiped again on the next run instead of being silently reused.
     A manifest that cannot be read/written degrades to (False, False) with
     a warning — never wipe what cannot be recorded.
     """
@@ -641,23 +703,29 @@ def check_build_identity(
         try:
             with open(manifest, "w", encoding="utf-8") as f:
                 json.dump(wanted, f, ensure_ascii=False, indent=2)
-        except OSError as e:
+        except (OSError, TypeError, ValueError) as e:
             _log(f"warning: cannot write build manifest: {e}")
             return False, False
         return False, True
     same = all(stored.get(k) == v for k, v in wanted.items())
     if same:
         return False, False
-    # record the new identity BEFORE wiping: never wipe what cannot be
-    # recorded — a failed manifest write leaves the old audio intact
+    # stage the new manifest first: never wipe what cannot be recorded
+    tmp_manifest = manifest + ".tmp"
     try:
-        with open(manifest, "w", encoding="utf-8") as f:
+        with open(tmp_manifest, "w", encoding="utf-8") as f:
             json.dump(wanted, f, ensure_ascii=False, indent=2)
-    except OSError as e:
+    except (OSError, TypeError, ValueError) as e:
         _log(f"warning: cannot write build manifest: {e}")
+        try:
+            if os.path.exists(tmp_manifest):
+                os.remove(tmp_manifest)
+        except OSError:
+            pass
         return False, False
     # params changed: wipe generated audio so it regenerates with the new ones
     wiped: List[str] = []
+    failed: List[str] = []
     try:
         parts_dir = os.path.join(audio_dir, "_parts")
         if os.path.isdir(parts_dir):
@@ -667,7 +735,7 @@ def check_build_identity(
                         os.remove(os.path.join(parts_dir, name))
                         wiped.append(name)
                     except OSError:
-                        pass
+                        failed.append(name)
         for name in os.listdir(audio_dir):
             low = name.lower()
             if low.endswith((".mp3", ".m4b", ".m4a")) and os.path.isfile(os.path.join(audio_dir, name)):
@@ -675,10 +743,33 @@ def check_build_identity(
                     os.remove(os.path.join(audio_dir, name))
                     wiped.append(name)
                 except OSError:
-                    pass
+                    failed.append(name)
     except OSError as e:
         _log(f"warning: build identity wipe failed: {e}")
-        return True, False
+        failed.append(str(e))
+    if failed:
+        # incomplete wipe: keep the OLD identity so the next run wipes again —
+        # publishing the new one now would let stale audio be reused
+        _log(
+            f"warning: build identity wipe incomplete ({len(failed)} file(s) left) — "
+            "keeping the previous identity so the next run retries the cleanup"
+        )
+        try:
+            if os.path.exists(tmp_manifest):
+                os.remove(tmp_manifest)
+        except OSError:
+            pass
+        return False, False
+    try:
+        os.replace(tmp_manifest, manifest)
+    except OSError as e:
+        _log(f"warning: cannot publish build manifest: {e}")
+        try:
+            if os.path.exists(tmp_manifest):
+                os.remove(tmp_manifest)
+        except OSError:
+            pass
+        return False, False
     changed = sorted({f"{k}: {stored.get(k)!r} -> {v!r}" for k, v in wanted.items() if stored.get(k) != v})
     _log(f"build parameters changed ({'; '.join(changed)}) — regenerating {len(wiped)} audio file(s)")
     return True, False
@@ -719,7 +810,7 @@ def postprocess_chapter_file(path: str, normalize_audio: bool = False, trim_sile
             [
                 ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
                 "-i", path,
-                "-codec:a", "libmp3lame", "-b:a", "32k", "-ac", "1", "-ar", "24000",
+                "-codec:a", "libmp3lame", "-b:a", "48k", "-ac", "1", "-ar", "24000",
                 "-af", ",".join(filters),
                 "-f", "mp3",
                 tmp,
@@ -969,7 +1060,10 @@ async def tts_text_to_mp3(
             # No timeout here historically froze the whole global queue on a
             # websocket stall (real-book production test, v0.3.7): edge save
             # normally streams 5+ min of audio well under a minute.
-            _timeout = max(300.0, min(1200.0, len(text) * 0.35))
+            _timeout = max(
+                EDGE_SAVE_TIMEOUT_MIN,
+                min(EDGE_SAVE_TIMEOUT_MAX, len(text) * EDGE_SAVE_TIMEOUT_PER_CHAR),
+            )
             await asyncio.wait_for(communicate.save(output_path), timeout=_timeout)
             ok, reason = verify_part_audio(output_path, text, rate=rate)
             if ok:
@@ -1214,6 +1308,7 @@ async def run_part_jobs(
     parallel_max: Optional[int] = None,
     engine: str = "edge",
     local_voice: Optional[str] = None,
+    resume_lock: Any = None,
 ) -> None:
     """
     Global parallel PartJob queue — deterministyczny reading-order.
@@ -1232,6 +1327,10 @@ async def run_part_jobs(
     - else if file exists but invalid (too_small/truncated/no_duration): delete + regenerate
     - else start/done logs + await tts_text_to_mp3
     - progress completed/total with completed_lock, queue.task_done, queue.join, gather, cancel on exception
+    - resume_lock: an already-held lock (path) passed in by the caller. The
+      caller then owns it: it is NOT released here, so the lock can cover the
+      whole build (identity wipe → TTS → merge → M4B) instead of ending with
+      the part queue. Without it the lock is acquired and released here.
     - empty jobs -> print No TTS jobs ... and return
 
     Callbacks mirroring fetch.py pattern:
@@ -1296,17 +1395,19 @@ async def run_part_jobs(
             except Exception:
                 pass
 
-    _resume_lock: Any = None
-    try:
-        _resume_lock = acquire_resume_lock(_resume_root_for_jobs(jobs))
-    except RuntimeError as e:
-        print(str(e))
-        if on_log:
-            try:
-                on_log(str(e))
-            except Exception:
-                pass
-        raise
+    _resume_lock: Any = resume_lock
+    _owns_lock = _resume_lock is None
+    if _owns_lock:
+        try:
+            _resume_lock = acquire_resume_lock(_resume_root_for_jobs(jobs))
+        except RuntimeError as e:
+            print(str(e))
+            if on_log:
+                try:
+                    on_log(str(e))
+                except Exception:
+                    pass
+            raise
 
     # R3: refresh lock mtime while the run is alive — without a heartbeat a
     # conversion longer than RESUME_LOCK_STALE_SEC (600s) would look abandoned
@@ -1601,7 +1702,8 @@ async def run_part_jobs(
                 _lock_hb.cancel()
             except Exception:
                 pass
-        release_resume_lock(_resume_lock)
+        if _owns_lock:
+            release_resume_lock(_resume_lock)
 
 
 def ffmpeg_available() -> bool:
@@ -1622,6 +1724,18 @@ def subprocess_kwargs() -> dict:
 
 def ffprobe_available() -> bool:
     return shutil.which("ffprobe") is not None
+
+
+def ffconcat_entry(path: str) -> str:
+    """Path escaped for an ffconcat `file '...'` entry.
+
+    The concat demuxer reads each line as a single-quoted string, so a
+    literal apostrophe has to be written as '\\'' — the chapter merge and the
+    M4B packager MUST use the same convention. Divergent escapers made every
+    build in a path containing an apostrophe (e.g. a book titled "Bob's …")
+    fail with an ffmpeg parse error and produce no audiobook at all.
+    """
+    return os.path.abspath(path).replace("\\", "/").replace("'", "'\\''")
 
 
 def concat_mp3_files(input_paths: List[str], output_path: str) -> None:
@@ -1647,8 +1761,7 @@ def concat_mp3_files(input_paths: List[str], output_path: str) -> None:
             for p in input_paths:
                 if not os.path.isfile(p):
                     raise FileNotFoundError(f"missing concat input: {p}")
-                safe = os.path.abspath(p).replace("\\", "/").replace("'", "'\\''")
-                f.write(f"file '{safe}'\n")
+                f.write(f"file '{ffconcat_entry(p)}'\n")
 
         subprocess.run(
             ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file, "-c", "copy", "-f", "mp3", tmp_output],
@@ -1671,10 +1784,17 @@ def concat_mp3_files(input_paths: List[str], output_path: str) -> None:
             pass
 
 
-def get_duration_ms(path: str) -> int:
-    if not ffprobe_available():
-        return 0
+def probe_duration_ms(path: str) -> Optional[int]:
+    """Duration of an audio file in ms, or None when ffprobe could not tell.
 
+    Distinguishes two very different states that used to look identical:
+    "the file contains no audio" (0 ms) and "the probe failed" (None — a
+    ffprobe timeout, a crash or a missing binary). Only the first means the
+    file is broken; a failed probe must never make a caller delete or rebuild
+    a valid part.
+    """
+    if not ffprobe_available():
+        return None
     try:
         result = subprocess.run(
             [
@@ -1693,18 +1813,32 @@ def get_duration_ms(path: str) -> int:
             **subprocess_kwargs(),
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-        return 0
+        return None
     # robust returncode check — mock without int returncode treated as 0 for backward compat
     rc = getattr(result, "returncode", 0)
     if isinstance(rc, int) and rc != 0:
-        return 0
+        return None
     try:
         raw = result.stdout.strip() if result.stdout else ""
         if not raw:
-            return 0
+            return None
         return int(float(raw) * 1000)
     except (ValueError, TypeError, OverflowError):
-        return 0
+        return None
+
+
+def get_duration_ms(path: str) -> int:
+    """Duration in ms.
+
+    -1  the probe itself failed (ffprobe missing/timed out) — the file may
+        still be fine, so callers must not treat this as "broken audio"
+     0  the file was probed successfully and contains no audio
+    >0  the duration in milliseconds
+    """
+    duration = probe_duration_ms(path)
+    if duration is None:
+        return -1
+    return duration
 
 
 def escape_ffmeta(s: str) -> str:
@@ -1720,11 +1854,14 @@ def finalize_chapter_audio(
     on_chapter: Optional[Callable[[int, int], None]] = None,
     normalize_audio: bool = False,
     trim_silence: bool = False,
+    on_log: Optional[Callable[[str], None]] = None,
 ) -> List[AudioEntry]:
     """Merge part files into per-chapter MP3s (or keep parts without ffmpeg).
 
     `on_chapter(done, total)` fires once per plan (all exit paths) so long
     batch jobs can show merge progress. Optional — CLI/tests omit it.
+    `on_log(line)` receives the same diagnostics that go to stdout (the GUI
+    log panel); without it they are printed only.
 
     With `normalize_audio`/`trim_silence`, each finished chapter file is
     re-encoded through loudnorm and/or leading/trailing silence trimming
@@ -1732,6 +1869,22 @@ def finalize_chapter_audio(
     """
     audio_entries: List[AudioEntry] = []
     has_ffmpeg = ffmpeg_available()
+
+    def _log(msg: str) -> None:
+        print(msg)
+        if on_log is not None:
+            try:
+                on_log(msg)
+            except Exception:
+                pass
+
+    def _postprocess_skipped(reason: str, chapter_number: int) -> None:
+        if not (normalize_audio or trim_silence):
+            return
+        _log(
+            f"Warning: Chapter {chapter_number:03d}: audio post-processing skipped "
+            f"({reason}) — this chapter keeps its raw level and edge silence"
+        )
 
     print("\nFinalizing chapter files...")
 
@@ -1781,35 +1934,59 @@ def finalize_chapter_audio(
                 if size == 0:
                     print(f"Warning: existing merged file empty, will re-merge: {plan.chapter_mp3}")
                 else:
-                    # Corrupt zero-duration merges must not be reused when
-                    # ffprobe can tell (size gate alone keeps gappy merges).
-                    # Only applies to plausibly-large files — tiny test
-                    # fixtures stay on the legacy size path.
-                    try:
-                        if (
-                            size >= MIN_PART_BYTES
-                            and ffprobe_available()
-                            and get_duration_ms(plan.chapter_mp3) <= 0
-                        ):
-                            print(f"Warning: existing merged file has no duration, will re-merge: {plan.chapter_mp3}")
-                        else:
+                    # Completeness gate: a merge is only reusable when every
+                    # input part is still there. A merge built from an
+                    # incomplete part set passes the size+duration gates and
+                    # would ship a silent gap. MP3 frames are copied verbatim
+                    # by the concat, so the merged size must cover the parts.
+                    missing_inputs = [p for p in merge_inputs if not os.path.isfile(p)]
+                    parts_total = 0
+                    for p in merge_inputs:
+                        try:
+                            parts_total += os.path.getsize(p)
+                        except OSError:
+                            pass
+                    if missing_inputs:
+                        print(
+                            f"Warning: existing merged file built from an incomplete part set, "
+                            f"will re-merge: {plan.chapter_mp3}"
+                        )
+                    elif parts_total > 0 and size < parts_total * 0.9:
+                        print(
+                            f"Warning: existing merged file is smaller than its parts "
+                            f"({size} B < {int(parts_total * 0.9)} B), will re-merge: {plan.chapter_mp3}"
+                        )
+                    else:
+                        # Corrupt zero-duration merges must not be reused when
+                        # ffprobe can tell (size gate alone keeps gappy merges).
+                        # Only applies to plausibly-large files — tiny test
+                        # fixtures stay on the legacy size path.
+                        try:
+                            if (
+                                size >= MIN_PART_BYTES
+                                and ffprobe_available()
+                                and get_duration_ms(plan.chapter_mp3) <= 0
+                            ):
+                                print(f"Warning: existing merged file has no duration, will re-merge: {plan.chapter_mp3}")
+                            else:
+                                audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
+                                size_kb = size // 1024
+                                print(f"Chapter {plan.chapter_number:03d}: existing merged file reused ({size_kb} KB)")
+                                _emit_chapter()
+                                continue
+                        except Exception:
                             audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
                             size_kb = size // 1024
                             print(f"Chapter {plan.chapter_number:03d}: existing merged file reused ({size_kb} KB)")
                             _emit_chapter()
                             continue
-                    except Exception:
-                        audio_entries.append((plan.chapter_number, plan.title, plan.chapter_mp3))
-                        size_kb = size // 1024
-                        print(f"Chapter {plan.chapter_number:03d}: existing merged file reused ({size_kb} KB)")
-                        _emit_chapter()
-                        continue
             except OSError:
                 pass
 
         missing_parts = [p for p in merge_inputs if not os.path.exists(p)]
         if missing_parts:
             print(f"Warning: Chapter {plan.chapter_number:03d} has missing part files; keeping available parts only.")
+            _postprocess_skipped("missing part files", plan.chapter_number)
             for entry in (plan.marker_entries_if_unmerged or []):
                 try:
                     if os.path.exists(entry[2]):
@@ -1835,6 +2012,7 @@ def finalize_chapter_audio(
                             continue
             except Exception as e:
                 print(f"Warning: Chapter {plan.chapter_number:03d} merge failed ({e}); keeping available parts only.")
+                _postprocess_skipped("merge failed", plan.chapter_number)
                 # cleanup partial output if created
                 try:
                     if os.path.exists(plan.chapter_mp3):
@@ -1851,6 +2029,7 @@ def finalize_chapter_audio(
                 # entries reference them (H1 fix).
         else:
             print(f"Chapter {plan.chapter_number:03d}: ffmpeg unavailable, keeping {len(plan.part_paths)} part files")
+            _postprocess_skipped("ffmpeg unavailable", plan.chapter_number)
             for entry in (plan.marker_entries_if_unmerged or []):
                 try:
                     if os.path.exists(entry[2]):
@@ -1920,6 +2099,8 @@ def build_m4b(
     # defensive book_title sanitization (prevent traversal / illegal chars)
     # caller already sanitizes via sanitize_filename, but re-sanitize defensively
     book_title = sanitize_filename(book_title, fallback="audiobook", max_len=120)
+    if not audio_entries:
+        raise ValueError("no audio entries to package")
     if not ffmpeg_available():
         print(f"\nWarning: ffmpeg not found on PATH - skipping {ext.upper()} creation.")
         print("Install FFmpeg from https://ffmpeg.org/download.html and add it to PATH.")
@@ -1939,11 +2120,15 @@ def build_m4b(
     concat_file = os.path.join(output_dir, "_concat.txt")
     metadata_file = os.path.join(output_dir, "_metadata.txt")
     out_path = os.path.join(output_dir, f"{book_title}.{ext}")
+    # Atomic publish: ffmpeg writes a sidecar .tmp that is moved into place
+    # only after a successful encode. A killed/half-finished encode then
+    # leaves a stray .tmp, never a truncated .m4b that the GUI would report
+    # as the finished audiobook.
+    tmp_out_path = out_path + ".tmp"
     try:
         with open(concat_file, "w", encoding="utf-8") as f:
             for _, _, path in audio_entries:
-                safe = os.path.abspath(path).replace("\\", "/").replace("'", "\\'")
-                f.write(f"file '{safe}'\n")
+                f.write(f"file '{ffconcat_entry(path)}'\n")
 
         with open(metadata_file, "w", encoding="utf-8") as f:
             f.write(";FFMETADATA1\n")
@@ -1954,10 +2139,17 @@ def build_m4b(
             cursor = 0
             _probe_total = len(audio_entries)
             for _probe_i, (chapter_number, marker_title, path) in enumerate(audio_entries, 1):
-                try:
-                    duration = get_duration_ms(path)
-                except Exception:
-                    duration = 0
+                duration = get_duration_ms(path)
+                if duration < 0:
+                    raise RuntimeError(
+                        f"cannot determine the duration of {os.path.basename(path)} — "
+                        "ffprobe failed; refusing to write chapter markers with wrong offsets"
+                    )
+                if duration <= 0:
+                    raise RuntimeError(
+                        f"chapter audio has no duration: {os.path.basename(path)} — "
+                        "refusing to write chapter markers with wrong offsets"
+                    )
                 if on_probe is not None:
                     try:
                         on_probe(_probe_i, _probe_total)
@@ -1986,7 +2178,7 @@ def build_m4b(
         def _poll_output_size() -> None:
             while not _prog_stop.wait(2.0):
                 try:
-                    _sz = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+                    _sz = os.path.getsize(tmp_out_path) if os.path.exists(tmp_out_path) else 0
                 except OSError:
                     _sz = 0
                 if on_progress is not None and _expected_total > 0:
@@ -2024,7 +2216,11 @@ def build_m4b(
             args += ["-map_metadata", "1", "-map", "0:a"]
             if with_cover:
                 args += ["-map", "2:v", "-c:v", "copy", "-disposition:v", "attached_pic"]
-            args += ["-c:a", "aac", "-b:a", bitrate, out_path]
+            # the output is a .tmp sidecar (atomic publish) — it has no usable
+            # extension, so the muxer must be named explicitly. "ipod" is what
+            # ffmpeg picks for .m4b/.m4a by extension (same MP4 container,
+            # iTunes-friendly flags).
+            args += ["-c:a", "aac", "-b:a", bitrate, "-f", "ipod", tmp_out_path]
             return args
 
         try:
@@ -2044,6 +2240,8 @@ def build_m4b(
                 check=True,
                 **subprocess_kwargs(),
             )
+        # publish atomically: only a complete encode becomes the deliverable
+        os.replace(tmp_out_path, out_path)
     finally:
         try:
             _prog_stop.set()
@@ -2057,6 +2255,11 @@ def build_m4b(
         try:
             if os.path.exists(metadata_file):
                 os.remove(metadata_file)
+        except OSError:
+            pass
+        try:
+            if os.path.exists(tmp_out_path):
+                os.remove(tmp_out_path)
         except OSError:
             pass
 
