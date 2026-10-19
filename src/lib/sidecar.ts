@@ -637,7 +637,7 @@ export async function localVoices(opts?: { signal?: AbortSignal }): Promise<RpcR
  */
 export async function previewVoice(
   params: {
-    text?: string;
+    text: string;
     voice?: string | null;
     rate?: string | null;
     engine?: string | null;
@@ -646,11 +646,9 @@ export async function previewVoice(
   opts?: { signal?: AbortSignal }
 ): Promise<RpcResponse> {
   const payload: Record<string, unknown> = {};
-  if (params.text !== undefined && params.text !== null) {
-    const t = String(params.text).trim();
-    if (!t) throw new Error("text must be non-empty");
-    payload.text = t.slice(0, 500);
-  }
+  const text = String(params.text ?? "").trim();
+  if (!text) throw new Error("text must be non-empty");
+  payload.text = text.slice(0, 500);
   if (params.voice !== undefined && params.voice !== null) {
     const v = String(params.voice).trim().slice(0, 100);
     if (v) payload.voice = v;

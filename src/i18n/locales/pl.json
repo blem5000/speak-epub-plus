@@ -61,6 +61,7 @@
   "settings.sample.stop": "Zatrzymaj",
   "settings.sample.loading": "Syntetyzowanie…",
   "settings.sample.error": "Nie udało się odtworzyć próbki.",
+  "settings.sample.text": "Witaj! Tak brzmi próbka tego głosu lektora.",
   "settings.performance.title": "Wydajność",
   "settings.performance.parallel": "Równoległość",
   "settings.performance.chunkSize": "Rozmiar fragmentu",

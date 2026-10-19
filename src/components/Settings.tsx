@@ -516,7 +516,17 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
     }
     setSampleBusy(true);
     try {
-      const res = await previewVoice({});
+      // regression (v0.3.7): this call went out as previewVoice({}) — no
+      // sample text, no voice/rate/engine — so the backend rejected it with
+      // "text must be non-empty" and the sample never matched the UI state
+      const rateStr = `${rateNum >= 0 ? "+" : ""}${rateNum}%`;
+      const res = await previewVoice({
+        text: t("settings.sample.text") as string,
+        voice: isVoiceCustom ? voiceCustom : voice,
+        rate: rateStr,
+        engine,
+        localVoice,
+      });
       if (res.error) {
         const msg = (res.error as { message?: string }).message ?? String(res.error);
         setSampleError(msg);

@@ -456,6 +456,13 @@ describe("Settings 4.2 — form + persist + i18n", () => {
     expect(btn).toBeInTheDocument();
     await user.click(btn);
     await waitFor(() => expect(mockPreview).toHaveBeenCalled());
+    // regression pin (v0.3.7): the sample request must carry a non-empty
+    // text plus the current voice/rate/engine — an empty payload made the
+    // backend answer "text must be non-empty"
+    const payload = mockPreview.mock.calls[0][0] as { text?: string; rate?: string; engine?: string };
+    expect(payload.text && payload.text.trim().length).toBeTruthy();
+    expect(payload.rate).toMatch(/^[+-]?\d+%$/);
+    expect(payload.engine).toBeTruthy();
     expect(await screen.findByTestId("settings-sample-player")).toBeInTheDocument();
     unmount();
     spy.mockRestore();

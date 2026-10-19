@@ -59,6 +59,7 @@
   "settings.sample.stop": "Stop",
   "settings.sample.loading": "Synthesizing…",
   "settings.sample.error": "Could not play the sample.",
+  "settings.sample.text": "Hello! This is a sample of this narrator voice.",
   "settings.audio.bitrate": "Bitrate",
   "settings.audio.rate": "Rate",
   "settings.performance.title": "Performance",
