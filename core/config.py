@@ -9,7 +9,11 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
+
+#: Hard limit for a voice preview (Edge download or local Piper synthesis).
+#: The GUI cannot cancel a single RPC, so the sidecar must not wait forever.
+PREVIEW_TIMEOUT_SEC = 120.0
 
 # ---------------------------------------------------------------------------
 # Venv resolution — OS-aware (AGENTS.md)
@@ -160,22 +164,38 @@ def _is_code(exc: BaseException | None, *codes: str) -> bool:
         return False
 
 
+def _app_data_store_path() -> Path:
+    """Per-user, writable location for store.json (the OS convention)."""
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
+    return Path(base) / "speak-epub" / "store.json"
+
+
 def get_store_path() -> Path:
     """
     Resolve store.json path.
-    Tauri store defaults to app config dir; for CLI parity we also check
-    ./store.json.
+
+    The store must live somewhere writable and stable: the packaged app used
+    to write it into its own install directory (CWD-relative), which fails
+    under Program Files and silently lost every setting.
+
+    Order:
+    1. SPEAK_EPUB_STORE — explicit override (used by the tests)
+    2. an existing ./store.json — the legacy/dev location is adopted so
+       existing setups keep their settings
+    3. the per-user app-data location (default for new installs)
     """
-    # Prefer Tauri app config dir if available via env (fallback to local)
-    # For sidecar, use repo-root store.json
-    for candidate in [
-        Path("store.json"),
-        Path.home() / ".config" / "speak-epub" / "store.json",
-    ]:
-        if candidate.is_file():
-            return candidate
-    # Default location for new store
-    return Path("store.json")
+    override = os.environ.get("SPEAK_EPUB_STORE")
+    if override and override.strip():
+        return Path(override)
+    legacy = Path("store.json")
+    if legacy.is_file():
+        return legacy
+    return _app_data_store_path()
 
 
 def load_store() -> Dict[str, Any]:
@@ -187,8 +207,12 @@ def load_store() -> Dict[str, Any]:
             raw = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
                 data.update(raw)
-        except Exception:
+        except FileNotFoundError:
             pass
+        except Exception as e:
+            # a truncated/corrupt store must not silently reset every setting:
+            # keep the file, report it, and fall back to the defaults
+            print(f"warning: store at {path} is unreadable ({e}) — using defaults")
     return data
 
 
@@ -205,12 +229,20 @@ def save_store(patch: Any) -> Dict[str, Any]:
     except TypeError as e:
         raise TypeError(f"patch not JSON serializable: {e}") from e
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    # a per-process temp name: two overlapping setStore calls (the GUI fires
+    # them without awaiting) must not write the same temp file
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         tmp.write_text(payload, encoding="utf-8")
         tmp.replace(path)
     except OSError as e:
         raise OSError(f"store write failed {path}: {e}") from e
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
     return current
 
 
@@ -290,9 +322,10 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             # No demo mocks here — empty stays empty. Tests stub search_all
             # directly; manual demo uses the network or recorded RPC fixtures.
         except Exception as e:
-            # 4xx/5xx/timeout -> [] per spec, no crash — return empty result
-            # but ValueError already handled above
-            return {"id": rid, "result": []}
+            # a failed search must be reported: an empty result list is
+            # indistinguishable from "no book with that title" and the user
+            # retries a search that cannot work
+            return {"id": rid, "error": {"code": "SEARCH_FAILED", "message": str(e)}}
 
         # Serialize SearchResult -> JSON-friendly dict with site|title|chapters|link
         serialized: list[dict[str, Any]] = []
@@ -1129,8 +1162,9 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                         sanitized.append(iv)
                 except Exception:
                     continue
-            # dedup + sort + cap
-            sanitized = sorted(set(sanitized))
+            # dedup + sort + cap: the list must stay bounded (it is written
+            # into the store and returned to the GUI on every poll)
+            sanitized = sorted(set(sanitized))[:1000]
             patch: Dict[str, Any] = {"selection": sanitized}
             if frm is not None:
                 try:
@@ -1178,6 +1212,13 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             if isinstance(url_sel, str) and url_sel.strip():
                 if url_sel.strip().lower().startswith(("http://", "https://")):
                     patch["selection_url"] = url_sel.strip()[:500]
+                else:
+                    # a non-http URL is a caller error: report it instead of
+                    # silently keeping the previous value
+                    return {
+                        "id": rid,
+                        "error": {"code": "VALUE_ERROR", "message": "selection url must be http(s)"},
+                    }
             elif url_sel is None:
                 # explicit clear (P19) — allow null to wipe stale url
                 patch["selection_url"] = None
@@ -1796,7 +1837,9 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             elif not _re_epub.match(r"^https?://", coverUrl_p, _re_epub.I):
                 coverUrl_p = None
             elif len(coverUrl_p) > 500:
-                coverUrl_p = coverUrl_p[:500]
+                # H7: a truncated URL points at a DIFFERENT resource — drop it
+                # (the same rule core/epub.py applies to its own parameter)
+                coverUrl_p = None
         else:
             coverUrl_p = None
 
@@ -2028,6 +2071,15 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         except Exception:
             keep_epub_val = True
 
+        def _emit_epub_log(line: str) -> None:
+            # the sidecar must not stay silent for minutes: the GUI kills a
+            # child that produced no output (300 s idle timeout)
+            if emit_fn:
+                try:
+                    emit_fn("logLine", {"line": line})
+                except Exception:
+                    pass
+
         try:
             # call build_epub with chapter_urls if we have desired_urls_norm
             result_epub = build_epub_fn(
@@ -2040,6 +2092,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 output_dir=outputDir_p or "output",
                 filters=None,  # let epub load from store
                 chapter_urls=desired_urls_norm,
+                on_log=_emit_epub_log,
             )
             # result_epub contains path,size,chapter_count,epubcheck_ok,messages,logs
             # merge our clamp logs
@@ -2259,6 +2312,14 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         voice_pv = voice_pv.strip()[:100]
         if rate_pv is None:
             rate_pv = store_pv.get("rate", "+0%")
+        else:
+            # a malformed rate is an error here too (exactly like in
+            # buildAudio): the preview must not silently play at normal speed
+            # while the real build refuses the very same value
+            import re as _re_pv
+
+            if not _re_pv.match(r"^\s*[+-]?\d+%?\s*$", str(rate_pv)):
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid rate {rate_pv}"}}
         try:
             from core.tts import normalize_tts_rate as _norm_pv
 
@@ -2270,7 +2331,12 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         engine_pv = engine_pv.strip().lower() if isinstance(engine_pv, str) else "auto"
         if engine_pv not in ("auto", "edge", "local"):
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid engine {engine_pv}"}}
-        if local_voice_pv is None:
+        local_voice_given = "localVoice" in params or "local_voice" in params
+        local_voice_pv = params.get("localVoice", params.get("local_voice"))
+        if local_voice_pv is None and not local_voice_given:
+            # no local voice in the request -> fall back to the stored one.
+            # An EXPLICIT null/"" means "the default voice" and must not be
+            # replaced by the stored value (the two were indistinguishable).
             local_voice_pv = store_pv.get("localVoice") or None
         local_voice_pv = local_voice_pv.strip() if isinstance(local_voice_pv, str) else None
         if local_voice_pv == "":
@@ -2312,14 +2378,25 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
 
             import asyncio as _asyncio_pv
 
+            # a preview must never block the RPC forever: a hung local Piper
+            # synthesis or a stalled Edge websocket would freeze the whole
+            # sidecar (the GUI has no way to cancel a single RPC)
+            async def _preview_guarded():
+                await _asyncio_pv.wait_for(_preview_run(), timeout=PREVIEW_TIMEOUT_SEC)
+
             try:
-                _asyncio_pv.run(_preview_run())
+                _asyncio_pv.run(_preview_guarded())
+            except _asyncio_pv.TimeoutError:
+                return {
+                    "id": rid,
+                    "error": {"code": "TIMEOUT", "message": f"voice preview timed out after {PREVIEW_TIMEOUT_SEC:.0f}s"},
+                }
             except RuntimeError:
                 # already inside a loop (library use): drive on a fresh loop
                 import concurrent.futures as _cf_pv
 
                 with _cf_pv.ThreadPoolExecutor(max_workers=1) as _ex:
-                    _ex.submit(_asyncio_pv.run, _preview_run()).result()
+                    _ex.submit(_asyncio_pv.run, _preview_guarded).result()
             try:
                 from core.tts import get_duration_ms as _dur_pv
 
@@ -2347,6 +2424,14 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         urls_p = params.get("urls", params.get("chapterUrls", params.get("chapter_urls")))
         voice_p = params.get("voice", params.get("voiceName"))
         author_p = params.get("author", params.get("authorName"))
+        cover_url_p = params.get("coverUrl", params.get("cover_url", params.get("cover")))
+        if isinstance(cover_url_p, str):
+            cover_url_p = cover_url_p.strip() or None
+            if cover_url_p and (len(cover_url_p) > 500 or not _re_audio.match(r"^https?://", cover_url_p, _re_audio.I)):
+                # a truncated/foreign cover URL points at the wrong resource
+                cover_url_p = None
+        else:
+            cover_url_p = None
         rate_p = params.get("rate")
         engine_p = params.get("engine")
         local_voice_p = params.get("localVoice", params.get("local_voice"))
@@ -2605,6 +2690,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 local_voice=local_voice_p,
                 dialogue_voice=dialogue_voice_p,
                 author=author_p,
+                cover_url=cover_url_p,
                 parallel=parallel_p,
                 retries=retries_p,
                 chunk_size=chunk_p,

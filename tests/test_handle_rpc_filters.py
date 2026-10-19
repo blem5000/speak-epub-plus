@@ -10,8 +10,8 @@ from core.config import handle_rpc
 
 def _isolate_store(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    # ensure clean store
-    # no need to mock get_store_path, chdir handles Path("store.json") lookup
+    # the store lives in the per-user app-data dir — point it at the sandbox
+    monkeypatch.setenv("SPEAK_EPUB_STORE", str(tmp_path / "store.json"))
 
 
 def test_getFilters_empty(tmp_path, monkeypatch):

@@ -255,7 +255,8 @@ class TestBuildAudioWiring:
         _seed(tmp_path, CH1, "Chapter 1", "Short text one.")
         captured = {}
 
-        def _fake_plan(chapters, output_dir, chunk_size, rate=None, dialogue_voice=None, migrate_titles=False):
+        def _fake_plan(chapters, output_dir, chunk_size, rate=None, dialogue_voice=None, migrate_titles=False,
+                       on_log=None, engine=None):
             captured["dialogue_voice"] = dialogue_voice
             return [], []
 

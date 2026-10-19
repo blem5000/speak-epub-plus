@@ -9,6 +9,9 @@ from core.config import handle_rpc, load_store, DEFAULT_STORE
 
 def _isolate(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    # the store now lives in the per-user app-data dir; point it at the
+    # sandbox so a test never writes to the developer's real settings
+    monkeypatch.setenv("SPEAK_EPUB_STORE", str(tmp_path / "store.json"))
 
 
 def test_getStore_defaults(tmp_path, monkeypatch):

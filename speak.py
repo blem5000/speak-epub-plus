@@ -309,7 +309,9 @@ async def convert(
     if str(engine or "").strip().lower() == "local":
         print(f"Parallel TTS part jobs: {parallel} (local Piper: CPU cores, up to 8, no adaptive scaling)")
     else:
-        print(f"Parallel TTS part jobs: {parallel} (auto-tunes 1\u201312 while running)")
+        from core.tts import ADAPTIVE_MAX_PARALLEL as _amp
+
+        print(f"Parallel TTS part jobs: {parallel} (auto-tunes 1-{_amp} while running)")
     print(f"Retries per part: {retries}")
     # canonicalize CLI-style bare numbers ("15" -> "+15%") so --rate never
     # silently collapses to +0%: normalize_tts_rate requires the % sign.

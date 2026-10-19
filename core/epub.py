@@ -7,12 +7,14 @@ Pure module — no adapter imports, keeps GUI->Core->Port->Adapter.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+from urllib.parse import urljoin, urlparse
 
 # ---------------------------------------------------------------------------
 # sanitize_filename — mirror speak.py:84
@@ -250,6 +252,35 @@ def _download_image(url: str, timeout: float = 10.0):
             pass
 
 
+def _allowed_image_host(url: str, page_url: str) -> bool:
+    """True when an image URL may be fetched.
+
+    Images legitimately live on a CDN (a different host), so the host is NOT
+    restricted to the page's own. What must never be fetched is an INTERNAL
+    address: a scraped page may name http://169.254.169.254/... and the
+    response would be embedded in the EPUB.
+    """
+    try:
+        host = (urlparse(url).hostname or "").lower().rstrip(".")
+    except Exception:
+        return False
+    if not host:
+        return False
+    # obvious local names
+    if host in ("localhost", "localhost.localdomain") or host.endswith((".local", ".internal", ".localdomain")):
+        return False
+    try:
+        import ipaddress
+
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return True  # a regular public hostname
+    try:
+        return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast)
+    except Exception:
+        return False
+
+
 def embed_chapter_images(cleaned_html: str, page_url: str, chapter_idx: int, download=None, max_images: int = _MAX_IMAGES_PER_CHAPTER):
     """Embed remote chapter <img> as local EPUB items.
 
@@ -307,12 +338,18 @@ def embed_chapter_images(cleaned_html: str, page_url: str, chapter_idx: int, dow
         if scheme not in ("http", "https"):
             skipped += 1
             continue
+        # an allowlist: the page may name ANY host (an <img> pointing at an
+        # internal address would be fetched and embedded in the EPUB)
+        if not _allowed_image_host(abs_url, page_url):
+            skipped += 1
+            continue
         try:
             got = fetch(abs_url)
         except Exception:
             got = None
         if not got:
             skipped += 1
+            # the remote src is kept -> the EPUB is not self-contained
             continue
         data, ext = got
         if not data:
@@ -369,6 +406,8 @@ def build_epub(
     end_selector: str | None = None,
     extra_params: Dict[str, Any] | None = None,
     auto_boilerplate: bool | None = None,
+    language: str | None = None,
+    on_log: Any = None,
 ) -> Dict[str, Any]:
     """
     Build validated EPUB offline from cached raw.html.
@@ -652,6 +691,16 @@ def build_epub(
     # -------------------------------------------------------------------
     logs: List[str] = []
     missing: List[str] = []
+
+    def _emit(line: str) -> None:
+        """Collect the line and hand it to the caller (the sidecar must not
+        stay silent for minutes — the GUI kills a silent child)."""
+        logs.append(line)
+        if on_log is not None:
+            try:
+                on_log(line)
+            except Exception:
+                pass
     # dynamic import fetch
     try:
         fetch_mod = importlib.import_module("core.fetch")
@@ -674,19 +723,22 @@ def build_epub(
             cached = None
         if cached is None:
             missing.append(url)
-            logs.append(f"cache miss chapter {ch_num} {url}")
+            _emit(f"cache miss chapter {ch_num} {url}")
         else:
             # ensure raw contains? we don't filter yet
             pass
 
     if missing:
-        # Return error shape for caller to map to CACHE_MISS?
-        # Raise custom exception with missing list
-        # We use ValueError with code? Better raise AdapterError with code CACHE_MISS?
-        # To allow handle_rpc to catch and return CACHE_MISS, we raise an exception with attribute code
         from core.ports import AdapterError
 
-        raise AdapterError(f"CACHE_MISS: missing {len(missing)} chapters", code="CACHE_MISS")
+        err = AdapterError(f"CACHE_MISS: missing {len(missing)} chapters", code="CACHE_MISS")
+        # the GUI highlights the chapters it has to fetch again — the list
+        # must travel with the error (it used to be dropped here)
+        try:
+            err.missing = list(missing)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        raise err
 
     # Also attach missing to exception? Caller will reconstruct missing list via checking again?
     # Instead we store missing in exception message; caller can parse.
@@ -750,7 +802,7 @@ def build_epub(
         _block_lines_fn = None
     for pos, url in enumerate(desired_urls):
         ch_num = from_i + pos
-        logs.append(f"cleaning chapter {ch_num}")
+        _emit(f"cleaning chapter {ch_num}")
         # set status cleaning? logs enough
         raw_html = read_cache(url, cache_dir) if cache_dir is not None else read_cache(url)
         if raw_html is None:
@@ -806,10 +858,13 @@ def build_epub(
             logs.append(f"filter error chapter {ch_num}: {e}")
 
         # Derive filtered_text from filtered_html for EPUB? But we need html for EpubHtml
-        # Ensure filtered_html is not empty; if empty, use cleaned_text wrapped in <p>
+        # Ensure filtered_html is not empty; if empty, the chapter is SKIPPED
+        # (an empty <p></p> chapter is visible in every reader, and the
+        # fallback used the PRE-FILTER text — re-adding what the user just
+        # filtered out)
         if not filtered_html or not filtered_html.strip():
-            # fallback to cleaned_text wrapped
-            filtered_html = f"<p>{cleaned_text}</p>" if cleaned_text else "<p></p>"
+            logs.append(f"chapter {ch_num} empty after filtering — skipped")
+            continue
 
         # Embed remote chapter images so the EPUB works offline (failures keep remote URL)
         try:
@@ -829,7 +884,7 @@ def build_epub(
             block_lines_list.append(_block_lines_fn(cleaned_html) if _block_lines_fn else [])
         except Exception:
             block_lines_list.append([])
-        logs.append(f"done chapter {ch_num}")
+        _emit(f"done chapter {ch_num}")
 
     # -------------------------------------------------------------------
     # Auto-boilerplate: recurring head/tail lines across chapters
@@ -874,7 +929,9 @@ def build_epub(
     # metadata
     book.set_identifier(f"{slug}-{from_i}-{to_i}-{hashlib.sha1(novel_url.encode()).hexdigest()[:8]}")
     book.set_title(title or slug)
-    book.set_language("en")
+    # the language is metadata readers use for hyphenation/pronunciation:
+    # "en" for a Polish novel is wrong
+    book.set_language((language or "en").strip()[:20] or "en")
     if author:
         book.add_author(author)
         # also add metadata creator
@@ -939,12 +996,16 @@ def build_epub(
                 elif "jpeg" in ctype or "jpg" in ctype:
                     ext = "jpg"
                 elif "webp" in ctype:
-                    ext = "jpg"
+                    # keep the real format: storing WebP bytes as .jpg makes
+                    # readers refuse the cover
+                    ext = "webp"
                 # try to detect from url
                 if cover_url.lower().endswith(".png"):
                     ext = "png"
                 elif cover_url.lower().endswith(".jpg") or cover_url.lower().endswith(".jpeg"):
                     ext = "jpg"
+                elif cover_url.lower().endswith(".webp"):
+                    ext = "webp"
                 # data-url guard already
                 if len(cover_data) > 0:
                     # use set_cover which creates cover image and html
@@ -958,7 +1019,7 @@ def build_epub(
                             img_item = epub_lib.EpubImage(
                                 uid="cover-img",
                                 file_name=f"images/cover.{ext}",
-                                media_type=f"image/{ext}",
+                                media_type="image/webp" if ext == "webp" else f"image/{ext}",
                                 content=cover_data,
                             )
                             book.add_item(img_item)
@@ -1023,7 +1084,7 @@ def build_epub(
                     content = _stripped
             except Exception as e:
                 logs.append(f"boilerplate strip error: {e}")
-        chap = epub_lib.EpubHtml(title=ch_title, file_name=file_name, lang="en", content=content)
+        chap = epub_lib.EpubHtml(title=ch_title, file_name=file_name, lang=(language or "en"), content=content)
         chap.uid = f"chap_{idx}"
         book.add_item(chap)
         epub_chapters.append(chap)
@@ -1039,9 +1100,10 @@ def build_epub(
 
     # Add CSS maybe? Not needed
 
-    # Write atomically
+    # Write atomically — a per-process temp name, so two concurrent builds of
+    # the same title/range cannot write the same file
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    tmp_path = output_path.with_name(f"{output_path.name}.{os.getpid()}.tmp")
     try:
         epub_lib.write_epub(str(tmp_path), book)
         tmp_path.replace(output_path)
@@ -1063,6 +1125,15 @@ def build_epub(
     # logs for epubcheck
     for m in messages:
         logs.append(f"epubcheck {m}")
+    if not ok:
+        # the file is published anyway, but the user must know it is broken:
+        # it is moved aside so it cannot be mistaken for a valid deliverable
+        broken_path = output_path.with_name(output_path.stem + ".invalid" + output_path.suffix)
+        try:
+            output_path.replace(broken_path)
+            logs.append(f"epubcheck FAILED — the file was moved to {broken_path.name}")
+        except OSError:
+            pass
 
     size = output_path.stat().st_size if output_path.exists() else 0
 

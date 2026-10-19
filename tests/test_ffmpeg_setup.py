@@ -4,6 +4,7 @@
 import io
 import os
 import sys
+import urllib.error
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +51,13 @@ def _fake_ok_open(req, timeout=None):
 def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("SPEAK_EPUB_FFMPEG_DIR", str(tmp_path / "ffmpeg-root"))
     monkeypatch.setattr("core.ffmpeg_setup.shutil.which", lambda name: None)
+
+    def _no_network(req, timeout=None):
+        # no test may touch the network: a mirror that is not faked fails
+        # instantly instead of waiting for a real download
+        raise urllib.error.URLError("network disabled in tests")
+
+    monkeypatch.setattr("core.ffmpeg_setup.urllib.request.urlopen", _no_network)
     yield tmp_path
 
 
@@ -91,8 +99,10 @@ class TestEnsureShortCircuits:
         def which(name):
             return str(exe) if name == "ffmpeg" and str(bin_path) in os.environ.get("PATH", "") else None
 
-        with patch.object(fs.shutil, "which", side_effect=which):
-            assert fs.ensure_ffmpeg() is True
+        # an existing install is only adopted when it actually runs
+        with patch.object(fs, "_verify_binary", return_value=True):
+            with patch.object(fs.shutil, "which", side_effect=which):
+                assert fs.ensure_ffmpeg() is True
         assert str(bin_path) in os.environ["PATH"].split(os.pathsep)
 
 
@@ -153,8 +163,75 @@ class TestEnsureDownloads:
         monkeypatch.setattr(fs.urllib.request, "urlopen", lambda req, timeout=None: _FakeResp(buf))
         monkeypatch.setattr(fs.subprocess, "run", lambda args, **kw: SimpleNamespace(returncode=0))
         assert fs.ensure_ffmpeg() is False
-        assert (fs.bin_dir() / "ffprobe.exe").is_file()
+        # staging: a failed install must not leave half an install behind
+        assert not (fs.bin_dir() / "ffprobe.exe").is_file()
         assert not (fs.bin_dir() / "ffmpeg.exe").is_file()
+
+
+class TestInstallHardening:
+    def test_broken_existing_install_is_not_adopted(self, isolated_env, monkeypatch):
+        """A half-extracted binary must be reinstalled, not adopted."""
+        import core.ffmpeg_setup as fs
+
+        bin_path = fs.bin_dir()
+        bin_path.mkdir(parents=True)
+        exe = bin_path / fs._exe_name("ffmpeg")
+        exe.write_bytes(b"broken")
+
+        # the existing binary does not run -> the install must be repaired
+        def _verify(path):
+            # only the PRE-EXISTING install is broken; the freshly downloaded
+            # one works
+            return str(path) != str(exe)
+
+        monkeypatch.setattr(fs, "_verify_binary", _verify)
+        monkeypatch.setattr(fs.urllib.request, "urlopen", lambda req, timeout=None: _FakeResp(_fake_ffmpeg_zip()))
+        monkeypatch.setattr(fs.subprocess, "run", lambda args, **kw: SimpleNamespace(returncode=0))
+        assert fs.ensure_ffmpeg() is True
+        assert (bin_path / fs._exe_name("ffmpeg")).read_bytes() == b"fake-binary"
+
+    def test_incomplete_download_is_rejected(self, isolated_env, monkeypatch):
+        """A truncated archive must not be installed."""
+        import core.ffmpeg_setup as fs
+
+        class _TruncatedResp(_FakeResp):
+            headers = {"Content-Length": "999999"}
+
+        monkeypatch.setattr(
+            fs.urllib.request, "urlopen", lambda req, timeout=None: _TruncatedResp(_fake_ffmpeg_zip())
+        )
+        monkeypatch.setattr(fs.subprocess, "run", lambda args, **kw: SimpleNamespace(returncode=0))
+        assert fs.ensure_ffmpeg() is False
+        assert not (fs.bin_dir() / fs._exe_name("ffmpeg")).is_file()
+
+    def test_download_deadline(self, isolated_env, monkeypatch):
+        """A trickling mirror must not stall the install forever."""
+        import core.ffmpeg_setup as fs
+
+        ticks = {"n": 0}
+
+        def _fake_monotonic():
+            ticks["n"] += 1
+            return float(ticks["n"] * 10_000)
+
+        monkeypatch.setattr(fs.time, "monotonic", _fake_monotonic)
+        monkeypatch.setattr(fs.urllib.request, "urlopen", lambda req, timeout=None: _FakeResp(_fake_ffmpeg_zip()))
+        with pytest.raises(TimeoutError):
+            fs._download("https://example.invalid/a.zip", isolated_env / "a.zip", None)
+
+    def test_incomplete_read_is_handled(self, isolated_env, monkeypatch):
+        """A body that ends early must be reported, not crash the caller."""
+        import http.client
+
+        import core.ffmpeg_setup as fs
+
+        def _raise_incomplete(req, timeout=None):
+            raise http.client.IncompleteRead(b"partial")
+
+        monkeypatch.setattr(fs.urllib.request, "urlopen", _raise_incomplete)
+        monkeypatch.setattr(fs.subprocess, "run", lambda args, **kw: SimpleNamespace(returncode=0))
+        # the exception is caught per mirror -> the install fails cleanly
+        assert fs.ensure_ffmpeg() is False
 
 
 class TestNeverFocused:

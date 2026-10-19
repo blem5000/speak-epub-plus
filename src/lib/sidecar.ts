@@ -658,9 +658,12 @@ export async function previewVoice(
     const e = String(params.engine).trim().toLowerCase();
     if (e) payload.engine = e;
   }
-  if (params.localVoice !== undefined && params.localVoice !== null) {
-    const lv = String(params.localVoice).trim();
-    if (lv) payload.localVoice = lv;
+  if (params.localVoice !== undefined) {
+    // an empty string means "the default Piper voice" and must be sent as
+    // such — dropping it made the backend fall back to the STORED voice, so
+    // the sample could play a different voice than the one on screen
+    const lv = String(params.localVoice ?? "").trim();
+    payload.localVoice = lv;
   }
   return callSidecar("previewVoice", payload, opts);
 }

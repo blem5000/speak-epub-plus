@@ -2699,16 +2699,19 @@ def test_tts_text_to_mp3_on_retry_exception_does_not_mask_retry(tmp_path):
 
 
 def test_adaptive_gate_grows_after_clean_streak():
-    gate = AdaptiveGate(3, ADAPTIVE_MAX_PARALLEL)
+    # the growth logic is tested with an explicit ceiling; the DEFAULT
+    # ceiling is 3 (Edge TTS throttles above that)
+    gate = AdaptiveGate(2, 4)
     for _ in range(ADAPTIVE_GROW_AFTER - 1):
         gate.note_clean_success()
-    assert gate.limit == 3
+    assert gate.limit == 2
     gate.note_clean_success()
-    assert gate.limit == 4
+    assert gate.limit == 3
+    assert ADAPTIVE_MAX_PARALLEL == 3
 
 
 def test_adaptive_gate_halves_on_retry_with_floor_1():
-    gate = AdaptiveGate(6, ADAPTIVE_MAX_PARALLEL)
+    gate = AdaptiveGate(6, 12)
     gate.note_retry()
     assert gate.limit == 3
     gate.note_retry()
@@ -3090,10 +3093,11 @@ def test_build_generation_plan_title_split_creates_title_part_with_pause(tmp_pat
     title_part = plan.title_part_path
     assert title_part == str(out / f"012_{safe}.title.mp3")
     assert plan.part_paths == [str(out / "_parts" / f"012_{safe}_part001.mp3")]
-    # exactly one title job (part 0) with the built-in 1 s pause, no override
+    # exactly one title job (part 1 — the body parts follow as 2..N) with the
+    # built-in 1 s pause, no override
     title_jobs = [j for j in jobs if j.output_path == title_part]
     assert len(title_jobs) == 1
-    assert title_jobs[0].part_number == 0
+    assert title_jobs[0].part_number == 1
     assert title_jobs[0].append_silence_sec == TITLE_PAUSE_SEC == 1.0
     assert title_jobs[0].voice is None
     assert title_jobs[0].text.strip().startswith("Rozdzial 12")
@@ -3109,7 +3113,8 @@ def test_build_generation_plan_title_no_prefix_match_keeps_legacy(tmp_path):
         with patch("core.tts._ensure_valid_or_drop", return_value=False):
             plans, jobs = build_generation_plan(chapters, str(tmp_path / "out"), 3500)
     assert plans[0].title_part_path is None
-    assert all(j.get("part_number", 0) != 0 if isinstance(j, dict) else j.part_number != 0 for j in jobs)
+    # no title part -> the body parts start at 1
+    assert all(j.get("part_number", 0) >= 1 if isinstance(j, dict) else j.part_number >= 1 for j in jobs)
 
 
 def test_build_generation_plan_migrate_titles_drops_stale_first_part(tmp_path, capsys):

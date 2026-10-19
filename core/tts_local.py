@@ -76,10 +76,21 @@ def local_models_root() -> Path:
 
 
 def _piper_available() -> bool:
+    """True when Piper can actually be used (importable, deps loadable).
+
+    Checking only the module spec reported "available" for a broken
+    onnxruntime install — the failure then surfaced in the middle of a
+    synthesis, once per part.
+    """
     try:
         import importlib.util
 
-        return importlib.util.find_spec("piper") is not None
+        if importlib.util.find_spec("piper") is None:
+            return False
+        import piper  # noqa: F401  (import smoke test)
+
+        importlib.import_module("onnxruntime")
+        return True
     except Exception:
         return False
 
@@ -107,6 +118,10 @@ def local_voice_ready(voice: Any) -> bool:
         if not (onnx.is_file() and cfg.is_file()):
             return False
         if onnx.stat().st_size < 1_000_000:
+            return False
+        # the config drives the phonemizer: a truncated/empty one would only
+        # blow up inside PiperVoice.load, long after "downloaded" was shown
+        if cfg.stat().st_size < 64:
             return False
     except OSError:
         return False
@@ -350,13 +365,18 @@ def effective_local_parallel() -> int:
 
 
 def rate_to_length_scale(rate: Any) -> float:
-    """Edge-style rate ('+25%') → Piper length_scale (1/1.25), speed clamped 0.75–2.0."""
+    """Edge-style rate ('+25%') → Piper length_scale (1/1.25), speed clamped 0.75–2.0.
+
+    The clamp matches the Edge range (-100%..+100%) so the same setting does
+    not produce different audio per engine: below -25% the local engine used
+    to saturate while Edge kept slowing down.
+    """
     normalized = normalize_tts_rate(rate)
     try:
         num = int(normalized.rstrip("%"))
     except Exception:
         num = 0
-    num = max(-25, min(100, num))
+    num = max(-100, min(100, num))
     speed = max(0.75, min(2.0, 1.0 + num / 100.0))
     return 1.0 / speed
 

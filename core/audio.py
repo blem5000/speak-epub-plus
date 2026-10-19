@@ -201,6 +201,7 @@ def _chapter_texts(
     end_selector: Optional[str],
     logs: List[str],
     novel_url: str = "",
+    on_log: Optional[Callable[[str], None]] = None,
 ) -> List[ChapterText]:
     """Read cache -> clean -> block lines -> filter (text) per chapter.
 
@@ -212,6 +213,14 @@ def _chapter_texts(
 
     from core.clean import clean_html, resolve_selectors
     from core.filters import html_to_block_lines
+
+    def _log(line: str) -> None:
+        logs.append(line)
+        if on_log is not None:
+            try:
+                on_log(line)
+            except Exception:
+                pass
 
     # Effective selectors: explicit params win, else the adapter default plus
     # any saved user override (dynamic import — same AD-1 exception as
@@ -252,7 +261,7 @@ def _chapter_texts(
         except Exception:
             raw_title = ""
         try:
-            cleaned_html, _cleaned_text_joined = clean_html(raw_html, eff_start, eff_end)
+            cleaned_html, _cleaned_text_joined = clean_html(raw_html, eff_start, eff_end, on_log=on_log)
         except ValueError as ve:
             raise ValueError(f"invalid selector: {ve}") from ve
         # real chapter title: in-content linkless heading, else list title, else raw h1
@@ -286,17 +295,88 @@ def _chapter_texts(
         try:
             filtered_text, removed = apply_filters(cleaned_text or "", filters)
             if removed:
-                logs.append(f"cleaned chapter {ch_num} removed {removed} lines")
-        except Exception:
+                _log(f"cleaned chapter {ch_num} removed {removed} lines")
+        except Exception as e:
+            # a broken filter must not silently produce unfiltered audio
+            _log(f"warning: chapter {ch_num} filter failed ({e}) — using the unfiltered text")
             filtered_text = cleaned_text or ""
         filtered_text = (filtered_text or "").strip()
         if not filtered_text:
-            logs.append(f"warning: chapter {ch_num} has no text after cleaning, skipped")
+            _log(f"warning: chapter {ch_num} has no text after cleaning, skipped")
             continue
         out.append((ch_num, ch_title, filtered_text))
     if not out:
         raise ValueError("no chapters with text to convert")
     return out
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """Coerce a store/JSON value to a bool.
+
+    bool("false") is True in Python — a hand-edited store.json with
+    "normalizeAudio": "false" silently switched the feature ON (and made
+    the build delete the chapter MP3s).
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on", "y", "t"):
+        return True
+    if text in ("0", "false", "no", "off", "n", "f", ""):
+        return False
+    return default
+
+
+def _total_duration_ms(audio_entries: List[Tuple[int, str, str]]) -> int:
+    """Total length of the produced audio (0 when it cannot be probed)."""
+    total = 0
+    try:
+        from core.tts import get_duration_ms as _dur
+    except Exception:
+        return 0
+    for _num, _title, path in audio_entries:
+        try:
+            ms = _dur(path)
+        except Exception:
+            ms = 0
+        if ms > 0:
+            total += ms
+    return total
+
+
+def _fetch_cover(cover_url: str, audio_dir: Path, on_log: Optional[Callable[[str], None]] = None) -> Optional[str]:
+    """Download the novel cover into the audiobook dir (best effort).
+
+    The M4B packager can embed artwork, but the desktop path never gave it
+    anything — every audiobook shipped without a cover.
+    """
+    if not isinstance(cover_url, str) or not cover_url.strip():
+        return None
+    url = cover_url.strip()
+    if len(url) > 500 or not re.match(r"^https?://", url, re.I):
+        return None
+    try:
+        from core.epub import _download_image  # dynamic, no cycles
+
+        got = _download_image(url, timeout=8.0)
+    except Exception:
+        return None
+    if not got:
+        return None
+    data, ext = got
+    if ext not in ("jpg", "jpeg", "png"):
+        return None
+    try:
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        target = audio_dir / f"cover.{'jpg' if ext == 'jpeg' else ext}"
+        target.write_bytes(data)
+        return str(target)
+    except OSError:
+        return None
 
 
 def build_audio(
@@ -316,6 +396,7 @@ def build_audio(
     local_voice: str | None = None,
     dialogue_voice: str | None = None,
     author: str | None = None,
+    cover_url: str | None = None,
     parallel: int = 3,
     retries: int = 5,
     chunk_size: int = 3500,
@@ -415,11 +496,13 @@ def build_audio(
         except Exception:
             _store_flags = {}
         if normalize_audio is None:
-            normalize_audio = bool(_store_flags.get("normalizeAudio", False)) if isinstance(_store_flags, dict) else False
+            normalize_audio = _as_bool(_store_flags.get("normalizeAudio", False)) if isinstance(_store_flags, dict) else False
         if trim_silence is None:
-            trim_silence = bool(_store_flags.get("trimSilence", False)) if isinstance(_store_flags, dict) else False
+            trim_silence = _as_bool(_store_flags.get("trimSilence", False)) if isinstance(_store_flags, dict) else False
     try:
-        parallel = max(1, min(6, int(parallel)))  # type: ignore[arg-type]
+        # Edge TTS throttles above ~3 concurrent requests (the AGENTS.md
+        # guidance): more workers only produce retry storms
+        parallel = max(1, min(3, int(parallel)))  # type: ignore[arg-type]
     except Exception:
         parallel = 3
     try:
@@ -474,17 +557,34 @@ def build_audio(
     filt = _load_filters(filters)
     logs: List[str] = []
 
+    def _emit_log(line: str) -> None:
+        """Collect the line AND hand it to the GUI log panel.
+
+        The diagnostics used to go only into the returned list, so the user
+        never saw that a chapter was skipped or that a filter failed.
+        """
+        logs.append(line)
+        if len(logs) > 2000:
+            del logs[: len(logs) - 2000]
+        if on_log:
+            try:
+                on_log(line)
+            except Exception:
+                pass
+
     desired = _resolve_audio_urls(novel_url, from_i, to_i, chapter_urls, cache_dir)
     if len(desired) > MAX_AUDIO_RANGE:
         raise ValueError(f"range too large (max {MAX_AUDIO_RANGE} chapters per run)")
-    chapters = _chapter_texts(desired, from_i, cache_dir, filt, start_selector, end_selector, logs, novel_url)
+    chapters = _chapter_texts(
+        desired, from_i, cache_dir, filt, start_selector, end_selector, logs, novel_url, on_log=_emit_log
+    )
 
     # Auto-boilerplate (same detection as EPUB so listeners skip headers too)
     if auto_boilerplate is None:
         try:
             from core.config import load_store  # dynamic, no cycles
 
-            auto_boilerplate = bool(load_store().get("autoBoilerplate", True))
+            auto_boilerplate = _as_bool(load_store().get("autoBoilerplate", True), default=True)
         except Exception:
             auto_boilerplate = True
     if auto_boilerplate and len(chapters) >= 2:
@@ -494,26 +594,42 @@ def build_audio(
 
             auto_f = _detect_bp([t for _, _, t in chapters]) or []
         except Exception as e:
-            logs.append(f"boilerplate detect error: {e}")
+            _emit_log(f"boilerplate detect error: {e}")
             auto_f = []
         if auto_f:
-            logs.append(f"boilerplate templates: {len(auto_f)}")
+            _emit_log(f"boilerplate templates: {len(auto_f)}")
+            # the auto-detected patterns are reported so the user can see
+            # (and veto by switching the feature off) what was removed
+            for _tpl in auto_f[:20]:
+                _emit_log(f"auto-boilerplate pattern: {_tpl.get('pattern', '')}")
             cleaned_chapters: List[ChapterText] = []
             for _n, _t, _x in chapters:
                 try:
                     _x2, _rem = _apply_text_filters(_x, auto_f)
                     if _rem:
-                        logs.append(f"boilerplate removed {_rem} line(s) chapter {_n}")
+                        # safety valve: in a LONG chapter, auto-detected
+                        # templates must not eat a third of the text (a
+                        # legitimate repeated line would vanish everywhere)
+                        _lines = [ln for ln in _x.splitlines() if ln.strip()]
+                        if len(_lines) >= 20 and _rem > int(0.3 * len(_lines)):
+                            _emit_log(
+                                f"auto-boilerplate would remove {_rem} of {len(_lines)} lines "
+                                f"in chapter {_n} — skipped"
+                            )
+                            _x2 = _x
+                            _rem = 0
+                        else:
+                            _emit_log(f"boilerplate removed {_rem} line(s) chapter {_n}")
                     cleaned_chapters.append((_n, _t, _x2.strip() or _x))
                 except Exception as e:
-                    logs.append(f"boilerplate strip error chapter {_n}: {e}")
+                    _emit_log(f"boilerplate strip error chapter {_n}: {e}")
                     cleaned_chapters.append((_n, _t, _x))
             # drop chapters left empty after stripping (pure-chrome fragments)
             chapters = [(n, t, x) for n, t, x in cleaned_chapters if x.strip()]
             if not chapters:
                 raise ValueError("no chapters with text to convert")
     elif auto_boilerplate:
-        logs.append("boilerplate skipped (need 2+ chapters)")
+        _emit_log("boilerplate skipped (need 2+ chapters)")
 
     slug = sanitize_filename(title or "book", fallback="book", max_len=60)
     # Output dir carries a short digest of the source: two different novels
@@ -522,16 +638,6 @@ def build_audio(
     _src_digest = hashlib.sha1(novel_url.encode("utf-8", "ignore")).hexdigest()[:8]
     audio_dir = out_base / f"{slug}_{_src_digest}_audiobook"
     audio_dir.mkdir(parents=True, exist_ok=True)
-
-    def _emit_log(line: str) -> None:
-        logs.append(line)
-        if len(logs) > 2000:
-            del logs[: len(logs) - 2000]
-        if on_log:
-            try:
-                on_log(line)
-            except Exception:
-                pass
 
     def _emit_phase(phase: str, done: int = 0, total: int = 0) -> None:
         payload = {"phase": phase, "done": done, "total": total}
@@ -546,7 +652,7 @@ def build_audio(
     if not ffmpeg_available():
         if str(engine or "").strip().lower() == "local":
             raise RuntimeError("local TTS engine requires ffmpeg on PATH — install it and re-run")
-        logs.append("warning: ffmpeg not found on PATH — chapter merging, M4B/M4A and truncation auto-repair are disabled")
+        _emit_log("warning: ffmpeg not found on PATH — chapter merging, M4B/M4A and truncation auto-repair are disabled")
 
     # The resume lock covers the WHOLE build: the identity wipe, the TTS run,
     # the chapter merges and the M4B packaging. Previously the lock was taken
@@ -585,6 +691,7 @@ def build_audio(
             local_voice=local_voice,
             dialogue_voice=dialogue_voice,
             author=author,
+            cover_url=cover_url,
             parallel=parallel,
             retries=retries,
             fmt=audio_format,
@@ -622,6 +729,7 @@ def _build_audio_locked(
     local_voice: Optional[str],
     dialogue_voice: Optional[str],
     author: Optional[str],
+    cover_url: Optional[str],
     parallel: int,
     retries: int,
     fmt: str,
@@ -639,6 +747,9 @@ def _build_audio_locked(
 ) -> Dict[str, Any]:
     """Build the audiobook while the resume lock is held (see build_audio)."""
     import asyncio
+
+    _emit_log = on_log
+    _emit_phase = on_phase
 
     # build identity: changed synthesis params regenerate instead of
     # silently reusing wrong audio (fresh manifest => one-time title migration)
@@ -660,16 +771,20 @@ def _build_audio_locked(
             "auto_boilerplate": bool(auto_boilerplate),
             "source": novel_url,
         },
-        on_log=logs.append,
+        on_log=on_log,
     )
 
     plans, jobs = build_generation_plan(
-        chapters, str(audio_dir), chunk_size, rate=rate, dialogue_voice=dialogue_voice, migrate_titles=_fresh
+        chapters,
+        str(audio_dir),
+        chunk_size,
+        rate=rate,
+        dialogue_voice=dialogue_voice,
+        migrate_titles=_fresh,
+        on_log=_emit_log,
+        engine=engine,
     )
-    logs.append(f"queued {len(jobs)} TTS part job(s) for {len(chapters)} chapter(s)")
-
-    _emit_log = on_log
-    _emit_phase = on_phase
+    _emit_log(f"queued {len(jobs)} TTS part job(s) for {len(chapters)} chapter(s)")
 
     # run_part_jobs is async; drive it on a private loop (sidecar-safe,
     # same pattern as the runTtsJobs RPC branch)
@@ -752,6 +867,8 @@ def _build_audio_locked(
             book_title = f"{slug}_chapters_{_from_done:03d}_to_{_to_done:03d}"
             _emit_phase("multiplex", 0, 1)
             _emit_log(f"building {fmt.upper()} file...")
+            # the novel's cover (when known) is embedded as artwork
+            cover_path = _fetch_cover(cover_url or "", audio_dir, on_log=_emit_log)
             build_m4b(
                 str(audio_dir),
                 audio_entries,
@@ -761,6 +878,7 @@ def _build_audio_locked(
                 on_progress=lambda d, t: _emit_phase("multiplex", d, t),
                 on_probe=lambda d, t: _emit_phase("probing", d, t),
                 artist=author,
+                cover_path=cover_path,
             )
             out_path = audio_dir / f"{book_title}.{fmt}"
             if out_path.is_file():
@@ -774,7 +892,7 @@ def _build_audio_locked(
                     try:
                         from core.config import load_store  # dynamic, no cycles
 
-                        keep_mp3 = bool(load_store().get("keepMP3", True))
+                        keep_mp3 = _as_bool(load_store().get("keepMP3", True), default=True)
                     except Exception:
                         keep_mp3 = True
                 if keep_mp3 is False:
@@ -784,9 +902,13 @@ def _build_audio_locked(
                                 Path(p).unlink()
                         except OSError:
                             continue
-                    logs.append("chapter MP3s removed (keepMP3=false)")
+                    # the chapter list must not point at deleted files
+                    chapter_infos = [
+                        ci for ci in chapter_infos if not Path(str(ci.get("path", ""))).is_file()
+                    ]
+                    _emit_log("chapter MP3s removed (keepMP3=false)")
             else:
-                logs.append(f"warning: expected {fmt.upper()} not found after ffmpeg (see warnings above)")
+                _emit_log(f"warning: expected {fmt.upper()} not found after ffmpeg (see warnings above)")
 
     return {
         "audio_dir": str(audio_dir),
@@ -803,6 +925,13 @@ def _build_audio_locked(
         "format": fmt,
         "bitrate": bitrate,
         "voice": voice,
+        "engine": engine,
+        "rate": rate,
+        "local_voice": local_voice,
+        "dialogue_voice": dialogue_voice,
+        "author": author,
+        "parts_dir": str(audio_dir / "_parts"),
+        "duration_ms": _total_duration_ms(audio_entries),
         "ffmpeg": ffmpeg_available(),
         "logs": logs,
         "from": from_i,

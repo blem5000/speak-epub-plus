@@ -51,10 +51,17 @@ def html_to_block_lines(html: str) -> List[str]:
         return [ln.strip() for ln in html.splitlines() if ln.strip()]
     body = soup.body if soup.body else soup
     lines: List[str] = []
-    for el in body.find_all(list(_BLOCK_TAGS) + ["div", "section", "article"]):
+    for el in body.find_all(list(_BLOCK_TAGS) + ["div", "section", "article", "li", "blockquote", "a"]):
         try:
             if el.name in ("div", "section", "article") and el.find(list(_STRUCTURAL_TAGS)):
                 continue  # container — children carry the lines
+            # a nested block/link inside another block would repeat its
+            # parent's text ("Report Share" + "Report" + "Share") — the
+            # duplicate was spoken twice
+            if el.name in ("li", "blockquote", "a") and el.find_parent(
+                list(_BLOCK_TAGS) + ["div", "section", "article", "li", "blockquote"]
+            ):
+                continue
             txt = el.get_text(separator=" ", strip=True)
             txt = re.sub(r"\s+", " ", txt).strip()
             if txt:
@@ -117,11 +124,16 @@ def detect_boilerplate(
     for ch_idx, lines in enumerate(per_chapter):
         n = len(lines)
         seen_in_chapter: set[str] = set()
+        # the head and tail zones must not overlap: for a short chapter their
+        # union covered the WHOLE chapter, so every line of it could become
+        # a removal template. The zones are now capped so that at least one
+        # middle line always stays protected.
+        _k = max(1, min(max(head_lines, 0), max(tail_lines, 0), max(0, (n - 1) // 2)))
         for i, line in enumerate(lines):
             if len(line) < _BOILERPLATE_MIN_LEN or len(line) > _BOILERPLATE_MAX_LINE_LEN:
                 continue
-            in_head = i < head_lines
-            in_tail = i >= n - tail_lines
+            in_head = i < _k
+            in_tail = i >= n - _k
             if not (in_head or in_tail):
                 continue
             template = mask_numbers(line)
@@ -270,8 +282,9 @@ def apply_filters_to_html(cleaned_html: str, filters: List[Filter] | None) -> Tu
     try:
         from bs4 import BeautifulSoup
     except Exception:
-        # fallback to text filtering
-        txt = BeautifulSoup(html, "lxml").get_text(separator="\n", strip=True) if html else ""
+        # bs4 is missing — fall back to plain text filtering (calling
+        # BeautifulSoup here would only raise a NameError)
+        txt = "\n".join(ln.strip() for ln in html.splitlines() if ln.strip())
         filtered, removed = apply_filters(txt, deduped)
         return html, removed
     soup = BeautifulSoup(html, "lxml")
@@ -282,7 +295,19 @@ def apply_filters_to_html(cleaned_html: str, filters: List[Filter] | None) -> Tu
     # Standalone links are candidates too (report/share buttons whose text is
     # not a block); story links never match an anchored boilerplate template.
     candidates_all = body.find_all(["p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "section", "article", "a"])
-    candidates = [el for el in candidates_all if not (el.name == "div" and el.get("id") == "chapter-content")]
+    # protected containers: a wrapper that HOLDS the chapter content must
+    # never be removed as a whole, whatever its id/class
+    def _is_content_container(el) -> bool:
+        if el.name != "div":
+            return False
+        if el.get("id") == "chapter-content":
+            return True
+        if el.find(["p"]) is not None:
+            return True
+        # a wrapper whose whole subtree is block-level content
+        return el.find(["p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote"]) is not None
+
+    candidates = [el for el in candidates_all if not _is_content_container(el)]
     # also exclude wrapper divs that contain multiple block children (avoid nuking chapter when inner p matches)
     # If a div contains at least one p descendant, treat it as container not leaf — skip it
     filtered_candidates = []
@@ -348,9 +373,13 @@ def sanitize_filters(raw: Any) -> List[Filter]:
         if not isinstance(f, dict):
             continue
         pat = f.get("pattern", f.get("phrase", f.get("text")))
-        is_regex = f.get("isRegex", f.get("is_regex", False))
+        # the SAME canonicalization as _normalize_filter: a filter written as
+        # {"type": "regex"} or {"isRegex": "1"} must behave identically on
+        # every path (it used to be a PLAIN substring filter here)
+        is_regex = f.get("isRegex", f.get("is_regex", f.get("type") == "regex"))
         if isinstance(is_regex, str):
-            is_regex = is_regex.lower() == "regex" or is_regex.lower() == "true"
+            is_regex = is_regex.lower() in ("regex", "true", "1")
+        is_regex = bool(is_regex) if is_regex is not None else False
         if not isinstance(pat, str):
             continue
         pat = pat.strip()

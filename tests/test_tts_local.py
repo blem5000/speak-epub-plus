@@ -1,5 +1,6 @@
 """Tests for core/tts_local.py — Piper engine plumbing (no piper/network needed)."""
 import asyncio
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -41,7 +42,20 @@ def _models_dir(tmp_path, monkeypatch):
 def _fake_model(models_dir: Path, voice: str) -> None:
     models_dir.mkdir(parents=True, exist_ok=True)
     (models_dir / f"{voice}.onnx").write_bytes(b"0" * 1_100_000)
-    (models_dir / f"{voice}.onnx.json").write_text("{}", encoding="utf-8")
+    # a realistic config: the real one carries the phonemizer + audio setup
+    # (a truncated/empty config is rejected by local_voice_ready)
+    (models_dir / f"{voice}.onnx.json").write_text(
+        json.dumps(
+            {
+                "audio": {"sample_rate": 22050, "num_channels": 1},
+                "espeak": {"voice": "en-us"},
+                "phoneme_id_map": {},
+                "num_symbols": 256,
+                "piper_version": "1.2.0",
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +196,19 @@ def test_download_local_voice_uses_timeout_staging_urls(tmp_path):
         path = urlparse(req.full_url).path
         if path.endswith(".onnx"):
             return _FakeResp(b"M" * 2_000_000)
-        return _FakeResp(b'{"config": true}')
+        # a realistic config (the real one is a few KB) — a truncated config
+        # must not pass the readiness check
+        return _FakeResp(
+            json.dumps(
+                {
+                    "audio": {"sample_rate": 22050, "num_channels": 1},
+                    "espeak": {"voice": "pl"},
+                    "phoneme_id_map": {},
+                    "num_symbols": 256,
+                    "inference": {"noise_scale": 0.667, "length_scale": 1.0},
+                }
+            ).encode("utf-8")
+        )
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
         result = download_local_voice("pl_PL-darkman-medium")
@@ -195,7 +221,8 @@ def test_download_local_voice_uses_timeout_staging_urls(tmp_path):
     assert paths[1].endswith(".onnx.json")
     root = Path(tts_local.local_models_root())
     assert (root / "pl_PL-darkman-medium.onnx").read_bytes() == b"M" * 2_000_000
-    assert (root / "pl_PL-darkman-medium.onnx.json").read_bytes() == b'{"config": true}'
+    cfg = json.loads((root / "pl_PL-darkman-medium.onnx.json").read_text(encoding="utf-8"))
+    assert cfg["audio"]["sample_rate"] == 22050
     assert Path(result["path"]).is_file()
     # staging dir removed after atomic publish
     assert not list(root.glob(".staging-*"))

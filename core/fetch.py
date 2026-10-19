@@ -86,10 +86,34 @@ def read_cache(url: str, cache_dir: Path | str | None = None) -> str | None:
     return None
 
 
+def _looks_blocked(html: str) -> bool:
+    """True when a cached page is a block/captcha page instead of a chapter.
+
+    A 200-status Cloudflare/captcha page was cached like a normal chapter and
+    replayed on every later run (the user kept getting the same junk).
+    """
+    if not html or len(html) < 200:
+        return False
+    head = html[:4000].lower()
+    markers = (
+        "captcha",
+        "cf-browser-verification",
+        "checking your browser",
+        "attention required! | cloudflare",
+        "just a moment...",
+        "enable javascript and cookies to continue",
+        "access denied",
+        "rate limit",
+    )
+    return any(m in head for m in markers)
+
+
 def write_cache(url: str, html: str, cache_dir: Path | str | None = None) -> Path:
     """Write raw.html utf-8 atomically via tmp+replace, return Path."""
     if not isinstance(html, str) or "<" not in html:
         raise ValueError("not html — refusing to poison cache with repr/non-HTML")
+    if _looks_blocked(html):
+        raise ValueError("blocked/captcha page — refusing to cache it")
     p = get_cache_path(url, cache_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + ".tmp")
@@ -182,7 +206,10 @@ def prune_cache(
             try:
                 if ttl_days >= 0 and (now - mtime) > ttl_sec:
                     f.unlink(missing_ok=True)
+                    # the cover file lives in the same directory — it must go
+                    # too, or the directory can never be removed
                     try:
+                        f.parent.joinpath("cover.txt").unlink(missing_ok=True)
                         f.parent.rmdir()
                     except OSError:
                         pass
@@ -202,6 +229,7 @@ def prune_cache(
                 try:
                     f.unlink(missing_ok=True)
                     try:
+                        f.parent.joinpath("cover.txt").unlink(missing_ok=True)
                         f.parent.rmdir()
                     except OSError:
                         pass
@@ -215,6 +243,18 @@ def prune_cache(
     except Exception:
         pass
     return {"removed": removed, "freed_bytes": freed}
+
+
+def prune_cache_if_needed(cache_dir: Path | str | None = None, max_mb: int = 500, ttl_days: int = 30) -> dict:
+    """Apply the cache budget — called after a fetch run.
+
+    Without this the chapter cache grew without limit and stale entries
+    (e.g. a cached block page) were never evicted.
+    """
+    try:
+        return prune_cache(cache_dir=cache_dir, max_mb=max_mb, ttl_days=ttl_days)
+    except Exception:
+        return {"removed": 0, "freed_bytes": 0}
 
 # ---------------------------------------------------------------------------
 # Politeness — delay tiers
@@ -239,6 +279,11 @@ def polite_delay(tier: str = "polite") -> float:
 def _backoff_delay(attempt: int) -> float:
     """Exponential backoff cap 20s + jitter 0.2–0.6, attempt 1-based."""
     return min(20, 2 * attempt) + random.uniform(0.2, 0.6)
+
+
+#: Upper bound for a server-provided "Retry-After" (seconds). The site can
+#: ask for an hour — the queue must not stall that long.
+_MAX_RETRY_AFTER_SEC = 120
 
 
 def _http_status(exc: BaseException | None) -> int | str | None:
@@ -361,7 +406,7 @@ def fetch_one(
 
     # cache hit paths — resume (use status_idx if provided, else 0 for single)
     cached = read_cache(url, cache_dir)
-    if cached is not None:
+    if cached is not None and not _looks_blocked(cached):
         if on_log:
             try:
                 on_log(f"skipped {get_cache_path(url, cache_dir)}")
@@ -446,10 +491,17 @@ def fetch_one(
             # write cache raw.html (AD-2 raw never filtered); never cache a
             # non-HTML repr — an empty html must not poison the cache.
             # Persist the page cover alongside so cache hits keep it.
-            try:
-                html_to_cache = getattr(cc, "html", "") or ""
-                if html_to_cache:
+            # The two writes are SEPARATE: write_cache raises for a
+            # non-markup body, and that must not skip the cover write.
+            html_to_cache = getattr(cc, "html", "") or ""
+            if html_to_cache:
+                try:
                     write_cache(url, html_to_cache, cache_dir)
+                except Exception:
+                    # a non-markup body (or a truncated page) is not cached —
+                    # but the cover is still worth keeping
+                    pass
+            try:
                 write_cover(url, getattr(cc, "cover_url", None), cache_dir)
             except Exception:
                 pass
@@ -550,14 +602,16 @@ def fetch_one(
                             pass
                 # backoff with min(20,2*attempt) + jitter 0.2-0.6, respect Retry-After if present
                 wait = _backoff_delay(attempt)
-                # Try to honor Retry-After header from exception response
+                # Try to honor Retry-After header from exception response —
+                # but CAPPED: a "Retry-After: 3600" would block the whole
+                # queue for an hour
                 try:
                     resp = getattr(e, "response", None)
                     if resp is not None and hasattr(resp, "headers"):
                         ra = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
                         if ra:
                             try:
-                                wait = max(wait, int(float(ra)))
+                                wait = max(wait, min(int(float(ra)), _MAX_RETRY_AFTER_SEC))
                             except Exception:
                                 pass
                     # also AdapterError may wrap original HTTPError with response
@@ -568,7 +622,7 @@ def fetch_one(
                             ra2 = cresp.headers.get("Retry-After") or cresp.headers.get("retry-after")
                             if ra2:
                                 try:
-                                    wait = max(wait, int(float(ra2)))
+                                    wait = max(wait, min(int(float(ra2)), _MAX_RETRY_AFTER_SEC))
                                 except Exception:
                                     pass
                 except Exception:
@@ -760,6 +814,14 @@ def fetch_many(
             else:
                 desired = list(urls)
                 desired = list(dict.fromkeys(desired))
+                # an explicit URL list is used as given, but the requested
+                # range must still narrow it: passing 100 URLs with from=20
+                # used to fetch ALL of them
+                if from_idx and to_idx and desired:
+                    _lo = max(1, int(from_idx))
+                    _hi = max(_lo, int(to_idx))
+                    if _hi - _lo + 1 < len(desired):
+                        desired = desired[_lo - 1 : _hi]
 
             # Diff vs cache
             skipped = sum(1 for u in desired if read_cache(u, cache_dir) is not None)
@@ -792,10 +854,15 @@ def fetch_many(
                     pass
             badge = None
             if skipped and missing:
+                # the badge must use the REQUESTED range (the log line right
+                # next to it does): with from=20 the badge used to say
+                # "pobieram 2–81" while the fetch really covered 21–100
                 if from_idx and to_idx:
-                    start_n = int(from_idx) + (1 if skipped else 0)  # approximate
-                    # better: if desired was 1..100, skipped 20 -> pobieram 21–100
-                    badge = f"pominięto {skipped}, pobieram {skipped+1}–{skipped+len(missing)}"
+                    _start = int(from_idx) + (skipped if skipped < len(desired) else 0)
+                    _end = int(to_idx)
+                    if _start > _end:
+                        _start = int(from_idx)
+                    badge = f"pominięto {skipped}, pobieram {_start}–{_end}"
                 else:
                     badge = f"pominięto {skipped}, pobieram {skipped+1}–{skipped+len(missing)}"
             elif skipped:
@@ -811,13 +878,27 @@ def fetch_many(
         # For bounded, map url -> actual ch.index via desired order + from_idx offset; fallback idx+1
         url_to_ch: dict[str, int] = {}
         try:
+            # the REAL chapter indices are used when the site provides them
+            # (a positional guess showed the wrong chapter numbers in the
+            # queue for books that are not numbered 1..N)
+            _real: dict[str, int] = {}
+            try:
+                for _ci in list(fresh_list or []):
+                    _u = getattr(_ci, "url", None)
+                    _ix = getattr(_ci, "index", None)
+                    if isinstance(_u, str) and _u.strip() and _ix is not None:
+                        try:
+                            _real[_u.strip()] = int(_ix)
+                        except Exception:
+                            continue
+            except Exception:
+                _real = {}
             if not is_open_ended and from_idx is not None:
                 for i, u in enumerate(desired):
-                    # estimate ch index: from_idx + position among desired
-                    url_to_ch[u] = int(from_idx) + i
+                    url_to_ch[u] = _real.get(u, int(from_idx) + i)
             else:
                 for i, u in enumerate(desired):
-                    url_to_ch[u] = i + 1
+                    url_to_ch[u] = _real.get(u, i + 1)
             # for open-ended, use skipped offset for missing
             if is_open_ended:
                 for i, u in enumerate(missing):
@@ -848,6 +929,15 @@ def fetch_many(
             try:
                 cc = fetch_one(url, adapter, cache_dir=cache_dir, on_status=on_status, on_log=on_log, on_throttle=on_throttle, status_idx=ch_num)
                 results.append(cc)
+                if tier != "polite":
+                    # the site accepted us again — back to the polite delay
+                    # (the safe tier used to stick for the whole run)
+                    tier = "polite"
+                    if on_throttle:
+                        try:
+                            on_throttle(tier, int(polite_delay(tier) * 1000))
+                        except Exception:
+                            pass
                 if on_status:
                     try:
                         on_status(ch_num, "done")
@@ -892,6 +982,9 @@ def fetch_many(
             if badge is None and skipped:
                 badge = f"pominięto {skipped}"
 
+        # the cache budget is applied after every run (it used to grow
+        # without limit — the TTL/size policy was never executed)
+        _pruned = prune_cache_if_needed(cache_dir=cache_dir)
         return {
             "skipped": skipped,
             "fetched": results,
@@ -901,6 +994,7 @@ def fetch_many(
             "results": results,
             "badge": badge,
             "desired": desired,
+            "pruned": _pruned.get("removed", 0),
         }
     finally:
         _FETCHING = False

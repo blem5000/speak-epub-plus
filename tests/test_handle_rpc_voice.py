@@ -92,23 +92,12 @@ class TestPreviewVoiceRpc:
         assert "error" not in res, res
         assert captured["rate"] == "-10%"
 
-    def test_malformed_rate_falls_back_to_normal_speed(self, tmp_path):
-        captured = {}
-
-        async def _fake_edge(text, out_path, voice, retries=5, rate=None, **kwargs):
-            captured["rate"] = rate
-            Path(out_path).write_bytes(b"mp3" * 100)
-
-        with patch("core.tts.tts_text_to_mp3", side_effect=_fake_edge):
-            with patch("core.config.load_store", return_value={}):
-                res = handle_rpc({
-                    "id": "1",
-                    "method": "previewVoice",
-                    "params": {"text": "hello", "engine": "edge", "rate": "abc"},
-                })
-        assert "error" not in res, res
-        # a garbage rate must not be forwarded to the synthesizer
-        assert captured["rate"] == "+0%"
+    def test_malformed_rate_is_rejected(self, tmp_path):
+        # a garbage rate must fail the preview exactly like it fails the
+        # build — a silent "+0%" made the sample disagree with the build
+        res = _preview({"text": "hello", "engine": "edge", "rate": "abc"})
+        assert res["error"]["code"] == "VALUE_ERROR"
+        assert "invalid rate" in res["error"]["message"]
 
     def test_voice_falls_back_to_the_store(self, tmp_path):
         captured = {}

@@ -11,9 +11,10 @@ Ratifies speak.py semantics:
 - build_generation_plan global queue reading-order ch40 p1..20 before ch41 p1
 - sanitize_filename mirror speak.py:84 (no epub extra fallback)
 
-Pure: only os/re/dataclasses/pathlib/typing — no adapters/*, no speak.
-Subprocess (shutil/subprocess) is used exclusively for ffmpeg/ffprobe
-invocations: local encoding, merging, M4B/M4A and post-processing.
+Core module: no adapters/*, no speak. Standard library only (os/re/json/
+asyncio/threading/pathlib/typing/dataclasses). Subprocess (shutil/subprocess)
+is used exclusively for ffmpeg/ffprobe invocations: local encoding, merging,
+M4B/M4A and post-processing.
 """
 
 from __future__ import annotations
@@ -25,9 +26,10 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 Chapter = Tuple[int, str, str]
 AudioEntry = Tuple[int, str, str]
@@ -76,8 +78,6 @@ def acquire_resume_lock(root: Any, _attempt: int = 0) -> Optional[Path]:
         return None
     lock = base / RESUME_LOCK_NAME
     try:
-        import time as _time
-
         fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         try:
             os.write(fd, str(os.getpid()).encode("utf-8", "ignore"))
@@ -91,10 +91,8 @@ def acquire_resume_lock(root: Any, _attempt: int = 0) -> Optional[Path]:
         return lock
     except FileExistsError:
         try:
-            import time as _time
-
             try:
-                age = _time.time() - lock.stat().st_mtime
+                age = time.time() - lock.stat().st_mtime
             except FileNotFoundError:
                 # lock vanished between open failure and stat (process exit
                 # race) — just retry the acquisition once.
@@ -153,11 +151,44 @@ def user_output_base() -> Path:
     Used when the process working directory is not writable — e.g. the GUI
     exe launched with CWD=C:\\Windows\\System32, where creating ./output
     dies with WinError 5 (Access is denied).
+
+    The Windows "Documents" folder is localized ("Dokumenty"), so the
+    hard-coded English name would create a second, empty output tree. The
+    known-folder id is used when it can be resolved; otherwise the English
+    name remains the fallback.
     """
     home = Path.home()
     if os.name == "nt":
-        return home / "Documents" / "speak-epub"
+        docs = _windows_documents_dir()
+        return (docs or (home / "Documents")) / "speak-epub"
     return home / "speak-epub"
+
+
+def _windows_documents_dir() -> Optional[Path]:
+    """Resolve the real Documents folder (localized names) on Windows.
+
+    The registry key holds the localized path (e.g. "Dokumenty") with a
+    %USERPROFILE% placeholder.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+    except Exception:
+        return None
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+        ) as key:
+            value, _kind = winreg.QueryValueEx(key, "Personal")
+    except Exception:
+        return None
+    try:
+        path = Path(os.path.expandvars(str(value)))
+    except Exception:
+        return None
+    return path if path else None
 
 
 def _is_writable(path: Path) -> bool:
@@ -344,7 +375,13 @@ def _part_file_valid_quick(path: str) -> bool:
         return False
 
 
-def _ensure_valid_or_drop(path: str, text: Optional[str], label: str, rate: Optional[str] = None) -> bool:
+def _ensure_valid_or_drop(
+    path: str,
+    text: Optional[str],
+    label: str,
+    rate: Optional[str] = None,
+    on_log: Optional[Callable[[str], None]] = None,
+) -> bool:
     """Plan-guard helper: an existing file counts as done only if it verifies.
 
     A stale truncated/merged-with-gaps file is deleted so its parts get
@@ -360,7 +397,13 @@ def _ensure_valid_or_drop(path: str, text: Optional[str], label: str, rate: Opti
         Path(path).unlink(missing_ok=True)
     except Exception:
         pass
-    print(f"{label}: existing file invalid ({reason}), re-generating")
+    _msg = f"{label}: existing file invalid ({reason}), re-generating"
+    print(_msg)
+    if on_log is not None:
+        try:
+            on_log(_msg)
+        except Exception:
+            pass
     return False
 
 
@@ -839,6 +882,8 @@ def build_generation_plan(
     rate: Optional[str] = None,
     dialogue_voice: Optional[str] = None,
     migrate_titles: bool = False,
+    on_log: Optional[Callable[[str], None]] = None,
+    engine: Optional[str] = None,
 ) -> Tuple[List[ChapterPlan], List[PartJob]]:
     """
     Build global PartJob queue in reading order.
@@ -878,6 +923,10 @@ def build_generation_plan(
     output_dir = str(resolve_output_dir(output_dir))
     part_dir = os.path.join(output_dir, "_parts")
     dlg_voice = dialogue_voice.strip() if isinstance(dialogue_voice, str) and dialogue_voice.strip() else None
+    # the local Piper engine has no per-part voice override — splitting the
+    # chapter into dialogue segments there only multiplies the work
+    if isinstance(engine, str) and engine.strip().lower() == "local":
+        dlg_voice = None
     can_pause = ffmpeg_available()
 
     for chapter_number, title, text in chapters:
@@ -910,7 +959,7 @@ def build_generation_plan(
             plans.append(
                 ChapterPlan(chapter_number, title, chapter_mp3, [chapter_mp3], [(chapter_number, title, chapter_mp3)])
             )
-            if not _ensure_valid_or_drop(chapter_mp3, chunk_text, label, rate=rate):
+            if not _ensure_valid_or_drop(chapter_mp3, chunk_text, label, rate=rate, on_log=on_log):
                 jobs.append(
                     PartJob(
                         chapter_number=chapter_number,
@@ -951,13 +1000,16 @@ def build_generation_plan(
         if title_text is not None:
             title_path = os.path.join(output_dir, f"{chapter_number:03d}_{safe_title}.title.mp3")
             marker_entries.append((chapter_number, title, title_path))
-            title_ok = _ensure_valid_or_drop(title_path, title_text, f"{label} title", rate=rate)
+            title_ok = _ensure_valid_or_drop(title_path, title_text, f"{label} title", rate=rate, on_log=on_log)
             if not title_ok:
                 jobs.append(
                     PartJob(
                         chapter_number=chapter_number,
                         chapter_title=title,
-                        part_number=0,
+                        # the title is part 1 of the chapter: the body parts
+                        # follow as 2..N, so the last one reports N/N (the
+                        # title used to be "part 0" and N was never reached)
+                        part_number=1,
                         part_count=total_count,
                         text=title_text,
                         output_path=title_path,
@@ -971,7 +1023,7 @@ def build_generation_plan(
         # older run) must not shadow its parts: verify against the body text.
         # The merge is also stale whenever the title part is (re)generated:
         # it was built without the title+pause.
-        merged_ok = _ensure_valid_or_drop(chapter_mp3, body_text, label, rate=rate) and title_ok
+        merged_ok = _ensure_valid_or_drop(chapter_mp3, body_text, label, rate=rate, on_log=on_log) and title_ok
         if title_path is not None and not merged_ok:
             # drop a stale merge so finalize rebuilds it (cheap concat; parts
             # are reused) — a valid chapter without the title+pause must not
@@ -982,19 +1034,26 @@ def build_generation_plan(
             except OSError:
                 pass
 
+        # the title part occupies slot 1, so the body parts start at 2 —
+        # but only when a title part actually exists (otherwise the legacy
+        # 1..N numbering must stay untouched for resume compatibility)
+        _title_offset = 1 if title_text is not None else 0
         for part_number, (chunk_text, chunk_voice) in enumerate(body_pieces, 1):
             part_path = os.path.join(part_dir, f"{chapter_number:03d}_{safe_title}_part{part_number:03d}.mp3")
             body_paths.append(part_path)
-            marker_entries.append((chapter_number, f"{title} - part {part_number}", part_path))
+            # the marker number follows the reported part number; the FILE
+            # name keeps the legacy part index so existing parts stay
+            # resume-compatible
+            marker_entries.append((chapter_number, f"{title} - part {part_number + _title_offset}", part_path))
 
             if not merged_ok and not _ensure_valid_or_drop(
-                part_path, chunk_text, f"{label} part {part_number:03d}", rate=rate
+                part_path, chunk_text, f"{label} part {part_number:03d}", rate=rate, on_log=on_log
             ):
                 jobs.append(
                     PartJob(
                         chapter_number=chapter_number,
                         chapter_title=title,
-                        part_number=part_number,
+                        part_number=part_number + _title_offset,
                         part_count=total_count,
                         text=chunk_text,
                         output_path=part_path,
@@ -1221,7 +1280,10 @@ async def _autosplit_truncated(
 ADAPTIVE_GROW_AFTER = 8
 
 #: Adaptive pool hard ceiling (> configured parallel, which is clamped 1–6).
-ADAPTIVE_MAX_PARALLEL = 12
+#: Upper bound for the adaptive concurrency gate. Edge TTS throttles above
+#: ~3 concurrent requests (higher values produced retry storms), so the
+#: gate must not grow past that even on a clean run.
+ADAPTIVE_MAX_PARALLEL = 3
 
 
 class AdaptiveGate:
@@ -2283,6 +2345,16 @@ __all__ = [
     "MIN_TEXT_LEN_FOR_DURATION_CHECK",
     "TRUNC_SPLIT_FLOOR",
     "TITLE_PAUSE_SEC",
+    "EDGE_SAVE_TIMEOUT_MIN",
+    "EDGE_SAVE_TIMEOUT_MAX",
+    "EDGE_SAVE_TIMEOUT_PER_CHAR",
+    "BUILD_IDENTITY_FILENAME",
+    "BUILD_IDENTITY_KEYS",
+    "BUILD_IDENTITY_VERSION",
+    "normalize_tts_rate",
+    "acquire_resume_lock",
+    "release_resume_lock",
+    "AdaptiveGate",
     "verify_part_audio",
     "split_text_for_tts",
     "split_dialogue",
@@ -2290,8 +2362,6 @@ __all__ = [
     "ensure_pause_file",
     "check_build_identity",
     "postprocess_chapter_file",
-    "verify_part_audio",
-    "split_text_for_tts",
     "build_generation_plan",
     "tts_text_to_mp3",
     "run_part_jobs",
@@ -2299,7 +2369,9 @@ __all__ = [
     "ffprobe_available",
     "subprocess_kwargs",
     "concat_mp3_files",
+    "ffconcat_entry",
     "get_duration_ms",
+    "probe_duration_ms",
     "escape_ffmeta",
     "finalize_chapter_audio",
     "build_m4b",
