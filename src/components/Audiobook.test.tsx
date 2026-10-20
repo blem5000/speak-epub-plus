@@ -8,6 +8,7 @@ const mockGetStore = vi.fn();
 const mockInvoke = vi.fn();
 const mockOnMergeProgress = vi.fn();
 const mockCancelSidecarJob = vi.fn();
+const mockRebuildChapter = vi.fn();
 
 vi.mock("@/lib/sidecar", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
@@ -17,6 +18,7 @@ vi.mock("@/lib/sidecar", async (importOriginal) => {
     getStore: (...args: unknown[]) => mockGetStore(...args),
     onMergeProgress: (...args: unknown[]) => mockOnMergeProgress(...args),
     cancelSidecarJob: (...args: unknown[]) => mockCancelSidecarJob(...args),
+    rebuildChapter: (...args: unknown[]) => mockRebuildChapter(...args),
   };
 });
 
@@ -393,5 +395,43 @@ describe("Audiobook — Step 7 MP3/M4B/M4A", () => {
     await waitFor(() => expect(screen.getByTestId("audio-open")).toBeInTheDocument());
     await user.click(screen.getByTestId("audio-open"));
     expect(await screen.findByTestId("audio-toast")).toHaveTextContent("opener failed");
+  });
+
+  it("regenerates a single chapter: drops its files and rebuilds", async () => {
+    const user = userEvent.setup();
+    mockBuildAudio.mockResolvedValue({
+      id: "1",
+      result: {
+        audio_dir: "output/Book_audiobook",
+        chapter_count: 2,
+        part_count: 2,
+        chapters: [
+          { number: 1, title: "Chapter 1", path: "output/Book_audiobook/001_C1.mp3" },
+          { number: 2, title: "Chapter 2", path: "output/Book_audiobook/002_C2.mp3" },
+        ],
+        audiobook: { path: "output/Book_audiobook/Book.m4b", size: 10, format: "m4b" },
+        format: "m4b",
+        voice: "en-US-AndrewNeural",
+        ffmpeg: true,
+      },
+    });
+    mockRebuildChapter.mockResolvedValue({
+      id: "1",
+      result: { chapter: 2, removed: ["002_C2.mp3"] },
+    });
+    render(<Audiobook {...baseProps} />);
+    await user.click(screen.getByTestId("audio-build"));
+    await waitFor(() => expect(screen.getByTestId("audio-chapter-list")).toBeInTheDocument());
+    mockBuildAudio.mockClear();
+    await user.click(screen.getByTestId("audio-regen-2"));
+    await waitFor(() =>
+      expect(mockRebuildChapter).toHaveBeenCalledWith({
+        audioDir: "output/Book_audiobook",
+        chapter: 2,
+      })
+    );
+    // the build is restarted — the resume regenerates just that chapter
+    await waitFor(() => expect(mockBuildAudio).toHaveBeenCalledTimes(1));
+    expect(await screen.findByTestId("audio-regen-msg")).toHaveTextContent("2");
   });
 });

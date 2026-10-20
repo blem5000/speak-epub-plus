@@ -27,7 +27,7 @@ import threading
 import time
 import wave
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from core.tts import normalize_tts_rate, verify_part_audio
 
@@ -282,12 +282,135 @@ def _piper_available() -> bool:
         return False
 
 
+#: The full Piper voice catalogue (hundreds of voices) lives in the
+#: upstream repository; the curated list above is only a shortlist.
+PIPER_CATALOG_URL = (
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/voices.json"
+)
+
+#: The catalogue is cached here (per user) and refreshed once a day.
+_PIPER_CATALOG_TTL_SEC = 24 * 3600
+
+_PIPER_CATALOG_CACHE: Dict[str, Any] = {}
+
+
+def _catalog_path() -> Path:
+    override = os.environ.get("SPEAK_EPUB_PIPER_CATALOG")
+    if override:
+        return Path(override)
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home())
+        return Path(base) / "speak-epub" / "piper-voices.json"
+    return Path.home() / ".local" / "share" / "speak-epub" / "piper-voices.json"
+
+
+def piper_catalog(force: bool = False) -> List[Dict[str, Any]]:
+    """The full Piper voice catalogue (id, language, quality, size).
+
+    Fetched once and cached locally — the shortlist in LOCAL_VOICES is only
+    a few hand-picked voices, the upstream catalogue has hundreds.
+    """
+    now = time.time()
+    cached = _PIPER_CATALOG_CACHE.get("voices")
+    if cached and not force and (now - float(_PIPER_CATALOG_CACHE.get("at", 0.0))) < _PIPER_CATALOG_TTL_SEC:
+        return list(cached)
+    path = _catalog_path()
+    data: Any = None
+    try:
+        if path.is_file() and not force:
+            parsed_cache = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(parsed_cache, (list, dict)):
+                data = parsed_cache
+    except Exception:
+        data = None
+    if data is None:
+        try:
+            import urllib.request
+
+            req = urllib.request.Request(
+                PIPER_CATALOG_URL, headers={"User-Agent": "speak-epub/1 (voice catalogue)"}
+            )
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                raw = resp.read()
+            parsed = json.loads(raw.decode("utf-8"))
+            if isinstance(parsed, (list, dict)):
+                data = parsed
+                try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(parsed), encoding="utf-8")
+                except OSError:
+                    pass
+        except Exception:
+            data = None
+    voices: List[Dict[str, Any]] = []
+    entries: List[Any] = []
+    if isinstance(data, dict):
+        entries = [v for v in data.values() if isinstance(v, dict)]
+    elif isinstance(data, list):
+        entries = [v for v in data if isinstance(v, dict)]
+    for entry in entries:
+        key = str(entry.get("key") or "").strip()
+        if not key:
+            continue
+        files = entry.get("files") if isinstance(entry.get("files"), dict) else {}
+        size_mb = 0
+        for fname, meta in files.items():
+            if not str(fname).endswith(".onnx"):
+                continue
+            if not isinstance(meta, dict):
+                continue
+            try:
+                size_mb = int(float(meta.get("size_bytes", 0))) // (1024 * 1024)
+            except (TypeError, ValueError):
+                size_mb = 0
+            break
+        lang = entry.get("language") if isinstance(entry.get("language"), dict) else {}
+        quality = str(entry.get("quality") or (key.rsplit("-", 1)[-1] if "-" in key else ""))
+        voices.append(
+            {
+                "id": key,
+                "name": str(entry.get("name") or key),
+                "language": str(lang.get("name_english") or lang.get("code") or ""),
+                "langCode": str(lang.get("code") or ""),
+                "langFamily": str(lang.get("family") or ""),
+                "quality": quality,
+                "sizeMb": size_mb,
+                "recommended": key in LOCAL_VOICES,
+            }
+        )
+    voices.sort(key=lambda v: (str(v.get("language", "")), str(v.get("id", ""))))
+    if voices:
+        _PIPER_CATALOG_CACHE["voices"] = voices
+        _PIPER_CATALOG_CACHE["at"] = now
+    return voices
+
+
 def validate_local_voice(voice: Any) -> str:
-    """Return a curated voice id or raise ValueError."""
+    """Return a valid Piper voice id or raise ValueError.
+
+    The upstream catalogue is the source of truth (177 voices, not only the
+    shortlist). When the catalogue cannot be fetched (offline), the naming
+    scheme is accepted as a fallback so a voice that is already downloaded
+    still works.
+    """
     if isinstance(voice, str):
         wanted = voice.strip()
         if wanted in LOCAL_VOICES:
             return wanted
+        catalog = piper_catalog()
+        if catalog:
+            if any(str(entry.get("id", "")) == wanted for entry in catalog):
+                return wanted
+            raise ValueError(
+                f"unknown local voice {voice!r} (choose one of: {', '.join(LOCAL_VOICES)})"
+            )
+        try:
+            from piper.download_voices import VOICE_PATTERN
+
+            if VOICE_PATTERN.match(wanted):
+                return wanted
+        except Exception:
+            pass
     raise ValueError(f"unknown local voice {voice!r} (choose one of: {', '.join(LOCAL_VOICES)})")
 
 
@@ -336,9 +459,21 @@ def _model_integrity_ok(voice: str) -> bool:
 
 def local_voice_ready(voice: Any) -> bool:
     """True when the model files are downloaded AND piper is importable."""
-    if not isinstance(voice, str) or voice.strip() not in LOCAL_VOICES:
+    if not isinstance(voice, str):
         return False
-    onnx, cfg = local_voice_paths(voice.strip())
+    wanted = voice.strip()
+    if not wanted:
+        return False
+    if wanted not in LOCAL_VOICES:
+        # any upstream Piper voice is accepted, not only the shortlist
+        try:
+            from piper.download_voices import VOICE_PATTERN
+
+            if not VOICE_PATTERN.match(wanted):
+                return False
+        except Exception:
+            return False
+    onnx, cfg = local_voice_paths(wanted)
     try:
         if not (onnx.is_file() and cfg.is_file()):
             return False
@@ -350,9 +485,18 @@ def local_voice_ready(voice: Any) -> bool:
             return False
     except OSError:
         return False
-    if not _model_integrity_ok(voice.strip()):
+    if not _model_integrity_ok(wanted):
         return False
     return _piper_available()
+
+
+def _voice_files_present(voice: str) -> bool:
+    """Cheap existence check (no digest) — used for the catalogue flags."""
+    try:
+        onnx, cfg = local_voice_paths(voice)
+        return onnx.is_file() and cfg.is_file() and onnx.stat().st_size > 1_000_000
+    except OSError:
+        return False
 
 
 def list_local_voices() -> Dict[str, Any]:
@@ -380,6 +524,10 @@ def list_local_voices() -> Dict[str, Any]:
         "default": DEFAULT_LOCAL_VOICE,
         "voices": voices,
         "piperAvailable": _piper_available(),
+        "catalog": [
+            dict(entry, downloaded=_voice_files_present(str(entry.get("id", ""))))
+            for entry in piper_catalog()
+        ],
     }
 
 
@@ -415,7 +563,15 @@ def download_local_voice(voice: Any, on_log: Optional[Callable[[str], None]] = N
     if local_voice_ready(name) and not force:
         _log(f"local voice {name} already downloaded")
     else:
-        size_mb = LOCAL_VOICES[name]["size_mb"]
+        size_mb = int(LOCAL_VOICES.get(name, {}).get("size_mb", 0) or 0)
+        if not size_mb:
+            for entry in piper_catalog():
+                if entry.get("id") == name:
+                    try:
+                        size_mb = int(entry.get("sizeMb", 0) or 0)
+                    except (TypeError, ValueError):
+                        size_mb = 0
+                    break
         _log(f"downloading local voice {name} (~{size_mb} MB)...")
         model_url, config_url = _voice_download_urls(name)
         # drop orphaned staging dirs from crashed earlier runs (same voice)

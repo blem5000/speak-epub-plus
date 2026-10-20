@@ -77,12 +77,27 @@ def test_rate_to_length_scale_matrix():
 # validation / status
 # ---------------------------------------------------------------------------
 
-def test_validate_local_voice():
+def test_validate_local_voice(monkeypatch):
+    # the upstream catalogue is the source of truth (not only the shortlist)
+    monkeypatch.setattr(
+        tts_local,
+        "piper_catalog",
+        lambda *a, **k: [{"id": "pl_PL-gosia-medium"}, {"id": "en_US-lessac-medium"}],
+    )
     assert validate_local_voice("pl_PL-darkman-medium") == "pl_PL-darkman-medium"
+    assert validate_local_voice("pl_PL-gosia-medium") == "pl_PL-gosia-medium"
     with pytest.raises(ValueError):
         validate_local_voice("xx_XX-evil-voice")
     with pytest.raises(ValueError):
         validate_local_voice(None)
+
+
+def test_validate_local_voice_offline_accepts_the_naming_scheme(monkeypatch):
+    # without a catalogue (offline) the upstream naming scheme is the fallback
+    monkeypatch.setattr(tts_local, "piper_catalog", lambda *a, **k: [])
+    assert validate_local_voice("pl_PL-gosia-medium") == "pl_PL-gosia-medium"
+    with pytest.raises(ValueError):
+        validate_local_voice("not a voice at all")
 
 
 def test_local_voice_ready_requires_files(tmp_path):
@@ -122,7 +137,12 @@ def test_resolve_engine_edge_always_wins():
     assert resolve_engine("edge", "pl_PL-darkman-medium") == "edge"
 
 
-def test_resolve_engine_local_requires_model():
+def test_resolve_engine_local_requires_model(monkeypatch):
+    monkeypatch.setattr(
+        tts_local,
+        "piper_catalog",
+        lambda *a, **k: [{"id": "pl_PL-darkman-medium"}],
+    )
     with pytest.raises(ValueError, match="not downloaded"):
         resolve_engine("local", "pl_PL-darkman-medium")
     _fake_model(Path(tts_local.local_models_root()), "pl_PL-darkman-medium")
@@ -228,7 +248,12 @@ def test_download_local_voice_uses_timeout_staging_urls(tmp_path):
     assert not list(root.glob(".staging-*"))
 
 
-def test_download_local_voice_rejects_unknown():
+def test_download_local_voice_rejects_unknown(monkeypatch):
+    monkeypatch.setattr(
+        tts_local,
+        "piper_catalog",
+        lambda *a, **k: [{"id": "pl_PL-darkman-medium"}],
+    )
     with pytest.raises(ValueError):
         download_local_voice("xx_XX-evil-voice")
 

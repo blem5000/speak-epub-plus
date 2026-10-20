@@ -6,9 +6,19 @@ type ResultsTableProps = {
   results: SearchResult[];
   selectedUrl: string | null;
   onSelect: (url: string) => void;
+  /** Add a novel to the batch queue (optional). */
+  onQueue?: (item: { url: string; title: string; cover?: string | null }) => void;
+  /** URLs already in the queue (rendered as disabled). */
+  queuedUrls?: string[];
 };
 
-export default function ResultsTable({ results, selectedUrl, onSelect }: ResultsTableProps): JSX.Element | null {
+export default function ResultsTable({
+  results,
+  selectedUrl,
+  onSelect,
+  onQueue,
+  queuedUrls = [],
+}: ResultsTableProps): JSX.Element | null {
   const [focusedIndex, setFocusedIndex] = useState(0);
   const rowRefs = useRef<Array<HTMLTableRowElement | null>>([]);
 
@@ -68,6 +78,9 @@ export default function ResultsTable({ results, selectedUrl, onSelect }: Results
               <th className="px-4 py-2 font-semibold">{t("results.headers.title")}</th>
               <th className="px-4 py-2 font-semibold">{t("results.headers.chapters")}</th>
               <th className="px-4 py-2 font-semibold">{t("results.headers.link")}</th>
+              {onQueue ? (
+                <th className="px-4 py-2 font-semibold">{t("queue.add") as string}</th>
+              ) : null}
             </tr>
           </thead>
           <tbody className="text-body">
@@ -113,6 +126,25 @@ export default function ResultsTable({ results, selectedUrl, onSelect }: Results
                       {r.link || r.url}
                     </a>
                   </td>
+                  {onQueue ? (
+                    <td className="px-4 py-2.5 text-body-sm">
+                      <button
+                        type="button"
+                        data-testid={`queue-add-${idx}`}
+                        disabled={queuedUrls.includes(r.url)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onQueue({ url: r.url, title: r.title, cover: r.cover_url ?? null });
+                        }}
+                        aria-label={t("queue.addTitle", { title: r.title }) as string}
+                        className="rounded-md border border-input bg-card px-2 py-0.5 text-body-xs hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {queuedUrls.includes(r.url)
+                          ? (t("queue.inQueue") as string)
+                          : (t("queue.add") as string)}
+                      </button>
+                    </td>
+                  ) : null}
                 </tr>
               );
             })}

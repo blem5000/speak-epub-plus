@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { t, getLocale, setLocale } from "./i18n";
 import { buildEpub, callSidecar, cancelSidecarJob, getStore, isEpubResult, setStore, type EpubResult } from "./lib/sidecar";
+import QueuePanel, { type QueueItem, type QueueOutcome } from "./components/QueuePanel";
 import FindInput from "./components/FindInput";
 import ResultsTable from "./components/ResultsTable";
 import ChapterList from "./components/ChapterList";
@@ -273,6 +274,11 @@ export default function App(): JSX.Element {
   const [audioTouched, setAudioTouched] = useState(false);
   const [phase, setPhase] = useState<"idle" | "fetching" | "epub" | "audio">("idle");
   const [pickerToast, setPickerToast] = useState<string | null>(null);
+  // Batch queue — several novels converted one after another
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [queueOutcomes, setQueueOutcomes] = useState<QueueOutcome[]>([]);
+  const [queueRunning, setQueueRunning] = useState(false);
+  const [queueProgress, setQueueProgress] = useState<{ index: number; total: number; title: string } | null>(null);
   const audiobookRef = useRef<AudiobookHandle>(null);
   const epubAbortRef = useRef<AbortController | null>(null);
   const epubStopRef = useRef(false);
@@ -516,8 +522,102 @@ export default function App(): JSX.Element {
     setPhase("idle");
   };
 
-  return (
-    <div className="min-h-screen bg-background text-foreground">
+  /** Add a novel to the batch queue (from the search results). */
+  const handleQueueAdd = useCallback((item: QueueItem): void => {
+    setQueue((prev) => (prev.some((p) => p.url === item.url) ? prev : [...prev, item]));
+  }, []);
+
+  const handleQueueRemove = useCallback((url: string): void => {
+    setQueue((prev) => prev.filter((p) => p.url !== url));
+    setQueueOutcomes((prev) => prev.filter((o) => o.url !== url));
+  }, []);
+
+  const handleQueueClear = useCallback((): void => {
+    setQueue([]);
+    setQueueOutcomes([]);
+    setQueueProgress(null);
+  }, []);
+
+  /**
+   * Convert every queued novel, one after another: list the chapters,
+   * fetch them into the cache, then build the audiobook. A failing book is
+   * recorded and the queue continues with the next one.
+   */
+  const handleQueueConvert = async (): Promise<void> => {
+    if (queueRunning || queue.length === 0 || jobRunning) return;
+    const items = [...queue];
+    setQueueRunning(true);
+    setQueueOutcomes([]);
+    const outcomes: QueueOutcome[] = [];
+    try {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        setQueueProgress({ index: i + 1, total: items.length, title: item.title || item.url });
+        try {
+          const listRes = await callSidecar("listChapters", { url: item.url });
+          if (listRes.error) throw new Error(listRes.error.message || listRes.error.code);
+          const raw = listRes.result as Record<string, unknown> | null;
+          const chaptersRaw = Array.isArray(raw?.chapters)
+            ? (raw?.chapters as Array<Record<string, unknown>>)
+            : Array.isArray(raw)
+              ? (raw as Array<Record<string, unknown>>)
+              : [];
+          const chapters = chaptersRaw
+            .map((c, idx) => ({
+              index: Number(c.index ?? idx + 1) || idx + 1,
+              title: String(c.title ?? c.name ?? ""),
+              url: String(c.url ?? c.link ?? ""),
+            }))
+            .filter((c) => c.url);
+          if (chapters.length === 0) throw new Error("no chapters");
+          const cover = (raw?.cover_url as string) ?? item.cover ?? undefined;
+          const urls = chapters.map((c) => c.url);
+          const fetchRes = await callSidecar(
+            "fetchChapters",
+            { urls, novelUrl: item.url, from: 1, to: chapters.length },
+            undefined
+          );
+          if (fetchRes.error) throw new Error(fetchRes.error.message || fetchRes.error.code);
+          const audioRes = await callSidecar(
+            "buildAudio",
+            {
+              novelUrl: item.url,
+              from: 1,
+              to: chapters.length,
+              title: item.title,
+              urls,
+              format: audioFormat,
+              outputDir: outputDir || undefined,
+              coverUrl: cover ?? undefined,
+            },
+            undefined
+          );
+          if (audioRes.error) throw new Error(audioRes.error.message || audioRes.error.code);
+          const audio = audioRes.result as Record<string, unknown> | null;
+          const book = audio?.audiobook as { path?: string } | null;
+          outcomes.push({
+            url: item.url,
+            title: item.title,
+            status: "ok",
+            path: book?.path ?? (audio?.audio_dir as string | undefined),
+          });
+        } catch (e) {
+          outcomes.push({
+            url: item.url,
+            title: item.title,
+            status: "error",
+            message: e instanceof Error ? e.message : String(e),
+          });
+        }
+        setQueueOutcomes([...outcomes]);
+      }
+    } finally {
+      setQueueRunning(false);
+      setQueueProgress(null);
+    }
+  };
+
+  return (    <div className="min-h-screen bg-background text-foreground">
       <div className="mx-auto max-w-[960px] px-6 py-8">
         {/* Header */}
         <header
@@ -638,7 +738,13 @@ export default function App(): JSX.Element {
           {/* results table */}
           {!searching && results.length > 0 ? (
             <div className="mt-4">
-              <ResultsTable results={results} selectedUrl={selectedUrl} onSelect={setSelectedUrl} />
+              <ResultsTable
+                results={results}
+                selectedUrl={selectedUrl}
+                onSelect={setSelectedUrl}
+                onQueue={handleQueueAdd}
+                queuedUrls={queue.map((q) => q.url)}
+              />
               {selectedUrl ? (
                 <div className="mt-2 text-body-sm text-muted-foreground">
                   {t("results.selectedLabel")}: <span className="mono text-mono">{selectedUrl}</span>
@@ -677,6 +783,17 @@ export default function App(): JSX.Element {
               </div>
             </div>
           ) : null}
+
+          {/* Batch queue — several novels converted one after another */}
+          <QueuePanel
+            items={queue}
+            outcomes={queueOutcomes}
+            running={queueRunning}
+            progress={queueProgress}
+            onRemove={handleQueueRemove}
+            onClear={handleQueueClear}
+            onConvert={() => void handleQueueConvert()}
+          />
 
           {/* error toast inline */}
           {error ? (
@@ -844,6 +961,7 @@ export default function App(): JSX.Element {
               onClearParts={() => setPartStatuses({})}
               onBuildingChange={setAudioBuilding}
               showControls={false}
+              coverUrl={chapterCover ?? undefined}
               format={audioFormat}
               outputDir={outputDir}
             />

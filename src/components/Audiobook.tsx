@@ -8,6 +8,7 @@ import {
   isAudioResult,
   onMergeProgress,
   openPath,
+  rebuildChapter,
   revealPath,
   type AudioResult,
   type MergeProgressEvent,
@@ -32,6 +33,8 @@ type AudiobookProps = {
   /** Controlled format (advanced radios); when set, internal radios are ignored. */
   format?: AudioFormat;
   outputDir?: string;
+  /** Cover image URL — embedded into the M4B/M4A metadata. */
+  coverUrl?: string | null;
 };
 
 /** Imperative API for the App orchestrator (single Start button). */
@@ -76,6 +79,7 @@ const Audiobook = forwardRef<AudiobookHandle, AudiobookProps>(function Audiobook
   onBuildingChange,
   showControls = true,
   format: formatProp,
+  coverUrl,
   outputDir,
 }: AudiobookProps, ref): JSX.Element {
   const [formatState, setFormatState] = useState<AudioFormat>("m4b");
@@ -94,6 +98,9 @@ const Audiobook = forwardRef<AudiobookHandle, AudiobookProps>(function Audiobook
   const stopRequestedRef = useRef(false);
   const [merge, setMerge] = useState<MergeProgressEvent | null>(null);
   const mergeStartRef = useRef<number | null>(null);
+  // single-chapter regeneration (drops one chapter, then resumes the build)
+  const [regenBusy, setRegenBusy] = useState<number | null>(null);
+  const [regenMsg, setRegenMsg] = useState<string>("");
 
   // Summary of TTS settings owned by Settings (voice/parallel/chunk).
   useEffect(() => {
@@ -195,7 +202,16 @@ const Audiobook = forwardRef<AudiobookHandle, AudiobookProps>(function Audiobook
     abortRef.current = controller;
     try {
       const res = await buildAudio(
-        { novelUrl, from, to, title, urls, format: fmt, outputDir: outputDir || undefined },
+        {
+          novelUrl,
+          from,
+          to,
+          title,
+          urls,
+          format: fmt,
+          outputDir: outputDir || undefined,
+          coverUrl: coverUrl || undefined,
+        },
         { signal: controller.signal }
       );
       if (res.error) {
@@ -245,6 +261,35 @@ const Audiobook = forwardRef<AudiobookHandle, AudiobookProps>(function Audiobook
     // Hard-stop the Python sidecar (fresh interpreter per call); without this
     // the backend would keep generating in the background after the UI aborts.
     void cancelSidecarJob([...CANCEL_METHODS_AUDIO]);
+  };
+
+  /**
+   * Regenerate ONE chapter: drop its artifacts, then rebuild. The build
+   * resumes every other chapter from the existing parts, so only the chosen
+   * chapter is synthesized again.
+   */
+  const handleRegenerateChapter = async (chapterNumber: number): Promise<void> => {
+    if (!result || regenBusy !== null || building) return;
+    setRegenBusy(chapterNumber);
+    setRegenMsg("");
+    try {
+      const res = await rebuildChapter({ audioDir: result.audio_dir, chapter: chapterNumber });
+      if (res.error) {
+        setRegenMsg(`${res.error.code}: ${res.error.message}`);
+        return;
+      }
+      const removed = (res.result as { removed?: string[] } | null)?.removed ?? [];
+      setRegenMsg(
+        t("audio.regen.dropped", { n: removed.length, chapter: chapterNumber }) as string
+      );
+      // rebuild — the resume regenerates just the dropped chapter
+      await handleBuild();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setRegenMsg(msg);
+    } finally {
+      setRegenBusy(null);
+    }
   };
 
   // Imperative API for the App orchestrator (wizard Start / Stop).
@@ -434,6 +479,44 @@ const Audiobook = forwardRef<AudiobookHandle, AudiobookProps>(function Audiobook
                 {t("audio.openFolder")}
               </button>
             </div>
+          ) : null}
+
+          {/* one chapter can be regenerated without rebuilding the book */}
+          {result.chapters.length > 0 ? (
+            <details className="mt-3 rounded-md border bg-muted/40 p-3" data-testid="audio-chapter-list">
+              <summary className="cursor-pointer text-body-sm font-medium">
+                {t("audio.regen.title", { count: result.chapters.length }) as string}
+              </summary>
+              {regenMsg ? (
+                <p className="mt-2 text-body-sm text-muted-foreground" role="status" data-testid="audio-regen-msg">
+                  {regenMsg}
+                </p>
+              ) : null}
+              <ul className="mt-2 max-h-64 space-y-1 overflow-y-auto">
+                {result.chapters.map((ch) => (
+                  <li
+                    key={ch.number}
+                    className="flex items-center justify-between gap-2 text-body-sm"
+                    data-testid={`audio-chapter-${ch.number}`}
+                  >
+                    <span className="truncate">
+                      <span className="mono text-mono">{ch.number}.</span> {ch.title}
+                    </span>
+                    <button
+                      type="button"
+                      data-testid={`audio-regen-${ch.number}`}
+                      disabled={regenBusy !== null || building}
+                      onClick={() => void handleRegenerateChapter(ch.number)}
+                      className="shrink-0 rounded-md border border-input bg-card px-2 py-0.5 text-body-xs hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {regenBusy === ch.number
+                        ? (t("audio.regen.working") as string)
+                        : (t("audio.regen.action") as string)}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </details>
           ) : null}
         </div>
       ) : null}

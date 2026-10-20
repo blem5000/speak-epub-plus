@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { t } from "@/i18n";
-import { getStore, setStore, localVoices, downloadLocalVoice, ensureLocalEngine, previewVoice } from "@/lib/sidecar";
+import { getStore, setStore, localVoices, listVoices, downloadLocalVoice, ensureLocalEngine, previewVoice } from "@/lib/sidecar";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentVersion, manualCheck } from "@/lib/updater";
 
@@ -22,6 +22,45 @@ const VOICE_OPTIONS = [
   "pl-PL-MarekNeural",
 ];
 
+type EdgeVoice = {
+  id: string;
+  gender: string;
+  locale: string;
+  friendlyName: string;
+};
+
+/** The catalogue is fetched once per app run and reused between dialogs. */
+let edgeVoiceCache: EdgeVoice[] | null = null;
+let edgeVoiceFetch: Promise<EdgeVoice[]> | null = null;
+
+async function fetchEdgeVoices(): Promise<EdgeVoice[]> {
+  if (edgeVoiceCache) return edgeVoiceCache;
+  if (!edgeVoiceFetch) {
+    edgeVoiceFetch = (async () => {
+      try {
+        const res = await listVoices();
+        const r = (res.result as Record<string, unknown>) ?? {};
+        const arr = Array.isArray(r.voices) ? (r.voices as Array<Record<string, unknown>>) : [];
+        const voices = arr
+          .map((v) => ({
+            id: String(v.id ?? ""),
+            gender: String(v.gender ?? ""),
+            locale: String(v.locale ?? ""),
+            friendlyName: String(v.friendlyName ?? v.id ?? ""),
+          }))
+          .filter((v) => Boolean(v.id));
+        edgeVoiceCache = voices;
+        return voices;
+      } catch {
+        return [];
+      } finally {
+        edgeVoiceFetch = null;
+      }
+    })();
+  }
+  return edgeVoiceFetch;
+}
+
 const BITRATE_OPTIONS = ["32k", "48k", "64k", "96k"];
 
 const PRESET_DELAYS = [3000, 4000, 5000] as const;
@@ -36,8 +75,9 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
   // form state
   const [voice, setVoice] = useState<string>("en-US-AndrewNeural");
   const [audioBitrate, setAudioBitrate] = useState<string>("32k");
-  const [voiceCustom, setVoiceCustom] = useState<string>("");
-  const [isVoiceCustom, setIsVoiceCustom] = useState(false);
+  /** The Edge catalogue — hundreds of voices, fetched once and cached in the module. */
+  const [edgeVoices, setEdgeVoices] = useState<EdgeVoice[]>([]);
+  const [edgeVoicesFailed, setEdgeVoicesFailed] = useState<boolean>(false);
   const [rateNum, setRateNum] = useState<number>(0);
   const [parallel, setParallel] = useState<number>(3);
   const [chunkSize, setChunkSize] = useState<number>(3500);
@@ -58,6 +98,19 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
   const [localCuda, setLocalCuda] = useState<boolean>(false);
   const [localVoiceList, setLocalVoiceList] = useState<
     Array<{ id: string; lang: string; quality: string; sizeMb: number; downloaded: boolean }>
+  >([]);
+  /** The full upstream Piper catalogue (hundreds of voices, not only the shortlist). */
+  const [localVoiceCatalog, setLocalVoiceCatalog] = useState<
+    Array<{
+      id: string;
+      name: string;
+      language: string;
+      langCode: string;
+      quality: string;
+      sizeMb: number;
+      recommended: boolean;
+      downloaded: boolean;
+    }>
   >([]);
   // backend-reported availability + default (release builds always bundle piper)
   const [piperAvailable, setPiperAvailable] = useState<boolean>(true);
@@ -104,6 +157,19 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
           downloaded: Boolean(v.downloaded),
         }))
       );
+      const cat = Array.isArray(r.catalog) ? (r.catalog as Array<Record<string, unknown>>) : [];
+      setLocalVoiceCatalog(
+        cat.map((v) => ({
+          id: String(v.id ?? ""),
+          name: String(v.name ?? ""),
+          language: String(v.language ?? ""),
+          langCode: String(v.langCode ?? ""),
+          quality: String(v.quality ?? ""),
+          sizeMb: Number(v.sizeMb ?? 0),
+          recommended: Boolean(v.recommended),
+          downloaded: Boolean(v.downloaded),
+        }))
+      );
       setPiperAvailable(r.piperAvailable !== false);
       if (typeof r.default === "string" && r.default.trim()) setDefaultLocalVoice(r.default.trim());
     } catch {
@@ -117,23 +183,15 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
     if (variant !== "inline" && !open) return;
     let alive = true;
     setLoading(true);
-    (async () => {
-      try {
+    (async () => {      try {
         const res = await getStore();
         if (!alive) return;
         const data = (res.result as Record<string, unknown>) ?? {};
-        // voice
+        // voice — the picker is a free-text field backed by the catalogue,
+        // so any Edge short name is accepted
         const v = typeof data.voice === "string" ? (data.voice as string).trim() : "en-US-AndrewNeural";
         const voiceVal = v || "en-US-AndrewNeural";
-        if (VOICE_OPTIONS.includes(voiceVal)) {
-          setVoice(voiceVal);
-          setIsVoiceCustom(false);
-          setVoiceCustom(voiceVal);
-        } else {
-          setVoice("custom");
-          setIsVoiceCustom(true);
-          setVoiceCustom(voiceVal);
-        }
+        setVoice(voiceVal);
         prevRef.current["voice"] = voiceVal;
         // rate
         const rateStr = typeof data.rate === "string" ? (data.rate as string) : "+0%";
@@ -239,6 +297,19 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
     return () => { alive = false; };
   }, [open, variant]);
 
+  // the Edge voice catalogue (hundreds of voices) — fetched once, lazily
+  useEffect(() => {
+    if (variant !== "inline" && !open) return;
+    let alive = true;
+    (async () => {
+      const voices = await fetchEdgeVoices();
+      if (!alive) return;
+      setEdgeVoices(voices);
+      setEdgeVoicesFailed(voices.length === 0);
+    })();
+    return () => { alive = false; };
+  }, [open, variant]);
+
   // focus trap + Esc + auto focus (modal only)
   useEffect(() => {
     if (variant === "inline" || !open) return;
@@ -300,15 +371,7 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
         // revert
         if (revertKey && revertVal !== undefined) {
           if (revertKey === "voice") {
-            const rv = String(revertVal);
-            if (VOICE_OPTIONS.includes(rv)) {
-              setVoice(rv);
-              setIsVoiceCustom(false);
-            } else {
-              setVoice("custom");
-              setIsVoiceCustom(true);
-              setVoiceCustom(rv);
-            }
+            setVoice(String(revertVal));
           } else if (revertKey === "rate") {
             const ms = String(revertVal).match(/^([+-]?\d+)%$/);
             if (ms) setRateNum(parseInt(ms[1], 10));
@@ -361,8 +424,7 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
       showToast(msg);
       if (revertKey && revertVal !== undefined) {
         if (revertKey === "voice") {
-          const rv = String(revertVal);
-          if (VOICE_OPTIONS.includes(rv)) { setVoice(rv); setIsVoiceCustom(false); } else { setVoice("custom"); setIsVoiceCustom(true); setVoiceCustom(rv); }
+          setVoice(String(revertVal));
         } else if (revertKey === "rate") { const ms = String(revertVal).match(/^([+-]?\d+)%$/); if (ms) setRateNum(parseInt(ms[1], 10)); }
         else if (revertKey === "parallel") setParallel(Number(revertVal));
         else if (revertKey === "chunk-size") setChunkSize(Number(revertVal));
@@ -388,52 +450,23 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
     }
   };
 
-  const handleVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>): void => {
-    const val = e.target.value;
-    if (val === "custom") {
-      setIsVoiceCustom(true);
-      setVoice("custom");
-      // focus custom input next tick
-      setTimeout(() => {
-        const el = document.querySelector<HTMLInputElement>('[data-testid="settings-audio-voice-custom"]');
-        if (el) el.focus();
-      }, 0);
-      return;
-    }
-    const prev = prevRef.current["voice"];
-    setVoice(val);
-    setIsVoiceCustom(false);
-    setVoiceCustom(val);
-    void persist({ voice: val }, "voice", prev);
+  const handleVoiceChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    setVoice(e.target.value);
   };
 
-  const handleVoiceCustomBlur = (e: React.FocusEvent<HTMLInputElement>): void => {
+  const handleVoiceBlur = (e: React.FocusEvent<HTMLInputElement>): void => {
     const vv = e.target.value.trim();
     const prev = prevRef.current["voice"];
     if (!vv) {
       showToast("voice must be non-empty");
-      // revert
       const rv = String(prev ?? "en-US-AndrewNeural");
-      setVoiceCustom(rv);
-      if (VOICE_OPTIONS.includes(rv)) {
-        setVoice(rv);
-        setIsVoiceCustom(false);
-      } else {
-        setVoiceCustom(rv);
-      }
+      setVoice(rv);
       return;
     }
     if (vv.length > 100) {
       // core will clamp, but show truncated
     }
-    setVoiceCustom(vv);
-    // if custom value matches option, switch select
-    if (VOICE_OPTIONS.includes(vv)) {
-      setVoice(vv);
-      setIsVoiceCustom(false);
-    } else {
-      setVoice("custom");
-    }
+    setVoice(vv);
     void persist({ voice: vv }, "voice", prev);
   };
 
@@ -453,11 +486,15 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
     void persist({ engine: val }, "engine", prev);
   };
 
-  const handleLocalVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>): void => {
-    const val = e.target.value;
+  const handleLocalVoiceChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    setLocalVoice(e.target.value);
+    setLocalMsg("");
+  };
+
+  const handleLocalVoiceBlur = (e: React.FocusEvent<HTMLInputElement>): void => {
+    const val = e.target.value.trim();
     const prev = prevRef.current["localVoice"];
     setLocalVoice(val);
-    setLocalMsg("");
     void persist({ localVoice: val }, "localVoice", prev);
   };
 
@@ -516,7 +553,7 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
     const el = previewAudioRef.current;
     // replay/pause the cached clip — but only while voice/rate/engine are
     // unchanged; any change re-synthesizes so the sample matches the UI
-    const voiceKey = `${isVoiceCustom ? voiceCustom : voice}|${rateNum}|${engine}|${localVoice}`;
+    const voiceKey = `${voice}|${rateNum}|${engine}|${localVoice}`;
     if (el && sampleReady && sampleVoiceKey === voiceKey) {
       if (el.paused) {
         void el.play().catch(() => setSampleError(t("settings.sample.error") as string));
@@ -533,7 +570,7 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
       const rateStr = `${rateNum >= 0 ? "+" : ""}${rateNum}%`;
       const res = await previewVoice({
         text: t("settings.sample.text") as string,
-        voice: isVoiceCustom ? voiceCustom : voice,
+        voice,
         rate: rateStr,
         engine,
         localVoice,
@@ -807,6 +844,20 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
   if (variant !== "inline" && !open) return null;
 
   const rateSliderValue = Math.max(-50, Math.min(50, rateNum));
+
+  // the friendly description of the selected Edge voice (locale + name)
+  const selectedVoice = edgeVoices.find((v) => v.id === voice);
+  const selectedVoiceHint = selectedVoice
+    ? `${selectedVoice.friendlyName} (${selectedVoice.locale})`
+    : "";
+
+  // the description of the selected Piper voice (language, quality, size)
+  const selectedLocal = localVoiceCatalog.find((v) => v.id === localVoice);
+  const selectedLocalVoiceHint = selectedLocal
+    ? `${selectedLocal.language} · ${selectedLocal.quality} · ${selectedLocal.sizeMb} MB${
+        selectedLocal.downloaded ? " ✓" : ""
+      }`
+    : "";
   const isInline = variant === "inline";
 
   const body = (
@@ -822,34 +873,33 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                 <div className="mt-4 space-y-4">
                   <label className="flex flex-col gap-1">
                     <span className="text-body-sm font-medium">{t("settings.audio.voice")}</span>
-                    <select
+                    <input
                       data-testid="settings-audio-voice"
-                      value={isVoiceCustom ? "custom" : voice}
+                      list="edge-voice-catalog"
+                      value={voice}
                       onChange={handleVoiceChange}
+                      onBlur={handleVoiceBlur}
+                      placeholder="pl-PL-ZofiaNeural"
+                      autoComplete="off"
                       className="h-9 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    >
-                      {VOICE_OPTIONS.map((opt) => (
-                        <option key={opt} value={opt}>
-                          {opt}
+                    />
+                    <datalist id="edge-voice-catalog">
+                      {edgeVoices.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {v.friendlyName} · {v.locale}
                         </option>
                       ))}
-                      <option value="custom">{t("settings.scrape.custom")}</option>
-                    </select>
-                    <span className="text-body-sm text-muted-foreground">{t("settings.helper.voice")}</span>
+                    </datalist>
+                    <span className="text-body-sm text-muted-foreground" data-testid="settings-voice-hint">
+                      {edgeVoicesFailed
+                        ? (t("settings.voice.catalogueError") as string)
+                        : edgeVoices.length
+                          ? `${t("settings.voice.catalogue") as string}: ${edgeVoices.length} · ${
+                              selectedVoiceHint
+                            }`
+                          : (t("settings.helper.voice") as string)}
+                    </span>
                   </label>
-                  {isVoiceCustom ? (
-                    <label className="flex flex-col gap-1">
-                      <span className="text-body-sm font-medium">{t("settings.scrape.custom")}</span>
-                      <input
-                        data-testid="settings-audio-voice-custom"
-                        value={voiceCustom}
-                        placeholder="pl-PL-ZofiaNeural"
-                        onChange={(e) => setVoiceCustom(e.target.value)}
-                        onBlur={handleVoiceCustomBlur}
-                        className="h-9 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                      />
-                    </label>
-                  ) : null}
 
                   <div className="flex items-end justify-between gap-3">
                     <button
@@ -1037,20 +1087,31 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
 
                   <label className="flex flex-col gap-1">
                     <span className="text-body-sm font-medium">{t("settings.localVoice.label")}</span>
-                    <select
+                    <input
                       data-testid="settings-local-voice"
+                      list="piper-voice-catalog"
                       value={localVoice}
                       onChange={handleLocalVoiceChange}
+                      onBlur={handleLocalVoiceBlur}
+                      placeholder={defaultLocalVoice}
+                      autoComplete="off"
                       className="h-9 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    >
-                      <option value="">{t("settings.localVoice.default")}</option>
-                      {localVoiceList.map((v) => (
+                    />
+                    <datalist id="piper-voice-catalog">
+                      {localVoiceCatalog.map((v) => (
                         <option key={v.id} value={v.id}>
-                          {`${v.id} — ${v.lang.toUpperCase()} · ${v.quality} · ${v.sizeMb} MB${v.downloaded ? " ✓" : ""}`}
+                          {`${v.name} · ${v.language} · ${v.quality} · ${v.sizeMb} MB${v.downloaded ? " ✓" : ""}`}
                         </option>
                       ))}
-                    </select>
-                    <span className="text-body-sm text-muted-foreground">{t("settings.localVoice.helper")}</span>
+                    </datalist>
+                    <span className="text-body-sm text-muted-foreground" data-testid="settings-local-voice-hint">
+                      {localVoiceCatalog.length
+                        ? `${t("settings.localVoice.catalogue") as string}: ${localVoiceCatalog.length}${
+                            selectedLocalVoiceHint ? ` · ${selectedLocalVoiceHint}` : ""
+                          }`
+                        : (t("settings.localVoice.helper") as string)}
+                    </span>
+                  </label>
                     <label className="mt-1 flex items-center gap-2">
                       <input
                         type="checkbox"
@@ -1061,7 +1122,6 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                       />
                       <span className="text-body-sm">{t("settings.localVoice.cuda")}</span>
                     </label>
-                  </label>
 
                   <div className="flex flex-wrap items-center gap-3">
                     <button

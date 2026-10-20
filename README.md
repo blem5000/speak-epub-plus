@@ -15,6 +15,9 @@ Convert any EPUB file into a spoken-word audiobook using Microsoft Edge's free n
 - **Two-voice dialogue mode** — quoted dialogue can switch to a second Edge voice (`--dialogue-voice`)
 - **Podcast-grade post-processing** — optional loudness normalization and edge-silence trimming of finished chapter files (`--normalize-audio`, `--trim-silence`)
 - **Metadata + cover in M4B** — author name and cover art are embedded in the audiobook file
+- **Full voice catalogue** — all 322 Edge voices and all 177 upstream Piper voices, searchable in Settings
+- **Single-chapter regeneration** — rebuild one chapter instead of the whole book
+- **Batch queue in the app** — queue several novels and convert them one after another
 - **Batch mode** — convert several EPUBs in a single command (CLI)
 - **Resume anywhere** — finished chapters and parts are skipped on re-run; if a run fails, just repeat the same command
 - **Single-file audiobooks** — optional M4B/M4A output with real chapter markers (requires FFmpeg)
@@ -207,6 +210,38 @@ A selection of recommended voices:
 | `en-AU-WilliamMultilingualNeural` | Male | Australian |
 
 Run `python speak.py --list-voices` for the full English list, or `--list-voices --all-languages` for all languages.
+
+### Voice catalogue in the app
+
+The desktop app fetches the **full Edge catalogue** (322 voices) and offers it
+in a searchable field in *Settings → Audio* — type to filter (`pl`, `en-GB`,
+`de`), pick a voice, and the friendly name plus the locale is shown next to it.
+Any Edge short name is accepted, so a voice that is missing from the catalogue
+can still be typed in by hand.
+
+The local (Piper) engine uses the **full upstream catalogue** (177 voices, e.g.
+`pl_PL-gosia-medium`, `pl_PL-bass-high`, `en_US-lessac-medium`) instead of a
+handful of recommendations. The catalogue is fetched once and cached in
+`%LOCALAPPDATA%\speak-epub\piper-voices.json`; the model (~60–108 MB) is
+downloaded on demand, exactly like the recommended ones were.
+
+### Regenerating a single chapter
+
+After a build, the result panel lists the chapters. *Regenerate* drops the
+artifacts of **one** chapter and rebuilds — every other chapter is resumed
+from the parts that are already on disk, so a wrong voice in one chapter no
+longer costs a whole book.
+
+### Batch conversion
+
+Books can be queued from the search results (*Add*) and converted one after
+another (*Convert queue*). Every book is listed, fetched and built on its own;
+a failing book is reported and the queue continues with the next one.
+
+### Cover art
+
+The cover shown in the app is embedded into the produced M4B/M4A, so audiobook
+players show the artwork instead of a generic icon.
 
 ## Desktop app (Tauri + Python sidecar)
 

@@ -488,6 +488,7 @@ export type AudioParams = {
   normalizeAudio?: boolean | null;
   trimSilence?: boolean | null;
   outputDir?: string | null;
+  coverUrl?: string | null;
 };
 export type AudioChapter = { number: number; title: string; path: string };
 export type AudioResult = {
@@ -625,6 +626,29 @@ export async function setStore(
 /** Local (Piper) TTS status: curated voices, download state, models dir. */
 export async function localVoices(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
   return callSidecar("localVoices", {}, opts);
+}
+
+/**
+ * The Edge voice catalogue (hundreds of voices) — used by the searchable
+ * voice picker in Settings. The sidecar fetches it from edge-tts.
+ */
+export async function listVoices(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
+  return callSidecar("listVoices", {}, opts);
+}
+
+/**
+ * Drop one chapter's audio artifacts so the next build regenerates just
+ * that chapter (every other chapter is resumed from the existing parts).
+ */
+export async function rebuildChapter(
+  params: { audioDir: string; chapter: number },
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  return callSidecar(
+    "rebuildChapter",
+    { audioDir: String(params.audioDir ?? ""), chapter: Number(params.chapter) },
+    opts
+  );
 }
 
 /**

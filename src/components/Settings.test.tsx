@@ -35,6 +35,28 @@ function defaultLocalVoices() {
         { id: "pl_PL-darkman-medium", lang: "pl", quality: "medium", sizeMb: 63, downloaded: false },
         { id: "en_US-lessac-medium", lang: "en", quality: "medium", sizeMb: 63, downloaded: true },
       ],
+      catalog: [
+        {
+          id: "pl_PL-darkman-medium",
+          name: "darkman",
+          language: "Polish",
+          langCode: "pl_PL",
+          quality: "medium",
+          sizeMb: 60,
+          recommended: true,
+          downloaded: false,
+        },
+        {
+          id: "en_US-lessac-medium",
+          name: "lessac",
+          language: "English (US)",
+          langCode: "en_US",
+          quality: "medium",
+          sizeMb: 60,
+          recommended: true,
+          downloaded: true,
+        },
+      ],
     },
   };
 }
@@ -144,9 +166,14 @@ describe("Settings 4.2 — form + persist + i18n", () => {
     const user = userEvent.setup();
     render(<Settings open={true} onClose={vi.fn()} />);
     await waitFor(() => expect(mockLocalVoices).toHaveBeenCalled());
-    await waitFor(() => expect(screen.getByText(/pl_PL-darkman-medium/)).toBeInTheDocument());
-    const sel = screen.getByTestId("settings-local-voice") as HTMLSelectElement;
-    await user.selectOptions(sel, "pl_PL-darkman-medium");
+    // the full upstream catalogue is offered (not only the shortlist)
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-local-voice-hint").textContent).toMatch(/2/)
+    );
+    const sel = screen.getByTestId("settings-local-voice") as HTMLInputElement;
+    await user.clear(sel);
+    await user.type(sel, "pl_PL-darkman-medium");
+    await user.tab();
     await waitFor(() => expect(mockSetStore).toHaveBeenCalledWith({ localVoice: "pl_PL-darkman-medium" }));
     await user.click(screen.getByTestId("settings-local-download"));
     await waitFor(() => expect(mockDownloadLocalVoice).toHaveBeenCalledWith("pl_PL-darkman-medium"));

@@ -2321,6 +2321,60 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         except Exception as e:
             return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
 
+    if method in ("listVoices", "list_voices", "edgeVoices", "edge_voices"):
+        # the Edge voice catalogue (hundreds of voices) — the GUI needs it for
+        # a searchable picker; only the short name is kept
+        try:
+            import asyncio as _aio_voices
+
+            import edge_tts as _edge_voices
+
+            raw = _aio_voices.run(_edge_voices.list_voices())
+            voices = []
+            for v in raw or []:
+                if not isinstance(v, dict):
+                    continue
+                short = str(v.get("ShortName") or "").strip()
+                if not short:
+                    continue
+                voices.append(
+                    {
+                        "id": short,
+                        "gender": str(v.get("Gender") or ""),
+                        "locale": str(v.get("Locale") or ""),
+                        "friendlyName": str(v.get("FriendlyName") or short),
+                        "tags": v.get("VoiceTag") if isinstance(v.get("VoiceTag"), list) else [],
+                    }
+                )
+            voices.sort(key=lambda x: (str(x.get("locale", "")), str(x.get("id", ""))))
+            return {"id": rid, "result": {"voices": voices, "total": len(voices)}}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+    if method in ("rebuildChapter", "rebuild_chapter"):
+        # drop ONE chapter's artifacts so the next build regenerates just it
+        # (the resume skips every other valid part)
+        params = request.get("params") or {}
+        if not isinstance(params, dict):
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "params must be object"}}
+        audio_dir_p = params.get("audioDir", params.get("audio_dir"))
+        chapter_p = params.get("chapter", params.get("chapterNumber", params.get("chapter_number")))
+        if not isinstance(audio_dir_p, str) or not audio_dir_p.strip():
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "audioDir is required"}}
+        try:
+            chapter_no = int(chapter_p)
+        except (TypeError, ValueError):
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "chapter must be a number"}}
+        if chapter_no < 1:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "chapter must be >= 1"}}
+        try:
+            from core.tts import invalidate_chapter_artifacts
+
+            removed = invalidate_chapter_artifacts(audio_dir_p, chapter_no)
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+        return {"id": rid, "result": {"chapter": chapter_no, "removed": removed}}
+
     if method in ("ensureLocalEngine", "ensure_local_engine"):
         # the local engine (Piper + numpy + onnxruntime) is an optional
         # download — fetch it on demand so the app tier stays small

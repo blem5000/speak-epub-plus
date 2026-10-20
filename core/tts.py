@@ -989,6 +989,43 @@ def postprocess_chapter_file(path: str, normalize_audio: bool = False, trim_sile
         return False
 
 
+def invalidate_chapter_artifacts(audio_dir: str, chapter_number: int) -> List[str]:
+    """Delete one chapter's artifacts so the next build regenerates just it.
+
+    The resume skips every part that verifies, so removing the parts of a
+    single chapter re-synthesizes that chapter only — a wrong voice or a
+    broken chapter no longer costs a whole book.
+
+    Returns the removed file names.
+    """
+    removed: List[str] = []
+    try:
+        base = Path(audio_dir)
+    except Exception:
+        return removed
+    prefix = f"{int(chapter_number):03d}_"
+    targets = [base, base / "_parts"]
+    for folder in targets:
+        try:
+            if not folder.is_dir():
+                continue
+            for path in sorted(folder.iterdir()):
+                if not path.is_file():
+                    continue
+                if not path.name.startswith(prefix):
+                    continue
+                if path.suffix.lower() not in (".mp3", ".m4a", ".m4b"):
+                    continue
+                try:
+                    path.unlink()
+                    removed.append(path.name)
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return removed
+
+
 def build_generation_plan(
     chapters: List[Chapter],
     output_dir: str,
