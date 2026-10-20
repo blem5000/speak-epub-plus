@@ -188,10 +188,9 @@ async fn resolve_sidecar_entry(app: &tauri::AppHandle) -> Result<(PathBuf, Optio
                 ));
                 return Ok((python, Some(code_dir)));
             }
-            // 2) Runtime not cached yet: fetch it once (it is ~100 MB and
+            // 2) Runtime not cached yet: fetch it once (it is ~40 MB and
             //    then reused by every future app update).
-            let version = app.package_info().version.to_string();
-            match runtime::ensure_runtime(app, &descriptor, &version).await {
+            match runtime::ensure_runtime(app, &descriptor).await {
                 Ok(python) => {
                     runtime::log_line(&format!(
                         "sidecar runtime: downloaded ({})",

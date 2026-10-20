@@ -39,15 +39,18 @@ pub struct RuntimeDescriptor {
     pub python_version: String,
     /// Release asset carrying the runtime.
     pub asset: String,
-    /// URL template with {version} and {asset} placeholders.
-    pub url_template: String,
+    /// Base URL of the release the assets live in (the release build writes
+    /// the concrete URL, so the app does not have to know its own version).
+    pub release_url: String,
 }
 
 impl RuntimeDescriptor {
-    fn asset_url(&self, app_version: &str) -> String {
-        self.url_template
-            .replace("{version}", app_version)
-            .replace("{asset}", &self.asset)
+    fn asset_url(&self) -> String {
+        format!(
+            "{}/{}",
+            self.release_url.trim_end_matches('/'),
+            self.asset
+        )
     }
 }
 
@@ -234,7 +237,6 @@ fn extract_zip(zip: &Path, dest: &Path) -> Result<(), String> {
 pub async fn ensure_runtime(
     app: &AppHandle,
     descriptor: &RuntimeDescriptor,
-    app_version: &str,
 ) -> Result<PathBuf, String> {
     if let Some(python) = is_cached(descriptor) {
         return Ok(python);
@@ -254,7 +256,7 @@ pub async fn ensure_runtime(
         return Ok(python);
     }
 
-    let url = descriptor.asset_url(app_version);
+    let url = descriptor.asset_url();
     if !url.starts_with("https://github.com/") || !url.contains("/releases/download/") {
         return Err("refusing to download a non-release URL".into());
     }
@@ -351,20 +353,26 @@ mod tests {
 
     fn descriptor() -> RuntimeDescriptor {
         RuntimeDescriptor {
-            format: 1,
+            format: 2,
             hash: "abc123".into(),
             python_version: "3.11.17+20261013".into(),
             asset: "speak-epub-runtime-abc123.zip".into(),
-            url_template: "https://github.com/owner/repo/releases/download/v{version}/{asset}".into(),
+            release_url: "https://github.com/owner/repo/releases/download/v0.3.10".into(),
         }
     }
 
     #[test]
     fn asset_url_fills_the_template() {
-        let d = descriptor();
+        let d = RuntimeDescriptor {
+            format: 2,
+            hash: "abc123".into(),
+            python_version: "3.11.17+20261013".into(),
+            asset: "speak-epub-runtime-abc123.zip".into(),
+            release_url: "https://github.com/owner/repo/releases/download/v0.3.10".into(),
+        };
         assert_eq!(
-            d.asset_url("0.3.9"),
-            "https://github.com/owner/repo/releases/download/v0.3.9/speak-epub-runtime-abc123.zip"
+            d.asset_url(),
+            "https://github.com/owner/repo/releases/download/v0.3.10/speak-epub-runtime-abc123.zip"
         );
     }
 
@@ -389,14 +397,18 @@ mod tests {
         let file = runtime_dir.join("runtime.json");
         std::fs::write(
             &file,
-            r#"{"format":2,"hash":"h1","python_version":"3.11","requirements_sha256":"x","asset":"a.zip","url_template":"https://github.com/o/r/releases/download/v{version}/{asset}","local_hash":"l1","local_asset":"l.zip"}"#,
+            r#"{"format":2,"hash":"h1","python_version":"3.11","requirements_sha256":"x","asset":"a.zip","release_url":"https://github.com/o/r/releases/download/v1.2.3","local_hash":"l1","local_asset":"l.zip"}"#,
         )
         .unwrap();
         let parsed = load_descriptor(&dir).expect("descriptor must parse");
         assert_eq!(parsed.hash, "h1");
         assert_eq!(parsed.asset, "a.zip");
+        assert_eq!(
+            parsed.asset_url(),
+            "https://github.com/o/r/releases/download/v1.2.3/a.zip"
+        );
 
-        std::fs::write(&file, r#"{"format":99,"hash":"h","asset":"a.zip","url_template":"x"}"#).unwrap();
+        std::fs::write(&file, r#"{"format":99,"hash":"h","asset":"a.zip","release_url":"x"}"#).unwrap();
         assert!(load_descriptor(&dir).is_none(), "unknown format must be refused");
 
         // a missing descriptor (dev checkout) is not an error
