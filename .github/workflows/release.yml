@@ -169,7 +169,8 @@ jobs:
           releaseName: "Speak EPUB ${{ github.ref_name }}"
           releaseDraft: true
           prerelease: false
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
           releaseBody: |
             ## Speak EPUB ${{ github.ref_name }}
 

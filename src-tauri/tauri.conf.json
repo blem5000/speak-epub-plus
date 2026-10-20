@@ -29,6 +29,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "resources": ["sidecar-runtime"],
     "icon": [
       "icons/32x32.png",
