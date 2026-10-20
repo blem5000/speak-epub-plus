@@ -124,7 +124,12 @@ async function checkSignedUpdate(): Promise<UpdateInfo | null> {
   try {
     const mod = await import("@tauri-apps/plugin-updater");
     const update = (await mod.check()) as unknown as SignedUpdate;
-    if (!update || !update.version) return null;
+    if (!update || !update.version) {
+      // the manifest was fetched and its signature verified — there is just
+      // no newer release
+      void logToApp("signed update check: manifest verified, no newer release");
+      return null;
+    }
     signedUpdate = update;
     // record the result — the GUI has no console, the log file is the only
     // way to see that the signed manifest verified (or did not)

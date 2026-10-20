@@ -19,6 +19,7 @@
     "opener:allow-reveal-item-in-dir",
     "dialog:default",
     "notification:default",
+    "updater:default",
     {
       "identifier": "opener:allow-open-path",
       "allow": [
