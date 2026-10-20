@@ -103,6 +103,20 @@ jobs:
           if (-not (Test-Path "$localZipBase.zip")) { throw "local engine archive missing" }
           Write-Host "Local engine asset: $localZipBase.zip ($([math]::Round((Get-Item "$localZipBase.zip").Length/1MB,1)) MB)"
 
+      - name: Build the self-contained CLI package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runtime = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/sidecar-runtime'
+          $py = Join-Path $runtime 'python/python.exe'
+          $desc = Join-Path $runtime 'runtime.json'
+          if (-not (Test-Path $py)) { throw 'the embedded python is missing' }
+          if (-not (Test-Path $desc)) { throw 'the runtime descriptor is missing' }
+          $zip = "portable/speak-epub-cli-$($env:GITHUB_REF_NAME)-x64.zip"
+          New-Item -ItemType Directory -Force -Path 'portable' | Out-Null
+          & $py 'scripts/make_cli_package.py' --out $zip --descriptor $desc
+          Write-Host "CLI package created: $zip"
+
       - name: Trim and package the runtime tier
         shell: pwsh
         run: |
@@ -225,20 +239,6 @@ jobs:
           $zip = "portable/Speak-EPUB-$($env:GITHUB_REF_NAME)-x64-portable.zip"
           Compress-Archive -Path "$portable/*" -DestinationPath $zip -Force
           Write-Host "Portable zip created: $zip"
-
-      - name: Build the self-contained CLI package
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $runtime = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/sidecar-runtime'
-          $py = Join-Path $runtime 'python/python.exe'
-          $desc = Join-Path $runtime 'runtime.json'
-          if (-not (Test-Path $py)) { throw 'the embedded python is missing' }
-          if (-not (Test-Path $desc)) { throw 'the runtime descriptor is missing' }
-          $zip = "portable/speak-epub-cli-$($env:GITHUB_REF_NAME)-x64.zip"
-          New-Item -ItemType Directory -Force -Path 'portable' | Out-Null
-          & $py 'scripts/make_cli_package.py' --out $zip --descriptor $desc
-          Write-Host "CLI package created: $zip"
 
       - name: Upload the portable zip and the CLI package
         env:
