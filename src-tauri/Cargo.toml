@@ -1,6 +1,6 @@
 [package]
 name = "speak-epub"
-version = "0.3.13"
+version = "0.3.14"
 description = "Speak EPUB — EPUB to audiobook via Edge TTS"
 authors = ["Speak EPUB"]
 edition = "2021"
