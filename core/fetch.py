@@ -14,7 +14,7 @@ import re
 import time
 import threading
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
 # Default cache root: <repo>/_cache
@@ -25,8 +25,114 @@ _FETCH_LOCK = threading.Lock()
 _FETCHING = False
 
 # ---------------------------------------------------------------------------
+# robots.txt + per-host politeness
+# ---------------------------------------------------------------------------
+#: The user agent we present (and the group we look up in robots.txt).
+ROBOTS_USER_AGENT = "SpeakEPUB"
+
+#: robots.txt is re-read at most once per hour per host.
+_ROBOTS_TTL_SEC = 3600.0
+
+#: host -> (parser, fetched_at)
+_ROBOTS_CACHE: Dict[str, Tuple[Any, float]] = {}
+
+#: host -> the earliest timestamp we may hit that host again
+_HOST_NEXT_OK: Dict[str, float] = {}
+
+#: Our own floor between two requests to the SAME host (seconds).
+HOST_MIN_DELAY_SEC = 3.0
+
+# ---------------------------------------------------------------------------
 # Normalize & cache key — Core owns cacheKey AD-9, reuse in config.py
 # ---------------------------------------------------------------------------
+
+def _robots_parser(url: str) -> Optional[Any]:
+    """The parsed robots.txt of the URL's host (cached; None when unavailable).
+
+    Fail-open: a missing/unreachable robots.txt means "no restrictions"
+    (RFC 9309). A robots.txt served with 401/403 would make the stdlib
+    parser disallow EVERYTHING — that is treated as "unknown" here, so a
+    locked-down robots.txt cannot silently break the app.
+    """
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return None
+        now = time.time()
+        cached = _ROBOTS_CACHE.get(host)
+        if cached is not None and (now - cached[1]) < _ROBOTS_TTL_SEC:
+            return cached[0]
+        from urllib.robotparser import RobotFileParser
+
+        robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+        rp = RobotFileParser()
+        rp.set_url(robots_url)
+        try:
+            rp.read()
+        except Exception:
+            return None
+        if getattr(rp, "disallow_all", False):
+            # 401/403 robots.txt: the stdlib parser blocks everything — we
+            # treat it as "no information" instead of breaking the app
+            return None
+        _ROBOTS_CACHE[host] = (rp, now)
+        return rp
+    except Exception:
+        return None
+
+
+def robots_allows(url: str) -> Tuple[bool, str]:
+    """May this URL be fetched? (robots.txt for our UA; fail-open)"""
+    rp = _robots_parser(url)
+    if rp is None:
+        return True, ""
+    try:
+        if rp.can_fetch(ROBOTS_USER_AGENT, url):
+            return True, ""
+        return False, url
+    except Exception:
+        return True, ""
+
+
+def robots_crawl_delay(url: str) -> float:
+    """The site's Crawl-delay for our UA (0 when not set)."""
+    rp = _robots_parser(url)
+    if rp is None:
+        return 0.0
+    try:
+        delay = rp.crawl_delay(ROBOTS_USER_AGENT)
+        return float(delay) if delay else 0.0
+    except Exception:
+        return 0.0
+
+
+def host_delay_floor(url: str) -> float:
+    """The delay we must respect between two requests to the same host."""
+    return max(HOST_MIN_DELAY_SEC, robots_crawl_delay(url))
+
+
+def respect_host_delay(url: str, extra: float = 0.0) -> None:
+    """Wait until this host may be hit again (per-host politeness).
+
+    The wait is the LONGEST of our own floor, the site's Crawl-delay and the
+    caller's delay — never their sum, so the per-host limiter does not slow
+    the run down.
+    """
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return
+        now = time.time()
+        earliest = _HOST_NEXT_OK.get(host, 0.0)
+        wait = earliest - now
+        if wait > 0:
+            time.sleep(min(wait, 60.0))
+        _HOST_NEXT_OK[host] = time.time() + max(host_delay_floor(url), extra)
+    except Exception:
+        pass
+
 
 def _normalize_cache_key(url: str) -> str:
     """Normalize url for cache key to avoid duplicate entries for same novel.
@@ -482,6 +588,24 @@ def fetch_one(
             on_throttle(tier, int(polite_delay(tier) * 1000))
         except Exception:
             pass
+
+    # robots.txt: the site decides what may be fetched. A cached page is
+    # still fine (it was fetched before), but a NEW request to a path the
+    # site disallows for our user agent is not made.
+    allowed, blocked_url = robots_allows(url)
+    if not allowed:
+        msg = f"robots.txt forbids fetching {blocked_url} for {ROBOTS_USER_AGENT}"
+        if on_log:
+            try:
+                on_log(msg)
+            except Exception:
+                pass
+        try:
+            from core.ports import AdapterError
+
+            raise AdapterError(f"ROBOTS_DISALLOWED: {msg}", code="ROBOTS_DISALLOWED")
+        except ImportError:
+            raise RuntimeError(f"ROBOTS_DISALLOWED: {msg}")
 
     last_exc: Exception | None = None
     for attempt in range(1, max_retries + 1):
@@ -950,7 +1074,12 @@ def fetch_many(
             # polite delay between fetches (skip first)
             if not skip_delay and idx > 0:
                 d = polite_delay(tier)
-                time.sleep(d)
+                # the site may ask for a longer pause (robots.txt
+                # Crawl-delay) — it wins over our own default
+                d = max(d, robots_crawl_delay(url))
+                # the per-host limiter waits out the remaining time and
+                # records when this host may be hit again
+                respect_host_delay(url, extra=d)
             try:
                 cc = fetch_one(url, adapter, cache_dir=cache_dir, on_status=on_status, on_log=on_log, on_throttle=on_throttle, status_idx=ch_num)
                 results.append(cc)

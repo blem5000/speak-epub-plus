@@ -270,6 +270,16 @@ venv/Scripts/python.exe -m py_compile core/ports.py core/config.py
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
+**Politeness towards the site**
+
+The fetcher reads the site's `robots.txt` and follows it: a path the site
+disallows for the app's user agent is not requested, and the site's
+`Crawl-delay` (when present) is respected on top of the built-in 3–5 s pause
+between chapters. Requests to the same host are paced by a per-host limiter,
+so a long book never hammers the site. A missing or unreachable
+`robots.txt` means "no restrictions" (the standard behaviour) and never
+blocks a conversion.
+
 **Design system**
 
 Design tokens from `_bmad-output/planning-artifacts/ux-designs/` are exposed as CSS vars in `src/styles/globals.css` (`--background #F8F9FA`, `--ring #2B5CE6`, `--radius-md 8px`, `--font-mono JetBrains Mono 12px`) and via `src/styles/tokens.ts` / Tailwind theme. The UI meets WCAG 2.1 AA state-contrast requirements and is responsive down to narrow widths.
