@@ -39,6 +39,12 @@ AGENTS.md
 # Python runtime (venv lives at root now)
 venv/
 
+# Tauri updater signing keys — NEVER commit them (the public key lives in
+# src-tauri/tauri.conf.json, the private key only in the GitHub secret)
+*.key
+*.key.pub
+tauri-signing/
+
 # Node / Tauri
 node_modules/
 dist/

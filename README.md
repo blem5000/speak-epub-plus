@@ -4,7 +4,7 @@ Convert any EPUB file into a spoken-word audiobook using Microsoft Edge's free n
 
 > **Attribution:** This is a new standalone project built on top of **Speak EPUB** by **Michael Sanford** (MIT, 2026).  
 > It is **not a GitHub fork** by design — the project is expected to diverge significantly — but it preserves the original MIT copyright notice.  
-> See [`NOTICE.md`](NOTICE.md) and [`LICENSE.md`](LICENSE.md) for details. The original CLI snapshot is preserved at `docs/original-speak-epub-readme.md`.
+> See [`NOTICE.md`](NOTICE.md) and [`LICENSE.md`](LICENSE.md) for details. The original CLI snapshot is preserved at `docs/original-speak-epub-readme.md`. The release procedure (tiers, signing key, the two Tauri traps) is in [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ## Features
 
@@ -235,6 +235,15 @@ npm run build
 - **TTS queue** — Edge TTS parts through a global parallel queue (2–3 recommended) with live progress events, throttle badge, retry/backoff; finished parts are skipped on re-run
 - **M4B/M4A** — per-chapter merge plus a single audiobook file with chapter markers (FFmpeg)
 - **Settings** — persisted atomically to `store.json`; UI locale auto-detects `pl`/`en` from `navigator.language` (fallback `en`)
+- **Automatic updates** — the app checks for a newer release on startup and installs it in place; the update manifest is signed, so a substituted payload is rejected (a portable build has no installer and is sent to the release page instead)
+
+**Downloads on the first launch**
+
+The app tier (the executable plus the Python `core`/`adapters` code) is only
+~5 MB. The Python **runtime tier** (~41 MB) is downloaded once and cached in
+`%LOCALAPPDATA%\speak-epub\runtime\<hash>`; the optional **local TTS
+engine** (~60 MB, Piper + ONNX) is fetched only when you turn the local
+engine on. Later updates transfer the app tier alone.
 
 **Architecture**
 
