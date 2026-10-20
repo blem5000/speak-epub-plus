@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { t } from "@/i18n";
-import { getStore, setStore, localVoices, downloadLocalVoice, previewVoice } from "@/lib/sidecar";
+import { getStore, setStore, localVoices, downloadLocalVoice, ensureLocalEngine, previewVoice } from "@/lib/sidecar";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentVersion, manualCheck } from "@/lib/updater";
 
@@ -60,6 +60,7 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
   >([]);
   // backend-reported availability + default (release builds always bundle piper)
   const [piperAvailable, setPiperAvailable] = useState<boolean>(true);
+  const [engineBusy, setEngineBusy] = useState<boolean>(false);
   const [defaultLocalVoice, setDefaultLocalVoice] = useState<string>("en_US-lessac-medium");
   const [localBusy, setLocalBusy] = useState<boolean>(false);
   const [localMsg, setLocalMsg] = useState<string>("");
@@ -559,6 +560,29 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
     await runLocalVoiceDownload(true);
   };
 
+  const handleEnsureLocalEngine = async (): Promise<void> => {
+    if (engineBusy) return;
+    setEngineBusy(true);
+    setLocalMsg(t("settings.engine.installing") as string);
+    try {
+      const res = await ensureLocalEngine();
+      if (res.error) {
+        const err = res.error as { message?: string };
+        const detail =
+          typeof err.message === "string" && err.message ? err.message : JSON.stringify(res.error);
+        setLocalMsg(`${t("settings.engine.installFailed") as string}: ${detail}`);
+      } else {
+        setLocalMsg(t("settings.engine.installed") as string);
+        showToast(t("settings.engine.installed") as string);
+        await refreshLocalVoices();
+      }
+    } catch (e) {
+      setLocalMsg(`${t("settings.engine.installFailed") as string}: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setEngineBusy(false);
+    }
+  };
+
   const runLocalVoiceDownload = async (force: boolean): Promise<void> => {
     if (!piperAvailable) {
       setLocalMsg(t("settings.engine.noPiper") as string);
@@ -984,9 +1008,20 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                     </div>
                     <span className="text-body-sm text-muted-foreground">{t("settings.engine.helper")}</span>
                     {!piperAvailable && (
-                      <span data-testid="settings-engine-nopiper" className="text-body-sm text-muted-foreground">
-                        {t("settings.engine.noPiper")}
-                      </span>
+                      <div className="flex flex-col gap-2">
+                        <span data-testid="settings-engine-nopiper" className="text-body-sm text-muted-foreground">
+                          {t("settings.engine.noPiper")}
+                        </span>
+                        <button
+                          type="button"
+                          data-testid="settings-engine-install"
+                          disabled={engineBusy}
+                          onClick={() => void handleEnsureLocalEngine()}
+                          className="h-9 w-fit rounded-md border border-input bg-card px-3 text-body hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {engineBusy ? t("settings.engine.installing") : t("settings.engine.install")}
+                        </button>
+                      </div>
                     )}
                   </div>
 

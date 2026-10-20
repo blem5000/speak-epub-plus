@@ -38,10 +38,14 @@ Convert any EPUB file into a spoken-word audiobook using Microsoft Edge's free n
 > reuses it afterwards. A manual install below is still fine and preferred.
 >
 > The desktop app works the same way: the Python runtime it needs is
-> downloaded **once** on the first launch (≈100 MB) into
+> downloaded **once** on the first launch (~40 MB) into
 > `%LOCALAPPDATA%\speak-epub\runtime\<hash>` and reused by every later
 > update. App updates therefore transfer only the app itself (~15 MB) — the
 > runtime is re-downloaded only when the dependencies actually change.
+>
+> The optional **local TTS engine** (Piper + the ONNX runtime, ~60 MB) is a
+> separate download: if you stay on Edge TTS you never fetch it. Settings →
+> TTS engine offers it when the local engine is missing.
 
 ## Installation
 

@@ -2250,6 +2250,29 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         except Exception as e:
             return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
 
+    if method in ("ensureLocalEngine", "ensure_local_engine"):
+        # the local engine (Piper + numpy + onnxruntime) is an optional
+        # download — fetch it on demand so the app tier stays small
+        def _emit_engine_log(line: str) -> None:
+            if emit_fn:
+                try:
+                    emit_fn("logLine", {"line": line})
+                except Exception:
+                    pass
+
+        try:
+            from core.tts_local import ensure_local_engine
+
+            result = ensure_local_engine(on_log=_emit_engine_log)
+            if not result.get("ok"):
+                return {
+                    "id": rid,
+                    "error": {"code": "LOCAL_ENGINE_UNAVAILABLE", "message": str(result.get("message", ""))},
+                }
+            return {"id": rid, "result": result}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
     if method in ("downloadLocalVoice", "download_local_voice"):
         params = request.get("params") or {}
         if not isinstance(params, dict):

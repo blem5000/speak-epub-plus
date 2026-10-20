@@ -30,7 +30,7 @@ jobs:
       - name: Install frontend dependencies
         run: npm install --no-audit --no-fund
 
-      - name: Build the Python runtime tier
+      - name: Build the Python tiers
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -41,7 +41,7 @@ jobs:
 
           # The interpreter build is PINNED: the runtime cache key is derived
           # from it, so a floating "latest" would re-download the runtime on
-          # every release (exactly what the two-tier split avoids).
+          # every release (exactly what the tier split avoids).
           $pythonTag = '20261013'
           $pythonVersion = '3.11.17+20261013'
           $assetName = "cpython-$pythonVersion-x86_64-pc-windows-msvc-install_only.tar.gz"
@@ -51,8 +51,21 @@ jobs:
           tar -xzf "$env:TEMP\python.tar.gz" -C $runtime
           $py = Join-Path $runtime 'python/python.exe'
           if (-not (Test-Path $py)) { throw 'Embedded python not found after extraction' }
+
+          # Split the requirements into the two tiers (core = bundled with the
+          # app, local = the optional Piper engine). One source of truth:
+          # requirements.txt with the # core / # local markers.
+          $reqDir = Join-Path $env:GITHUB_WORKSPACE 'build/requirements'
+          $desc = Join-Path $runtime 'runtime.json'
+          & $py 'scripts/runtime_descriptor.py' --python-version $pythonVersion --requirements 'requirements.txt' --out $desc --split-out-dir $reqDir --release-url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
+          $coreReq = Join-Path $reqDir 'requirements-core.txt'
+          $localReq = Join-Path $reqDir 'requirements-local.txt'
+          $descriptor = Get-Content $desc -Raw | ConvertFrom-Json
+          Write-Host "core requirements: $coreReq / local requirements: $localReq"
+          Write-Host "Runtime hash: $($descriptor.hash) / local hash: $($descriptor.local_hash)"
+
           & $py -m pip install --disable-pip-version-check --quiet --upgrade pip
-          & $py -m pip install --disable-pip-version-check --quiet -r 'requirements.txt'
+          & $py -m pip install --disable-pip-version-check --quiet -r $coreReq
 
           # Copy the Python core so `from core.config import handle_rpc` resolves from cwd.
           $code = Join-Path $runtime 'code'
@@ -64,6 +77,39 @@ jobs:
           # Sanity check: ping through handle_rpc with the bundled runtime.
           $ping = & $py -c "import sys; sys.path.insert(0, r'$code'); from core.config import handle_rpc; print(handle_rpc({'id':'1','method':'ping'}))"
           Write-Host "Sidecar ping: $ping"
+
+          # ---- the optional local-engine tier -------------------------------
+          # It is installed into a separate folder and shipped as its own
+          # asset: users who stay on Edge TTS never download it. This must
+          # happen BEFORE the runtime is trimmed (pip is removed there).
+          $extras = Join-Path $env:GITHUB_WORKSPACE 'build/local-engine'
+          Remove-Item $extras -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $extras | Out-Null
+          $ErrorActionPreference = 'Continue'
+          & $py -m pip install --disable-pip-version-check --quiet --target $extras -r $localReq
+          $pipExit = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          if ($pipExit -ne 0) { throw "pip install (local engine) failed ($pipExit)" }
+          # The packages must be importable from the target folder alone.
+          $imp = & $py -c "import sys; sys.path.insert(0, r'$extras'); import piper, onnxruntime, numpy; print('ok')" 2>&1
+          if ($LASTEXITCODE -ne 0 -or ($imp -join "`n") -ne 'ok') {
+            throw "the local engine does not import: $imp"
+          }
+          Get-ChildItem $extras -Recurse -Directory -Filter '__pycache__' | ForEach-Object {
+            Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          $localZipBase = Join-Path $env:GITHUB_WORKSPACE ([System.IO.Path]::GetFileNameWithoutExtension($descriptor.local_asset))
+          & $py -c "import shutil, sys; shutil.make_archive(sys.argv[1], 'zip', root_dir=sys.argv[2], base_dir='.')" $localZipBase $extras
+          if (-not (Test-Path "$localZipBase.zip")) { throw "local engine archive missing" }
+          Write-Host "Local engine asset: $localZipBase.zip ($([math]::Round((Get-Item "$localZipBase.zip").Length/1MB,1)) MB)"
+
+      - name: Trim and package the runtime tier
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runtime = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/sidecar-runtime'
+          $py = Join-Path $runtime 'python/python.exe'
+          $desc = Get-Content (Join-Path $runtime 'runtime.json') -Raw | ConvertFrom-Json
 
           # Trim the runtime: pip/setuptools/ensurepip are dead weight once
           # the dependencies are installed (-64 MB), the stdlib test/junk
@@ -92,26 +138,16 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or ($trimProbe -join "`n") -ne 'ok') {
             throw "the trimmed runtime does not start: $trimProbe"
           }
+          # Gate: the runtime must NOT contain the local engine (Piper +
+          # numpy + onnxruntime) — that is a separate optional download.
+          & $py -c "import importlib.util, sys; sys.exit(1 if importlib.util.find_spec('piper') else 0)"
+          if ($LASTEXITCODE -ne 0) { throw 'the runtime still contains piper — the tiers are not split' }
 
-          # The descriptor: the cache key of the runtime tier. The app reads
-          # it to decide whether it already has a matching runtime.
-          $desc = Join-Path $runtime 'runtime.json'
-          & $py 'scripts/runtime_descriptor.py' --python-version $pythonVersion --requirements 'requirements.txt' --out $desc
-          $runtimeHash = (Get-Content $desc -Raw | ConvertFrom-Json).hash
-          Write-Host "Runtime hash: $runtimeHash"
-
-      - name: Package the runtime tier as a release asset
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $runtime = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/sidecar-runtime'
-          $desc = Get-Content (Join-Path $runtime 'runtime.json') -Raw | ConvertFrom-Json
-          $py = Join-Path $runtime 'python/python.exe'
-          $zipBase = Join-Path $env:GITHUB_WORKSPACE ([System.IO.Path]::GetFileNameWithoutExtension($desc.asset))
-          # shutil.make_archive writes forward slashes (PowerShell's
+          # Package the runtime tier (forward slashes — PowerShell's
           # Compress-Archive writes backslashes, which non-Windows unzip
           # treats as part of the file name -> the app would not find
           # <cache>/<hash>/python/python.exe there).
+          $zipBase = Join-Path $env:GITHUB_WORKSPACE ([System.IO.Path]::GetFileNameWithoutExtension($desc.asset))
           & $py -c "import shutil, sys; shutil.make_archive(sys.argv[1], 'zip', root_dir=sys.argv[2], base_dir='python')" $zipBase $runtime
           $zip = "$zipBase.zip"
           if (-not (Test-Path $zip)) { throw "runtime archive missing: $zip" }
@@ -140,6 +176,7 @@ jobs:
             - **`Speak.EPUB_<version>_x64_en-US.msi`** — MSI installer
             - **`Speak-EPUB-<version>-x64-portable.zip`** — portable build: unzip anywhere and run `speak-epub.exe`
             - **`speak-epub-runtime-<hash>.zip`** — the Python runtime tier (downloaded once and cached, see below)
+            - **`speak-epub-local-<hash>.zip`** — the optional local TTS engine (Piper + ONNX), only needed for offline synthesis
             - Source code archive (auto-added by GitHub)
 
             ### Two tiers: the app updates without re-downloading Python
@@ -182,7 +219,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload ${{ github.ref_name }} "portable/Speak-EPUB-$($env:GITHUB_REF_NAME)-x64-portable.zip" --clobber --repo ${{ github.repository }}
 
-      - name: Upload the runtime tier asset
+      - name: Upload the tier assets
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -190,7 +227,12 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $runtime = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/sidecar-runtime'
           $desc = Get-Content (Join-Path $runtime 'runtime.json') -Raw | ConvertFrom-Json
-          $zip = Join-Path $env:GITHUB_WORKSPACE $desc.asset
-          if (-not (Test-Path $zip)) { throw "runtime asset missing: $zip" }
-          gh release upload ${{ github.ref_name }} $zip --clobber --repo ${{ github.repository }}
-          Write-Host "Uploaded $($desc.asset)"
+          $assets = @(
+            (Join-Path $env:GITHUB_WORKSPACE $desc.asset),
+            (Join-Path $env:GITHUB_WORKSPACE $desc.local_asset)
+          )
+          foreach ($zip in $assets) {
+            if (-not (Test-Path $zip)) { throw "tier asset missing: $zip" }
+            gh release upload ${{ github.ref_name }} $zip --clobber --repo ${{ github.repository }}
+            Write-Host "Uploaded $(Split-Path $zip -Leaf)"
+          }

@@ -628,6 +628,16 @@ export async function localVoices(opts?: { signal?: AbortSignal }): Promise<RpcR
 }
 
 /**
+ * Download the optional local TTS engine (Piper + numpy + onnxruntime,
+ * ~60 MB). The app tier ships without it — it is fetched the first time
+ * the user wants the local engine. Idempotent: a cached engine returns
+ * immediately.
+ */
+export async function ensureLocalEngine(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
+  return callSidecar("ensureLocalEngine", {}, opts);
+}
+
+/**
  * Synthesize a short sample of a voice so Settings can play it before a
  * full build. Backend writes `_preview/voice_sample.mp3` next to the
  * default output and returns { path, engine, durationMs }; the caller

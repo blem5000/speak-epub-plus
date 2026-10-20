@@ -16,9 +16,12 @@ Design notes:
   duration-based verification scales its floor with the requested rate so
   complete fast parts are not mistaken for truncation
 """
+import importlib
+import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -64,6 +67,195 @@ _DOWNLOAD_PROGRESS_EVERY = 10 * 1024 * 1024
 _VOICE_CACHE: Dict[str, Any] = {}
 _VOICE_LOCK = threading.Lock()
 
+#: Directory holding the optional local-engine tier (Piper + numpy +
+#: onnxruntime). It is a SEPARATE download: the runtime tier carries only
+#: the core dependencies, so the app stays small and the local engine is
+#: fetched only when the user actually turns it on.
+_LOCAL_ENGINE_DIR_NAME = "local"
+
+#: Progress logLines are emitted every this many bytes during download.
+_LOCAL_ENGINE_PROGRESS_EVERY = 10 * 1024 * 1024
+
+#: Socket timeout (s) for the local-engine download.
+_LOCAL_ENGINE_TIMEOUT_SEC = 30
+
+#: Overall deadline (s) for the local-engine download.
+_LOCAL_ENGINE_TOTAL_TIMEOUT_SEC = 900
+
+
+def local_engine_root() -> Path:
+    """Directory holding the optional local-engine tier (env override for tests)."""
+    env = os.environ.get("SPEAK_EPUB_LOCAL_ENGINE_DIR")
+    if env:
+        return Path(env)
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home())
+        return Path(base) / "speak-epub" / _LOCAL_ENGINE_DIR_NAME
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "speak-epub" / _LOCAL_ENGINE_DIR_NAME
+    return Path.home() / ".local" / "share" / "speak-epub" / _LOCAL_ENGINE_DIR_NAME
+
+
+def _runtime_descriptor() -> Dict[str, Any]:
+    """Read `runtime.json` (written next to the app tier by the release build).
+
+    The sidecar runs with its working directory set to the app tier's
+    `code` folder, so the descriptor sits one level up.
+    """
+    candidates = [
+        Path.cwd() / "runtime.json",
+        Path.cwd().parent / "runtime.json",
+        # the sidecar's code dir sits next to the descriptor:
+        # <app tier>/sidecar-runtime/code/core/tts_local.py -> ../../runtime.json
+        Path(__file__).resolve().parent.parent.parent / "runtime.json",
+        Path(__file__).resolve().parent.parent / "runtime.json",
+    ]
+    for path in candidates:
+        try:
+            if path.is_file():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            continue
+    return {}
+
+
+def local_engine_available() -> bool:
+    """True when the Piper engine can be imported right now."""
+    if _local_engine_site() is not None:
+        return True
+    try:
+        importlib.import_module("piper")  # noqa: F401
+        importlib.import_module("onnxruntime")  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _local_engine_site() -> Optional[Path]:
+    """The cached local-engine directory, when it holds a usable piper."""
+    descriptor = _runtime_descriptor()
+    local_hash = descriptor.get("local_hash") if descriptor else None
+    if not isinstance(local_hash, str) or not local_hash:
+        return None
+    site = local_engine_root() / local_hash
+    if (site / "piper").is_dir():
+        return site
+    return None
+
+
+def _add_local_engine_to_path() -> None:
+    """Put the cached local-engine directory on sys.path (if present)."""
+    site = _local_engine_site()
+    if site is None:
+        return
+    path = str(site)
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+
+def ensure_local_engine(on_log: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
+    """Make the Piper engine usable — downloads the local-engine tier once.
+
+    The runtime tier ships only the core dependencies; Piper, numpy and
+    onnxruntime (~60 MB) are a separate optional download, fetched the
+    first time the user turns the local engine on. Returns
+    {"ok": bool, "downloaded": bool, "message": str}.
+    """
+    def _log(line: str) -> None:
+        if on_log is not None:
+            try:
+                on_log(line)
+            except Exception:
+                pass
+
+    if local_engine_available():
+        _add_local_engine_to_path()
+        return {"ok": True, "downloaded": False, "message": "local engine ready"}
+
+    descriptor = _runtime_descriptor()
+    asset = descriptor.get("local_asset")
+    release_url = descriptor.get("release_url")
+    local_hash = descriptor.get("local_hash")
+    if not (isinstance(asset, str) and asset and isinstance(release_url, str) and release_url):
+        _log("the local engine is not available in this build")
+        return {
+            "ok": False,
+            "downloaded": False,
+            "message": "the local engine components are not part of this build",
+        }
+
+    target = local_engine_root() / str(local_hash)
+    marker = target / ".ready"
+    if not marker.is_file():
+        url = f"{release_url.rstrip('/')}/{asset}"
+        _log(f"downloading the local TTS engine ({asset})…")
+        try:
+            _download_and_extract(url, target, _log)
+        except Exception as e:
+            _log(f"local engine download failed: {e}")
+            return {"ok": False, "downloaded": False, "message": f"download failed: {e}"}
+        try:
+            marker.write_text("ok", encoding="utf-8")
+        except OSError:
+            pass
+    _add_local_engine_to_path()
+    if not local_engine_available():
+        return {
+            "ok": False,
+            "downloaded": False,
+            "message": "the local engine components were extracted but piper is still missing",
+        }
+    _log("local TTS engine ready")
+    return {"ok": True, "downloaded": True, "message": "local engine downloaded"}
+
+
+def _download_and_extract(url: str, target: Path, on_log: Optional[Callable[[str], None]] = None) -> None:
+    """Download a zip asset and extract it into `target` (atomically)."""
+    import urllib.request
+    import zipfile
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = target.parent / f".staging-{target.name}-{os.getpid()}"
+    try:
+        if staging.exists():
+            import shutil as _shutil
+
+            _shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, exist_ok=True)
+        archive = staging / "asset.zip"
+        req = urllib.request.Request(url, headers={"User-Agent": "speak-epub/1 (local engine)"})
+        total = 0
+        with urllib.request.urlopen(req, timeout=_LOCAL_ENGINE_TIMEOUT_SEC) as resp:
+            length = resp.headers.get("Content-Length")
+            try:
+                total = int(length or 0)
+            except (TypeError, ValueError):
+                total = 0
+            with open(archive, "wb") as f:
+                while True:
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(staging)
+        try:
+            archive.unlink()
+        except OSError:
+            pass
+        # the archive root holds the packages themselves
+        import shutil as _shutil
+
+        if target.exists():
+            _shutil.rmtree(target, ignore_errors=True)
+        _shutil.move(str(staging), str(target))
+    finally:
+        import shutil as _shutil
+
+        _shutil.rmtree(staging, ignore_errors=True)
+
 
 def local_models_root() -> Path:
     """Directory holding downloaded Piper voices (env override for tests)."""
@@ -76,20 +268,15 @@ def local_models_root() -> Path:
 
 
 def _piper_available() -> bool:
-    """True when Piper can actually be used (importable, deps loadable).
+    """True when the local engine can actually be used.
 
-    Checking only the module spec reported "available" for a broken
-    onnxruntime install — the failure then surfaced in the middle of a
-    synthesis, once per part.
+    The engine components (Piper + numpy + onnxruntime) are a separate
+    optional download; they are imported here (and cached on sys.path).
     """
+    _add_local_engine_to_path()
     try:
-        import importlib.util
-
-        if importlib.util.find_spec("piper") is None:
-            return False
-        import piper  # noqa: F401  (import smoke test)
-
-        importlib.import_module("onnxruntime")
+        importlib.import_module("piper")  # noqa: F401
+        importlib.import_module("onnxruntime")  # noqa: F401
         return True
     except Exception:
         return False
@@ -418,6 +605,14 @@ def tts_text_to_mp3_local(
     name = validate_local_voice(voice)
     if not local_voice_ready(name):
         raise RuntimeError(_local_unavailable_message(name))
+    if not _piper_available():
+        # the engine components are an optional download — fetch them once
+        result = ensure_local_engine()
+        if not result.get("ok"):
+            raise RuntimeError(
+                "the local TTS engine is not installed in this build — "
+                "use the Edge engine or install the local components"
+            )
 
     try:
         retries = int(retries)

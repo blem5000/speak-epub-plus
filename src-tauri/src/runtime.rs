@@ -31,7 +31,7 @@ static ATTEMPT: AtomicU64 = AtomicU64::new(0);
 /// Descriptor written by the release build next to the app tier.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RuntimeDescriptor {
-    /// Descriptor format version (unknown formats are refused).
+    /// Descriptor format version (1 = runtime tier only, 2 = + local engine).
     pub format: u32,
     /// Cache key of the runtime.
     pub hash: String,
@@ -56,13 +56,13 @@ pub fn load_descriptor(resources_dir: &Path) -> Option<RuntimeDescriptor> {
     let path = resources_dir.join("sidecar-runtime").join("runtime.json");
     let raw = std::fs::read_to_string(path).ok()?;
     let parsed: RuntimeDescriptor = serde_json::from_str(&raw).ok()?;
-    if parsed.format != 1 {
-        eprintln!(
-            "runtime descriptor format {} is not supported by this build",
-            parsed.format
-        );
-        return None;
-    }
+        if parsed.format != 1 && parsed.format != 2 {
+            eprintln!(
+                "runtime descriptor format {} is not supported by this build",
+                parsed.format
+            );
+            return None;
+        }
     if parsed.hash.is_empty() || parsed.asset.is_empty() {
         return None;
     }
@@ -389,7 +389,7 @@ mod tests {
         let file = runtime_dir.join("runtime.json");
         std::fs::write(
             &file,
-            r#"{"format":1,"hash":"h1","python_version":"3.11","requirements_sha256":"x","asset":"a.zip","url_template":"https://github.com/o/r/releases/download/v{version}/{asset}"}"#,
+            r#"{"format":2,"hash":"h1","python_version":"3.11","requirements_sha256":"x","asset":"a.zip","url_template":"https://github.com/o/r/releases/download/v{version}/{asset}","local_hash":"l1","local_asset":"l.zip"}"#,
         )
         .unwrap();
         let parsed = load_descriptor(&dir).expect("descriptor must parse");
