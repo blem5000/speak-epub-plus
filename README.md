@@ -36,6 +36,12 @@ Convert any EPUB file into a spoken-word audiobook using Microsoft Edge's free n
 > No FFmpeg? The app auto-repairs itself: it downloads a portable build to
 > `%LOCALAPPDATA%\speak-epub\ffmpeg` (per-user, no admin rights) once and
 > reuses it afterwards. A manual install below is still fine and preferred.
+>
+> The desktop app works the same way: the Python runtime it needs is
+> downloaded **once** on the first launch (≈100 MB) into
+> `%LOCALAPPDATA%\speak-epub\runtime\<hash>` and reused by every later
+> update. App updates therefore transfer only the app itself (~15 MB) — the
+> runtime is re-downloaded only when the dependencies actually change.
 
 ## Installation
 

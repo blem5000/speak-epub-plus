@@ -4,6 +4,7 @@ use std::process::Stdio;
 use tauri::{Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+mod runtime;
 mod updater;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -119,12 +120,32 @@ async fn python_sidecar_call(
     jobs: tauri::State<'_, SidecarJobs>,
     payload: RpcRequest,
 ) -> Result<RpcResponse, String> {
-    // Resolve the Python backend: prefer the bundled runtime shipped with the
-    // installer (<resource>/sidecar-runtime); fall back to the dev-checkout venv.
-    let (venv_python, cwd) = resolve_sidecar_entry(&app);
+    // Resolve the Python backend: the cached runtime tier (downloaded once),
+    // the bundled runtime, or the dev-checkout venv.
+    let (venv_python, cwd) = match resolve_sidecar_entry(&app).await {
+        Ok(entry) => entry,
+        Err(e) => {
+            eprintln!("sidecar runtime unavailable: {e}");
+            let _ = app.emit("python_sidecar_response", &RpcResponse {
+                id: payload.id.clone(),
+                result: None,
+                error: Some(RpcError {
+                    code: "RUNTIME_UNAVAILABLE".into(),
+                    message: e.clone(),
+                    retryable: Some(true),
+                }),
+            });
+            return Err(e);
+        }
+    };
 
     // Attempt to spawn sidecar as JSON-RPC over stdin/stdout
     // For spike we implement a minimal echo: if spawn fails, return error for JS fallback
+    eprintln!(
+        "sidecar interpreter: {} (code dir: {})",
+        venv_python.display(),
+        cwd.as_ref().map(|c| c.display().to_string()).unwrap_or_else(|| "-".into())
+    );
     match spawn_and_call(&venv_python, cwd.as_deref(), &payload, &app, &jobs).await {
         Ok(resp) => {
             // Also emit via event bus for AD-6 compliance
@@ -149,16 +170,65 @@ async fn emit_event(app: tauri::AppHandle, event: String, payload: serde_json::V
 /// Returns the executable path plus, for the bundled runtime, the working
 /// directory that exposes the `core`/`adapters` packages (so the inline
 /// `from core.config import handle_rpc` sidecar code can import them).
-fn resolve_sidecar_entry(app: &tauri::AppHandle) -> (PathBuf, Option<PathBuf>) {
-    // 1) Bundled self-contained runtime (installed app / release build).
+///
+/// Two tiers (see `runtime.rs`): the *runtime tier* (the CPython build) is
+/// cached in the user profile and downloaded only when its hash is missing;
+/// the *app tier* (our `core`/`adapters` code) always comes from the
+/// installed resources.
+async fn resolve_sidecar_entry(app: &tauri::AppHandle) -> Result<(PathBuf, Option<PathBuf>), String> {
     if let Ok(res_dir) = app.path().resource_dir() {
-        let python = res_dir.join("sidecar-runtime/python/python.exe");
-        if python.is_file() {
-            return (python, Some(res_dir.join("sidecar-runtime/code")));
+        let code_dir = res_dir.join("sidecar-runtime/code");
+
+        // 1) Cached runtime tier — the fast path after the first launch.
+        if let Some(descriptor) = runtime::load_descriptor(&res_dir) {
+            if let Some(python) = runtime::is_cached(&descriptor) {
+                runtime::log_line(&format!(
+                    "sidecar runtime: cached ({})",
+                    python.display()
+                ));
+                return Ok((python, Some(code_dir)));
+            }
+            // 2) Runtime not cached yet: fetch it once (it is ~100 MB and
+            //    then reused by every future app update).
+            let version = app.package_info().version.to_string();
+            match runtime::ensure_runtime(app, &descriptor, &version).await {
+                Ok(python) => {
+                    runtime::log_line(&format!(
+                        "sidecar runtime: downloaded ({})",
+                        python.display()
+                    ));
+                    return Ok((python, Some(code_dir)));
+                }
+                Err(e) => {
+                    eprintln!("runtime download failed: {e}");
+                    runtime::log_line(&format!("sidecar runtime: download failed ({e})"));
+                    // 3) A runtime bundled with the app (older builds) still works.
+                    let bundled = res_dir.join("sidecar-runtime/python/python.exe");
+                    if bundled.is_file() {
+                        return Ok((bundled, Some(code_dir)));
+                    }
+                    return Err(format!(
+                        "the Python runtime could not be prepared ({e}) — \
+                         an internet connection is needed for the first launch"
+                    ));
+                }
+            }
+        } else {
+            // No descriptor (dev checkout or a pre-two-tier build): use the
+            // bundled runtime when there is one.
+            let bundled = res_dir.join("sidecar-runtime/python/python.exe");
+            if bundled.is_file() {
+                runtime::log_line(&format!(
+                    "sidecar runtime: bundled ({})",
+                    bundled.display()
+                ));
+                return Ok((bundled, Some(code_dir)));
+            }
+            runtime::log_line("sidecar runtime: no descriptor, no bundled runtime");
         }
     }
 
-    // 2) Dev checkout — resolve the repo venv no matter where the exe is
+    // 4) Dev checkout — resolve the repo venv no matter where the exe is
     //    launched from (repo root, src-tauri/target/release, ...).
     //    The venv ships speak-epub.pth, so `from core.config import ...`
     //    resolves from any cwd once the right interpreter is found.
@@ -171,17 +241,17 @@ fn resolve_sidecar_entry(app: &tauri::AppHandle) -> (PathBuf, Option<PathBuf>) {
     const DEV_VENV_REL: &str = "venv/bin/python";
     let rel = PathBuf::from(DEV_VENV_REL);
     if rel.is_file() {
-        return (rel, None);
+        return Ok((rel, None));
     }
     if let Ok(exe) = std::env::current_exe() {
         for anc in exe.ancestors() {
             let cand = anc.join(&rel);
             if cand.is_file() {
-                return (cand, None);
+                return Ok((cand, None));
             }
         }
     }
-    (rel, None)
+    Ok((rel, None))
 }
 
 async fn spawn_and_call(

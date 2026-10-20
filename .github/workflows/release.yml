@@ -30,7 +30,7 @@ jobs:
       - name: Install frontend dependencies
         run: npm install --no-audit --no-fund
 
-      - name: Prepare bundled Python sidecar runtime
+      - name: Build the Python runtime tier
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -39,13 +39,15 @@ jobs:
           $runtime = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/sidecar-runtime'
           New-Item -ItemType Directory -Force -Path $runtime | Out-Null
 
-          # Resolve the latest self-contained CPython 3.11 build (includes pip).
-          # Authenticated so shared runner IPs never hit the anonymous API rate limit.
-          $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest' -Headers @{ 'User-Agent' = 'speak-epub-release'; 'Authorization' = "Bearer $env:GH_TOKEN" }
-          $asset = $release.assets | Where-Object { $_.name -match '^cpython-3\.11\..*x86_64-pc-windows-msvc-install_only\.tar\.gz$' } | Select-Object -First 1
-          if (-not $asset) { throw 'No matching python-build-standalone asset found' }
-          Write-Host "Downloading $($asset.name)"
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "$env:TEMP\python.tar.gz" -UseBasicParsing
+          # The interpreter build is PINNED: the runtime cache key is derived
+          # from it, so a floating "latest" would re-download the runtime on
+          # every release (exactly what the two-tier split avoids).
+          $pythonTag = '20261013'
+          $pythonVersion = '3.11.17+20261013'
+          $assetName = "cpython-$pythonVersion-x86_64-pc-windows-msvc-install_only.tar.gz"
+          $url = "https://github.com/astral-sh/python-build-standalone/releases/download/$pythonTag/$assetName"
+          Write-Host "Downloading $assetName"
+          Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\python.tar.gz" -UseBasicParsing
           tar -xzf "$env:TEMP\python.tar.gz" -C $runtime
           $py = Join-Path $runtime 'python/python.exe'
           if (-not (Test-Path $py)) { throw 'Embedded python not found after extraction' }
@@ -62,6 +64,62 @@ jobs:
           # Sanity check: ping through handle_rpc with the bundled runtime.
           $ping = & $py -c "import sys; sys.path.insert(0, r'$code'); from core.config import handle_rpc; print(handle_rpc({'id':'1','method':'ping'}))"
           Write-Host "Sidecar ping: $ping"
+
+          # Trim the runtime: pip/setuptools/ensurepip are dead weight once
+          # the dependencies are installed (-64 MB), the stdlib test/junk
+          # folders are never used at runtime.
+          # NOTE: distutils-precedence.pth belongs to setuptools — leaving it
+          # behind makes EVERY interpreter start fail (it imports the removed
+          # _distutils_hack), so it goes with the package.
+          $pyDir = Join-Path $runtime 'python'
+          foreach ($junk in @(
+              'Lib/site-packages/pip', 'Lib/site-packages/pip-',
+              'Lib/site-packages/setuptools', 'Lib/site-packages/_distutils_hack',
+              'Lib/site-packages/distutils-precedence.pth',
+              'Lib/site-packages/distutils', 'Lib/ensurepip', 'Lib/test',
+              'Lib/idlelib', 'Lib/lib2to3', 'Lib/tkinter', 'Lib/turtledemo',
+              'Scripts/pip.exe', 'Scripts/pip3.exe', 'Scripts/pip3.11.exe')) {
+            $p = Join-Path $pyDir $junk
+            if (Test-Path $p) { Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue }
+          }
+          Get-ChildItem $pyDir -Recurse -Directory -Filter '__pycache__' | ForEach-Object {
+            Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+          # Gate: the trimmed interpreter must still start cleanly and answer
+          # a ping through our backend (a leftover .pth breaks every start).
+          $trimProbe = & $py -c "import sys; print('ok')" 2>&1
+          if ($LASTEXITCODE -ne 0 -or ($trimProbe -join "`n") -ne 'ok') {
+            throw "the trimmed runtime does not start: $trimProbe"
+          }
+
+          # The descriptor: the cache key of the runtime tier. The app reads
+          # it to decide whether it already has a matching runtime.
+          $desc = Join-Path $runtime 'runtime.json'
+          & $py 'scripts/runtime_descriptor.py' --python-version $pythonVersion --requirements 'requirements.txt' --out $desc
+          $runtimeHash = (Get-Content $desc -Raw | ConvertFrom-Json).hash
+          Write-Host "Runtime hash: $runtimeHash"
+
+      - name: Package the runtime tier as a release asset
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runtime = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/sidecar-runtime'
+          $desc = Get-Content (Join-Path $runtime 'runtime.json') -Raw | ConvertFrom-Json
+          $py = Join-Path $runtime 'python/python.exe'
+          $zipBase = Join-Path $env:GITHUB_WORKSPACE ([System.IO.Path]::GetFileNameWithoutExtension($desc.asset))
+          # shutil.make_archive writes forward slashes (PowerShell's
+          # Compress-Archive writes backslashes, which non-Windows unzip
+          # treats as part of the file name -> the app would not find
+          # <cache>/<hash>/python/python.exe there).
+          & $py -c "import shutil, sys; shutil.make_archive(sys.argv[1], 'zip', root_dir=sys.argv[2], base_dir='python')" $zipBase $runtime
+          $zip = "$zipBase.zip"
+          if (-not (Test-Path $zip)) { throw "runtime archive missing: $zip" }
+          Write-Host "Runtime asset: $zip ($([math]::Round((Get-Item $zip).Length/1MB,1)) MB)"
+          # The app tier must NOT carry the interpreter: it is downloaded once
+          # and cached. Keep only our code + the descriptor.
+          Remove-Item (Join-Path $runtime 'python') -Recurse -Force
+          Get-ChildItem $runtime | ForEach-Object { Write-Host "app tier keeps: $($_.Name)" }
 
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v1
@@ -81,16 +139,23 @@ jobs:
             - **`Speak.EPUB_<version>_x64-setup.exe`** — NSIS installer
             - **`Speak.EPUB_<version>_x64_en-US.msi`** — MSI installer
             - **`Speak-EPUB-<version>-x64-portable.zip`** — portable build: unzip anywhere and run `speak-epub.exe`
+            - **`speak-epub-runtime-<hash>.zip`** — the Python runtime tier (downloaded once and cached, see below)
             - Source code archive (auto-added by GitHub)
 
-            ### Important — fully self-contained
-            This installer bundles the Python backend (embedded CPython 3.11 + all Python dependencies + the
-            `core`/`adapters` code) as app resources, so the desktop app runs on its own without requiring Python,
-            Node.js, or a project checkout.
+            ### Two tiers: the app updates without re-downloading Python
+            The installers and the portable ZIP contain the **app tier** (~15 MB: the
+            executable + the Python `core`/`adapters` code). The **runtime tier** (the
+            embedded CPython interpreter and its dependencies) is published as a
+            separate asset and downloaded **once** on the first launch, then cached in
+            the user profile (`%LOCALAPPDATA%\speak-epub\runtime\<hash>`).
+
+            The cache key is derived from the interpreter build and `requirements.txt`,
+            so an app update re-downloads the runtime only when the dependencies
+            actually changed — every other update transfers just the app tier.
 
             ### Requirements for full functionality
-            - **FFmpeg on PATH** for M4B/M4A merging (`winget install ffmpeg`)
-            - Internet access for Edge TTS and novel-site fetching
+            - **FFmpeg** — downloaded automatically on first use (or install it yourself: `winget install ffmpeg`)
+            - Internet access for Edge TTS, novel-site fetching and the first runtime download
 
       - name: Build portable zip
         shell: pwsh
@@ -116,3 +181,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload ${{ github.ref_name }} "portable/Speak-EPUB-$($env:GITHUB_REF_NAME)-x64-portable.zip" --clobber --repo ${{ github.repository }}
+
+      - name: Upload the runtime tier asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runtime = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/sidecar-runtime'
+          $desc = Get-Content (Join-Path $runtime 'runtime.json') -Raw | ConvertFrom-Json
+          $zip = Join-Path $env:GITHUB_WORKSPACE $desc.asset
+          if (-not (Test-Path $zip)) { throw "runtime asset missing: $zip" }
+          gh release upload ${{ github.ref_name }} $zip --clobber --repo ${{ github.repository }}
+          Write-Host "Uploaded $($desc.asset)"

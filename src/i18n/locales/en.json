@@ -195,6 +195,8 @@
   "updater.cancel": "Cancel",
   "updater.downloading": "Downloading {percent}%…",
   "updater.applying": "Restarting to finish the update…",
+  "runtime.download": "First launch: downloading the Python runtime {percent}%… (downloaded once)",
+  "runtime.preparing": "Preparing the Python runtime…",
   "updater.error": "Update failed: {message}",
   "updater.devBlocked": "Updates are disabled in development builds.",
   "settings.updates.title": "Updates",

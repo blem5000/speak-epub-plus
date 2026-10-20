@@ -195,6 +195,8 @@
   "updater.cancel": "Anuluj",
   "updater.downloading": "Pobieranie {percent}%…",
   "updater.applying": "Restart, aby dokończyć aktualizację…",
+  "runtime.download": "Pierwsze uruchomienie: pobieranie środowiska Python {percent}%… (pobierane tylko raz)",
+  "runtime.preparing": "Przygotowywanie środowiska Python…",
   "updater.error": "Aktualizacja nie powiodła się: {message}",
   "updater.devBlocked": "Aktualizacje są wyłączone w buildach deweloperskich.",
   "settings.updates.title": "Aktualizacje",

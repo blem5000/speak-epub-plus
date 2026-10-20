@@ -9,6 +9,7 @@ import Filters from "./components/Filters";
 import Result from "./components/Result";
 import Audiobook, { type AudioFormat, type AudiobookHandle } from "./components/Audiobook";
 import UpdaterBanner from "./components/UpdaterBanner";
+import RuntimeBanner from "./components/RuntimeBanner";
 import Queue from "./components/Queue";
 import ThrottleBadge from "./components/ThrottleBadge";
 import ProgressTrack from "./components/ProgressTrack";
@@ -597,6 +598,7 @@ export default function App(): JSX.Element {
           ) : null;
         })()}
         <UpdaterBanner />
+        <RuntimeBanner />
 
         {/* Find surface — FindInput + ResultsTable per spec 1.3 */}
         <section className="mt-6 rounded-lg border bg-card p-6 shadow-sm">

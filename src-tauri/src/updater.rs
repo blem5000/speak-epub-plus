@@ -283,6 +283,9 @@ set \"SRC=%STAGE%\"\r\n\
 if exist \"%STAGE%\\@@PRODUCT@@\\%EXE%\" set \"SRC=%STAGE%\\@@PRODUCT@@\"\r\n\
 robocopy \"%SRC%\" \"%DST%\" /E /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS@@XF@@ >> \"%LOG%\" 2>&1\r\n\
 ver>nul\r\n\
+rem The Python runtime now lives in the user profile (LOCALAPPDATA\\speak-epub\\runtime).\r\n\
+rem A runtime bundled by an older build is dead weight - drop it.\r\n\
+if exist \"%DST%\\sidecar-runtime\\python\" rmdir /s /q \"%DST%\\sidecar-runtime\\python\"\r\n\
 echo [%date% %time%] copy done, restarting >> \"%LOG%\"\r\n\
 start \"\" \"%DST%\\%EXE%\"\r\n\
 del \"%ZIP%\" >nul 2>&1\r\n\
