@@ -182,6 +182,7 @@ jobs:
             - **`Speak-EPUB-<version>-x64-portable.zip`** — portable build: unzip anywhere and run `speak-epub.exe`
             - **`speak-epub-runtime-<hash>.zip`** — the Python runtime tier (downloaded once and cached, see below)
             - **`speak-epub-local-<hash>.zip`** — the optional local TTS engine (Piper + ONNX), only needed for offline synthesis
+            - **`speak-epub-cli-<version>-x64.zip`** — the self-contained CLI (no Python needed; the runtime is downloaded on the first run)
             - **`latest.json`** + the signed updater bundle — used by the in-app updater
             - Source code archive (auto-added by GitHub)
 
@@ -225,10 +226,26 @@ jobs:
           Compress-Archive -Path "$portable/*" -DestinationPath $zip -Force
           Write-Host "Portable zip created: $zip"
 
-      - name: Upload portable zip to release
+      - name: Build the self-contained CLI package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runtime = Join-Path $env:GITHUB_WORKSPACE 'src-tauri/sidecar-runtime'
+          $py = Join-Path $runtime 'python/python.exe'
+          $desc = Join-Path $runtime 'runtime.json'
+          if (-not (Test-Path $py)) { throw 'the embedded python is missing' }
+          if (-not (Test-Path $desc)) { throw 'the runtime descriptor is missing' }
+          $zip = "portable/speak-epub-cli-$($env:GITHUB_REF_NAME)-x64.zip"
+          New-Item -ItemType Directory -Force -Path 'portable' | Out-Null
+          & $py 'scripts/make_cli_package.py' --out $zip --descriptor $desc
+          Write-Host "CLI package created: $zip"
+
+      - name: Upload the portable zip and the CLI package
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload ${{ github.ref_name }} "portable/Speak-EPUB-$($env:GITHUB_REF_NAME)-x64-portable.zip" --clobber --repo ${{ github.repository }}
+        run: |
+          gh release upload ${{ github.ref_name }} "portable/Speak-EPUB-$($env:GITHUB_REF_NAME)-x64-portable.zip" --clobber --repo ${{ github.repository }}
+          gh release upload ${{ github.ref_name }} "portable/speak-epub-cli-$($env:GITHUB_REF_NAME)-x64.zip" --clobber --repo ${{ github.repository }}
 
       - name: Upload the tier assets
         shell: pwsh

@@ -43,6 +43,28 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+
+def _bootstrap_runtime() -> None:
+    """Make sure the backend dependencies are importable.
+
+    A released CLI ships without a venv: the Python runtime tier is
+    downloaded once (the same asset the desktop app uses) and this script
+    re-runs itself with that interpreter. In a checkout with a prepared
+    venv this is a no-op.
+    """
+    try:
+        from core.bootstrap import backend_available, relaunch_with_runtime
+    except Exception:
+        return
+    if backend_available():
+        return
+    if os.environ.get("SPEAK_EPUB_RUNTIME_ACTIVE") == "1":
+        return  # already the runtime interpreter, nothing more to try
+    relaunch_with_runtime()
+
+
+_bootstrap_runtime()
+
 try:
     import ebooklib
     from ebooklib import epub
@@ -53,6 +75,8 @@ except ImportError as e:
     print(f"Missing dependency: {e}")
     print("\nInstall with:")
     print("    pip install ebooklib beautifulsoup4 edge-tts lxml")
+    print("\nOr download the self-contained CLI package (it downloads the")
+    print("Python runtime on the first run).")
     sys.exit(1)
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
