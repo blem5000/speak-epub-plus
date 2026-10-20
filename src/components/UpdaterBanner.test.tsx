@@ -17,6 +17,8 @@ vi.mock("@/lib/updater", async (importOriginal) => {
     canInstallUpdates: vi.fn(),
     openReleaseUrl: vi.fn(),
     onUpdateFound: vi.fn(() => () => {}),
+    updateInstallKind: vi.fn().mockResolvedValue("portable"),
+    installSignedUpdate: vi.fn().mockResolvedValue({ bytes: 1 }),
   };
 });
 
@@ -193,6 +195,20 @@ describe("UpdaterBanner", () => {
     });
     fireEvent.click(screen.getByTestId("updater-install"));
     expect(mocked.openReleaseUrl).toHaveBeenCalledWith("https://example/release");
+    expect(mocked.downloadUpdate).not.toHaveBeenCalled();
+  });
+
+  it("installs a signed update in place on an NSIS installation", async () => {
+    mocked.checkForUpdates.mockResolvedValue({ ...INFO, signed: true, zipUrl: "" });
+    mocked.updateInstallKind.mockResolvedValue("nsis");
+    render(<UpdaterBanner />);
+    await waitFor(() => {
+      expect(screen.getByTestId("updater-banner")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByTestId("updater-install"));
+    await waitFor(() => {
+      expect(mocked.installSignedUpdate).toHaveBeenCalled();
+    });
     expect(mocked.downloadUpdate).not.toHaveBeenCalled();
   });
 

@@ -17,10 +17,26 @@ export type UpdateInfo = {
   zipUrl: string;
   /** asset size in bytes (0 when unknown). */
   zipSize: number;
+  /** the update came from the signed manifest (Tauri updater plugin). */
+  signed?: boolean;
 };
 
 export type UpdatePrefs = { auto: boolean; skipped: string };
 export type DownloadProgress = { received: number; total: number };
+
+/** The signed update object (Tauri updater plugin), kept for the install. */
+type SignedUpdate = {
+  version: string;
+  currentVersion: string;
+  body?: string;
+  length?: number;
+  downloadAndInstall: (
+    onEvent?: (progress: { event: string; data?: { contentLength?: number; chunkLength?: number } }) => void,
+    options?: unknown
+  ) => Promise<void>;
+};
+
+let signedUpdate: SignedUpdate | null = null;
 
 type LatestRelease = {
   tag: string;
@@ -96,15 +112,68 @@ export async function fetchLatestRelease(
 }
 
 /**
- * Compare current app version against the latest GitHub Release.
- * Returns UpdateInfo only when a newer release exists, else null.
- * Silent on network errors / rate limits (no banner).
+ * The signed update check (Tauri updater plugin).
+ *
+ * The release publishes `latest.json` signed with the release key; the app
+ * verifies that signature with the public key baked into the binary, so a
+ * tampered manifest (or a MITM) can never point the app at another payload.
+ * Returns null when there is no update, the plugin is unavailable, or the
+ * manifest does not verify.
+ */
+async function checkSignedUpdate(): Promise<UpdateInfo | null> {
+  try {
+    const mod = await import("@tauri-apps/plugin-updater");
+    const update = (await mod.check()) as unknown as SignedUpdate;
+    if (!update || !update.version) return null;
+    signedUpdate = update;
+    // record the result — the GUI has no console, the log file is the only
+    // way to see that the signed manifest verified (or did not)
+    void logToApp(`signed update check: ${update.currentVersion} -> ${update.version} (manifest verified)`);
+    return {
+      current: normalizeVersion(update.currentVersion ?? ""),
+      latest: normalizeVersion(update.version),
+      url: `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/tag/v${update.version}`,
+      notes: typeof update.body === "string" ? update.body.slice(0, 2000) : "",
+      available: true,
+      zipUrl: "",
+      zipSize: typeof update.length === "number" ? update.length : 0,
+      signed: true,
+    };
+  } catch (err) {
+    // no update, offline, or the signature did not verify
+    signedUpdate = null;
+    void logToApp(
+      `signed update check: none (${err instanceof Error ? err.message : String(err)})`
+    );
+    return null;
+  }
+}
+
+/** Write a line into the app log file (Rust side). */
+async function logToApp(line: string): Promise<void> {
+  try {
+    await invoke("app_log_line", { line });
+  } catch {
+    // logging is best-effort
+  }
+}
+
+/**
+ * Compare current app version against the latest release.
+ * The signed manifest is preferred; the GitHub API is the fallback (it also
+ * provides the portable ZIP that the portable build installs from).
  */
 export async function checkForUpdates(
   currentVersion: string,
   fetchFn: typeof fetch = globalThis.fetch
 ): Promise<UpdateInfo | null> {
   if (!currentVersion || !currentVersion.trim()) return null;
+  const signed = await checkSignedUpdate();
+  if (signed) {
+    // the signed manifest wins: it is verified against the release key
+    if (compareVersions(currentVersion, signed.latest) < 0) return signed;
+    return null;
+  }
   const latest = await fetchLatestRelease(fetchFn);
   if (!latest) return null;
   const available = compareVersions(currentVersion, latest.tag) < 0;
@@ -117,6 +186,7 @@ export async function checkForUpdates(
     available: true,
     zipUrl: latest.zipUrl,
     zipSize: latest.zipSize,
+    signed: false,
   };
 }
 
@@ -200,6 +270,45 @@ export async function manualCheck(): Promise<UpdateInfo | null> {
 /** Install is disabled on vite dev servers — only real builds can self-update. */
 export function canInstallUpdates(): boolean {
   return import.meta.env.PROD || import.meta.env.MODE === "test";
+}
+
+/**
+ * How the app was installed: "nsis" (an NSIS install — the signed updater
+ * can replace it in place) or "portable" (a zip the user unpacked — the
+ * updater falls back to the portable package).
+ */
+export async function updateInstallKind(): Promise<"nsis" | "portable"> {
+  try {
+    const kind = await invoke<string>("update_install_kind");
+    return kind === "nsis" ? "nsis" : "portable";
+  } catch {
+    return "portable";
+  }
+}
+
+/**
+ * Install a signed update in place (Tauri updater plugin).
+ *
+ * The plugin downloads the release artifact, verifies its signature against
+ * the key baked into the binary and hands it to the installer. Only works
+ * for an NSIS installation — a portable build has no installer to run.
+ */
+export async function installSignedUpdate(
+  opts: { onProgress?: (p: DownloadProgress) => void } = {}
+): Promise<{ bytes: number }> {
+  const update = signedUpdate;
+  if (!update) throw new Error("no signed update available");
+  let received = 0;
+  const total = typeof update.length === "number" ? update.length : 0;
+  await update.downloadAndInstall((progress) => {
+    if (progress?.event === "Progress") {
+      received += progress.data?.chunkLength ?? 0;
+      opts.onProgress?.({ received, total: progress.data?.contentLength ?? total });
+    } else if (progress?.event === "Started") {
+      opts.onProgress?.({ received: 0, total: progress.data?.contentLength ?? total });
+    }
+  });
+  return { bytes: received || total };
 }
 
 /**

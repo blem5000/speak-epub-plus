@@ -161,11 +161,15 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # signs the updater artifact and publishes latest.json (the signed
+          # manifest the in-app updater verifies before downloading)
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Speak EPUB ${{ github.ref_name }}"
           releaseDraft: true
           prerelease: false
+          includeUpdaterJson: true
           releaseBody: |
             ## Speak EPUB ${{ github.ref_name }}
 
@@ -177,7 +181,13 @@ jobs:
             - **`Speak-EPUB-<version>-x64-portable.zip`** — portable build: unzip anywhere and run `speak-epub.exe`
             - **`speak-epub-runtime-<hash>.zip`** — the Python runtime tier (downloaded once and cached, see below)
             - **`speak-epub-local-<hash>.zip`** — the optional local TTS engine (Piper + ONNX), only needed for offline synthesis
+            - **`latest.json`** + the signed updater bundle — used by the in-app updater
             - Source code archive (auto-added by GitHub)
+
+            ### Automatic updates
+            The app checks for updates on startup and can install them in place
+            (Settings → "Sprawdź aktualizacje"). The update manifest is signed,
+            so the app only trusts an update that the release pipeline signed.
 
             ### Two tiers: the app updates without re-downloading Python
             The installers and the portable ZIP contain the **app tier** (~15 MB: the

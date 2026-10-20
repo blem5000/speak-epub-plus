@@ -37,5 +37,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFGNkU4MzE1NjE4QjEyQUIKUldTckVvdGhGWU51SDRsQlFVbGJKaFY5TTRveHpTa3VDNHRsVnJCOTFaR3F2eGZRSzlUUXVLR3IK",
+      "endpoints": [
+        "https://github.com/blem5000/speak-epub-plus/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

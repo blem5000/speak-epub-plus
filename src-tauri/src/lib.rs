@@ -428,6 +428,12 @@ except Exception as e:
     }
 }
 
+/// Append a line to the app log (the GUI has no console).
+#[tauri::command]
+fn app_log_line(line: String) {
+    runtime::log_line(&line);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -436,6 +442,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        // signed in-app updates: the release publishes a signed latest.json
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(updater::UpdateState::default())
         .manage(SidecarJobs::default())
         .invoke_handler(tauri::generate_handler![
@@ -444,7 +452,9 @@ pub fn run() {
             cancel_sidecar_job,
             updater::update_download_asset,
             updater::update_discard,
-            updater::apply_update
+            updater::apply_update,
+            updater::update_install_kind,
+            app_log_line
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -35,6 +35,23 @@ fn sanitize_tag(tag: &str) -> String {
         .collect()
 }
 
+/// How the app was installed: "nsis" or "portable".
+///
+/// The signed updater (Tauri plugin) replaces an NSIS installation in place.
+/// A portable build (a zip the user unpacked) has no installer, so it falls
+/// back to the portable package + the robocopy script.
+#[tauri::command]
+pub fn update_install_kind() -> String {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if dir.join("uninstall.exe").is_file() {
+                return "nsis".to_string();
+            }
+        }
+    }
+    "portable".to_string()
+}
+
 /// Downloads the portable ZIP asset into a Rust-managed temp file.
 /// Emits `updateDownloadProgress` ({ received, total }); returns bytes written.
 /// The webview never supplies filesystem paths and only release URLs are

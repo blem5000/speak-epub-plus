@@ -9,9 +9,11 @@ import {
   downloadUpdate,
   getCurrentVersion,
   getUpdatePrefs,
+  installSignedUpdate,
   onUpdateFound,
   openReleaseUrl,
   skipVersion,
+  updateInstallKind,
   type DownloadProgress,
   type UpdateInfo,
 } from "@/lib/updater";
@@ -64,7 +66,9 @@ export default function UpdaterBanner(): JSX.Element | null {
   if (!info) return null;
 
   const handleInstall = (): void => {
-    if (!info.zipUrl) {
+    // no package to install (unsigned release without a portable ZIP) ->
+    // send the user to the release page
+    if (!info.signed && !info.zipUrl) {
       void openReleaseUrl(info.url);
       return;
     }
@@ -80,6 +84,18 @@ export default function UpdaterBanner(): JSX.Element | null {
     setProgress({ received: 0, total: info.zipSize });
     void (async () => {
       try {
+        // an NSIS installation is updated in place with the SIGNED artifact
+        // (the plugin verifies the signature); a portable build has no
+        // installer and falls back to the release page
+        const kind = await updateInstallKind();
+        if (info.signed) {
+          if (kind === "nsis") {
+            await installSignedUpdate({ onProgress: setProgress });
+          } else {
+            void openReleaseUrl(info.url);
+          }
+          return;
+        }
         await downloadUpdate(info, { signal: ac.signal, onProgress: setProgress });
         if (!aliveRef.current) return;
         setPhase("applying");
