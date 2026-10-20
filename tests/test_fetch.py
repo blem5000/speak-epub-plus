@@ -67,11 +67,19 @@ class TestCacheKey:
         k2 = cache_key("https://www.novelphoenix.com./novel/123")
         assert k1 == k2
 
-    def test_normalize_query_fragment_stripped(self):
+    def test_normalize_query_kept_fragment_stripped(self):
+        # the query is part of the resource: a site that addresses its
+        # chapters with ?chapter=N would otherwise serve chapter 1 for all
         k1 = cache_key("https://www.novelphoenix.com/novel/123")
         k2 = cache_key("https://www.novelphoenix.com/novel/123?query=1#frag")
         k3 = cache_key("https://www.novelphoenix.com/novel/123#section")
-        assert k1 == k2 == k3
+        assert k1 != k2
+        assert k1 == k3
+
+    def test_query_parameter_order_does_not_matter(self):
+        k1 = cache_key("https://www.novelphoenix.com/novel/123?a=1&b=2")
+        k2 = cache_key("https://www.novelphoenix.com/novel/123?b=2&a=1")
+        assert k1 == k2
 
     def test_port_distinct(self):
         # default ports are identical resources — same key (M1 review fix);
@@ -286,7 +294,7 @@ class TestFetchOne:
         assert any(abs(s - 2.3) < 0.01 for s in slept)
         assert any("429" in l for l in logs)
 
-    def test_fetch_one_after_5_retries_LIST_FAILED(self, tmp_path):
+    def test_fetch_one_after_5_retries_FETCH_FAILED(self, tmp_path):
         url = "https://www.novelphoenix.com/novel/123/chapter/99"
         adapter = Mock()
         adapter.fetchChapter = Mock(side_effect=lambda u: (_ for _ in ()).throw(_adapter_fetch_failed(429, u, "FETCH_FAILED: 429 still")))
@@ -294,7 +302,9 @@ class TestFetchOne:
         with patch("core.fetch.time.sleep", side_effect=lambda s: slept.append(s)), patch("core.fetch.random.uniform", return_value=0.3):
             with pytest.raises(AdapterError) as exc:
                 fetch_one(url, adapter, cache_dir=tmp_path)
-            assert exc.value.code == "LIST_FAILED"
+            # a chapter BODY failure is FETCH_FAILED (LIST_FAILED is for the
+            # chapter listing — the GUI shows a different hint for each)
+            assert exc.value.code == "FETCH_FAILED"
         assert len(slept) == 4  # 5 attempts => 4 sleeps between
         # each backoff min(20,2*attempt) : 2,4,6,8 +0.3
         expected = [2.3, 4.3, 6.3, 8.3]

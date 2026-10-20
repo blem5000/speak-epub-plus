@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, Optional
 
 
 @dataclass(frozen=True)
@@ -16,11 +16,12 @@ class Selectors:
     end: Optional[str] = None
 
     def __post_init__(self) -> None:
-        # normalize empty string to None so querySelector doesn't throw
-        if self.start == "":
-            object.__setattr__(self, "start", None)
-        if self.end == "":
-            object.__setattr__(self, "end", None)
+        # normalize empty/whitespace strings to None so querySelector doesn't
+        # throw on a blank selector
+        for field in ("start", "end"):
+            value = getattr(self, field)
+            if isinstance(value, str) and not value.strip():
+                object.__setattr__(self, field, None)
 
 
 @dataclass(frozen=True)
@@ -36,8 +37,9 @@ class SearchResult:
 @dataclass(frozen=True)
 class ChapterInfo:
     index: int
-    title: str
     url: str
+    # the title is optional: the layers fall back to the URL or "Chapter N"
+    title: str = ""
 
 
 @dataclass(frozen=True)
@@ -50,11 +52,16 @@ class ChapterContent:
 
 
 class AdapterError(Exception):
-    """Adapter failure with machine-readable code (e.g. LIST_FAILED)."""
+    """Adapter failure with machine-readable code (e.g. LIST_FAILED).
 
-    def __init__(self, message: str, code: str = "UNKNOWN") -> None:
+    `details` carries structured data (the list of missing chapter URLs, the
+    offending range, ...) so callers do not have to parse the message.
+    """
+
+    def __init__(self, message: str, code: str = "UNKNOWN", details: Any = None) -> None:
         super().__init__(message)
         self.code = code
+        self.details = details if details is not None else {}
 
 
 class ScraperPort(ABC):

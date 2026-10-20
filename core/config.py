@@ -15,6 +15,9 @@ from typing import Any, Dict, List
 #: The GUI cannot cancel a single RPC, so the sidecar must not wait forever.
 PREVIEW_TIMEOUT_SEC = 120.0
 
+#: Cap for the raw HTML returned by previewChapter (the page can be megabytes).
+_MAX_PREVIEW_HTML = 400_000
+
 # ---------------------------------------------------------------------------
 # Venv resolution — OS-aware (AGENTS.md)
 # ---------------------------------------------------------------------------
@@ -67,6 +70,7 @@ DEFAULT_STORE: Dict[str, Any] = {
     "locale": "",
     "engine": "auto",
     "localVoice": "",
+    "localCuda": False,
     "dialogueVoice": "",
     "normalizeAudio": False,
     "trimSilence": False,
@@ -250,6 +254,53 @@ def save_store(patch: Any) -> Dict[str, Any]:
 # JSON-RPC handler — stdin/stdout primary (AD-4 spike)
 # ---------------------------------------------------------------------------
 
+#: The sites the app may talk to. One place — the rule used to be copy-pasted
+#: into nine call sites, which had already started to diverge.
+ALLOWED_HOSTS = ("novelphoenix.com",)
+
+
+def _host_allowed(host: str) -> bool:
+    """Is this host one of the supported sites?"""
+    if not isinstance(host, str) or not host.strip():
+        return False
+    h = host.strip().lower().rstrip(".")
+    for allowed in ALLOWED_HOSTS:
+        if h == allowed or h == "www." + allowed or h.endswith("." + allowed):
+            return True
+    return False
+
+
+def _host_allowed_from_url(url: str) -> bool:
+    """Host check for a URL (the host is taken without userinfo/port)."""
+    try:
+        from urllib.parse import urlparse as _up
+
+        parsed = _up(url)
+        return _host_allowed((parsed.hostname or "").lower().rstrip("."))
+    except Exception:
+        return False
+
+
+def _parse_epub_idx_pair(from_p: Any, to_p: Any, default_to: Optional[int] = None) -> Tuple[int, Optional[int]]:
+    """Normalize a from/to pair (one place for the four copies)."""
+    def _one(v: Any) -> Optional[int]:
+        if v is None:
+            return None
+        try:
+            iv = int(str(v).strip())
+        except (TypeError, ValueError):
+            return None
+        return iv if iv >= 1 else None
+
+    f = _one(from_p) or 1
+    t = _one(to_p)
+    if t is None:
+        t = default_to if default_to is not None else f
+    if f > t:
+        f, t = t, f
+    return f, t
+
+
 def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
     """
     Handle a single JSON-RPC request dict {id, method, params}.
@@ -374,8 +425,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must contain host"}}
             host_no_port = host  # already stripped
             # host guard — only novelphoenix allowed for real listChapters; others -> LIST_FAILED (jak search spec)
-            allowed = host_no_port == "novelphoenix.com" or host_no_port == "www.novelphoenix.com" or host_no_port.endswith(".novelphoenix.com")
-            if not allowed:
+            if not _host_allowed(host_no_port):
                 return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {host_no_port}"}}
         except Exception as e:
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
@@ -547,7 +597,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 host = (parsed.hostname or "").lower().rstrip(".")
                 if not host:
                     return None, "VALUE_ERROR", "url must contain host"
-                allowed = host == "novelphoenix.com" or host == "www.novelphoenix.com" or host.endswith(".novelphoenix.com")
+                allowed = _host_allowed(host)
                 if not allowed:
                     return None, "LIST_FAILED", f"unsupported host {host}"
                 return u, None, None
@@ -935,6 +985,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             voice = "en-US-AndrewNeural"
         # Build jobs list
         jobs: list = []
+        rejected: list = []
         if isinstance(jobs_param, list) and jobs_param:
             # Check if first element is dict with PartJob fields
             try:
@@ -950,6 +1001,14 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                         outp = j.get("output_path", j.get("outputPath", j.get("path")))
                         is_final = j.get("is_final_chapter_file", j.get("isFinal", j.get("is_final", False)))
                         if cn is None or pn is None or outp is None:
+                            # a malformed job is REPORTED, not silently dropped
+                            rejected.append({"reason": "missing chapter/part/output_path", "job": j})
+                            continue
+                        if not isinstance(outp, str) or not outp.strip():
+                            rejected.append({"reason": "output_path must be a non-empty string", "job": j})
+                            continue
+                        if "\0" in outp:
+                            rejected.append({"reason": "output_path contains a NUL byte", "job": j})
                             continue
                         try:
                             # guard part_count: must be >=1
@@ -1086,7 +1145,12 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     emit_fn("done", {"result": "ok"})
                 except Exception:
                     pass
-            return {"id": rid, "result": {"done": True, "logs": tts_logs, "jobs": len(jobs)}}
+            result = {"done": True, "logs": tts_logs, "jobs": len(jobs)}
+            if rejected:
+                # the caller must know that some jobs were dropped
+                result["rejected"] = rejected
+                tts_logs.append(f"rejected {len(rejected)} malformed job(s)")
+            return {"id": rid, "result": result}
         except Exception as e:
             msg = str(e)
             if emit_fn:
@@ -1350,7 +1414,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     host = (p.hostname or "").lower().rstrip(".")
                     if not host:
                         return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must contain host"}}
-                    allowed = host == "novelphoenix.com" or host == "www.novelphoenix.com" or host.endswith(".novelphoenix.com")
+                    allowed = _host_allowed(host)
                     if not allowed:
                         return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {host}"}}
                 except Exception as e:
@@ -1385,7 +1449,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 host = (p.hostname or "").lower().rstrip(".")
                 if not host:
                     return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must contain host"}}
-                allowed = host == "novelphoenix.com" or host == "www.novelphoenix.com" or host.endswith(".novelphoenix.com")
+                allowed = _host_allowed(host)
                 if not allowed:
                     return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {host}"}}
             except Exception as e:
@@ -1518,7 +1582,10 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 filtered_text = cleaned_text
             return {"id": rid, "result": {
                 "url": url_param,
-                "originalHtml": raw_html,
+                # the raw page can be megabytes — the preview only needs the
+                # head of it (an unbounded payload stalls the GUI pipe)
+                "originalHtml": raw_html[:_MAX_PREVIEW_HTML],
+                "originalHtmlTruncated": len(raw_html) > _MAX_PREVIEW_HTML,
                 "originalText": original_text[:8000],
                 "html": cleaned_html,
                 "text": cleaned_text,
@@ -1542,7 +1609,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "invalid site or url"}}
                 site = "novelphoenix.com"
             # host allowlist even for site-only save (prevent arbitrary override)
-            allowed_site = site == "novelphoenix.com" or site.endswith(".novelphoenix.com")
+            allowed_site = _host_allowed(site)
             if not allowed_site:
                 return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {site}"}}
             # validate start/end selectors syntax by trying soup.select_one dummy (optional) — but delegate to clean validation
@@ -1588,7 +1655,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 ):
                     return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "invalid site or url"}}
                 site = "novelphoenix.com"
-            allowed_site = site == "novelphoenix.com" or site.endswith(".novelphoenix.com")
+            allowed_site = _host_allowed(site)
             if not allowed_site:
                 return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {site}"}}
             try:
@@ -1802,7 +1869,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             host_epub = (parsed_epub.hostname or "").lower().rstrip(".")
             if not host_epub:
                 return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must contain host"}}
-            allowed_epub = host_epub == "novelphoenix.com" or host_epub == "www.novelphoenix.com" or host_epub.endswith(".novelphoenix.com")
+            allowed_epub = _host_allowed(host_epub)
             if not allowed_epub:
                 return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {host_epub}"}}
         except Exception as e:
@@ -1960,7 +2027,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     h2 = (p2.hostname or "").lower().rstrip(".")
                     if not h2:
                         return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"url must contain host {u}"}}
-                    allowed2 = h2 == "novelphoenix.com" or h2 == "www.novelphoenix.com" or h2.endswith(".novelphoenix.com")
+                    allowed2 = _host_allowed(h2)
                     if not allowed2:
                         return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {h2}"}}
                 except Exception as e:
@@ -2226,6 +2293,10 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                             ranged.append(c)
                     if ranged:
                         pool = ranged
+                if not pool:
+                    # no file matches this novel — "exists: false" instead of
+                    # a crash from max() on an empty sequence
+                    return {"id": rid, "result": {"exists": False, "path": None}}
                 latest = max(pool, key=lambda p: p.stat().st_mtime)
                 size = latest.stat().st_size
             except OSError:
@@ -2461,6 +2532,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         dialogue_voice_p = params.get("dialogueVoice", params.get("dialogue_voice"))
         normalize_audio_p = params.get("normalizeAudio", params.get("normalize_audio"))
         trim_silence_p = params.get("trimSilence", params.get("trim_silence"))
+        cuda_p = params.get("cuda", params.get("localCuda", params.get("local_cuda")))
         bitrate_p = params.get("audioBitrate", params.get("audio_bitrate", params.get("bitrate")))
         parallel_p = params.get("parallel")
         retries_p = params.get("retries")
@@ -2479,7 +2551,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             host_audio = (parsed_audio.hostname or "").lower().rstrip(".")
             if not host_audio:
                 return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "url must contain host"}}
-            if not (host_audio == "novelphoenix.com" or host_audio == "www.novelphoenix.com" or host_audio.endswith(".novelphoenix.com")):
+            if not _host_allowed(host_audio):
                 return {"id": rid, "error": {"code": "LIST_FAILED", "message": f"unsupported host {host_audio}"}}
         except Exception as e:
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
@@ -2530,6 +2602,17 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 trim_silence_p = False
         else:
             trim_silence_p = bool(trim_silence_p)
+        # the local engine may run on the GPU (onnxruntime-gpu); the flag is
+        # honoured by core.tts_local, which falls back to the CPU. The
+        # sidecar is a fresh process per RPC, so the env var is scoped to it.
+        if cuda_p is None:
+            try:
+                cuda_p = bool(store_audio.get("localCuda", False)) if isinstance(store_audio, dict) else False
+            except Exception:
+                cuda_p = False
+        else:
+            cuda_p = bool(cuda_p)
+        os.environ["SPEAK_EPUB_PIPER_CUDA"] = "1" if cuda_p else "0"
         if bitrate_p is None:
             try:
                 bitrate_p = str(store_audio.get("audioBitrate", "32k")) if isinstance(store_audio, dict) else "32k"
@@ -3032,7 +3115,7 @@ def _handle_list_chapters_count(rid: Any, url: str) -> Dict[str, Any]:
             site = str(guess)
         else:
             # if host itself is novelphoenix, treat as known even if guess missed — exact suffix check prevents spoof
-            if host == "novelphoenix.com" or host.endswith(".novelphoenix.com"):
+            if _host_allowed(host):
                 site = "novelphoenix.com"
                 guess = "novelphoenix"
             else:

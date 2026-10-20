@@ -42,7 +42,12 @@ export default function ChapterList({
   // keep it collapsed by default, RangeBar stays visible.
   const [expanded, setExpanded] = useState(false);
   const rowRefs = useRef<Array<HTMLTableRowElement | null>>([]);
-  const displayChapters = N > 500 && !showAll ? chapters.slice(0, 100) : chapters;
+  // a long book renders in blocks: "Show all" would freeze the GUI with
+  // 800+ rows, so the list grows in steps instead
+  const ROW_BLOCK = 100;
+  const [visibleLimit, setVisibleLimit] = useState(ROW_BLOCK);
+  const displayChapters =
+    N > 500 ? chapters.slice(0, showAll ? Math.max(ROW_BLOCK, visibleLimit) : ROW_BLOCK) : chapters;
 
   useEffect(() => {
     const len = displayChapters.length;
@@ -182,16 +187,21 @@ export default function ChapterList({
           aria-live="polite"
         >
           <span>
-            {showingAll ? `Showing all ${N} rows (windowing deferred)` : `Showing 100 of ${N} rows — windowing deferred`}
+            {showingAll
+              ? `Showing ${displayChapters.length} of ${N} rows`
+              : `Showing 100 of ${N} rows — windowing deferred`}
           </span>
-          {!showingAll ? (
+          {displayChapters.length < N ? (
             <button
               type="button"
-              onClick={() => setShowAll(true)}
+              onClick={() => {
+                setShowAll(true);
+                setVisibleLimit((prev) => prev + ROW_BLOCK);
+              }}
               className="rounded-md border bg-card px-3 py-1 text-body-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               data-testid="virtualized-show-all"
             >
-              Show all
+              {displayChapters.length < N ? `Show more (${Math.min(ROW_BLOCK, N - displayChapters.length)} more)` : "Show all"}
             </button>
           ) : null}
         </div>

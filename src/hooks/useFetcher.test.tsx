@@ -143,7 +143,7 @@ describe("useFetcher hook", () => {
     expect(result.current.fetching).toBe(false);
   });
 
-  it("handles logLine event badge pominięto via event bus", async () => {
+  it("logLine events only feed the log pane (the badge comes from the data)", async () => {
     let logCb: (p: { line: string }) => void = () => {};
     mockOnLogLine.mockImplementation((cb) => {
       logCb = cb as unknown as (p: { line: string }) => void;
@@ -155,8 +155,32 @@ describe("useFetcher hook", () => {
     act(() => {
       logCb({ line: "pominięto 5, wykryto 3 nowe" });
     });
-    await waitFor(() => expect(result.current.badge).toBe("pominięto 5, wykryto 3 nowe"));
-    expect(result.current.logs).toContain("pominięto 5, wykryto 3 nowe");
+    // the line lands in the log pane ...
+    await waitFor(() => expect(result.current.logs).toContain("pominięto 5, wykryto 3 nowe"));
+    // ... but the badge is NOT derived from Polish text any more (it broke
+    // the English UI)
+    expect(result.current.badge).toBeNull();
+  });
+
+  it("formats the badge from the structured badge data", async () => {
+    const urls = Array.from({ length: 100 }, (_, i) => `https://www.novelphoenix.com/novel/123/chapter/${i + 1}`);
+    mockCallSidecar.mockResolvedValue({
+      id: "1",
+      result: {
+        chapters: [],
+        skipped: 20,
+        total: 100,
+        badgeData: { skipped: 20, from: 21, to: 100, total: 100 },
+      },
+    });
+    const { result } = renderHook(() => useFetcher());
+    await act(async () => {
+      await result.current.start({ urls, novelUrl: "https://www.novelphoenix.com/novel/123", from: 1, to: 100 });
+    });
+    await waitFor(() => expect(result.current.fetching).toBe(false));
+    expect(result.current.badge).toContain("20");
+    expect(result.current.badge).toContain("21");
+    expect(result.current.badge).toContain("100");
   });
 
   it("chapterStatus events update statuses", async () => {

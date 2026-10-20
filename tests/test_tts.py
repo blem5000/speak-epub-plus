@@ -3254,6 +3254,18 @@ def test_postprocess_chapter_file_flags(tmp_path):
 
     def fake_run(args, check=True, **kwargs):
         cmds.append(" ".join(args))
+        # the loudness MEASUREMENT pass prints the JSON to stderr ("-")
+        if args[-1] == "-":
+            return type(
+                "P",
+                (),
+                {
+                    "stderr": '{"input_i":"-22.2","input_tp":"-18.4",'
+                    '"input_lra":"0.0","input_thresh":"-32.2"}',
+                    "stdout": "",
+                    "returncode": 0,
+                },
+            )()
         Path(args[-1]).write_bytes(b"processed")
 
     with patch("core.tts.ffmpeg_available", return_value=True):
@@ -3263,18 +3275,25 @@ def test_postprocess_chapter_file_flags(tmp_path):
                 assert postprocess_chapter_file(str(path), normalize_audio=False) is False  # nothing to do
                 assert postprocess_chapter_file(str(path), normalize_audio=False, trim_silence=True) is True
 
-    assert "loudnorm" in cmds[0] and "silenceremove" not in cmds[0]
-    assert "silenceremove" in cmds[1] and "loudnorm" not in cmds[1]
-    assert cmds[0].count("24000") >= 1 and "48k" in cmds[0]
+    # [0] the loudness measurement, [1] the normalize re-encode, [2] the trim
+    assert len(cmds) == 3, cmds
+    assert "loudnorm" in cmds[0] and "print_format=json" in cmds[0]
+    assert "silenceremove" not in cmds[0]
+    assert "loudnorm" in cmds[1] and "silenceremove" not in cmds[1]
+    # two-pass loudnorm: the measured values are applied linearly
+    assert "linear=true" in cmds[1]
+    assert "measured_I=" in cmds[1]
+    assert "silenceremove" in cmds[2] and "loudnorm" not in cmds[2]
+    assert cmds[1].count("24000") >= 1 and "48k" in cmds[1]
     # trim must NOT use stop_periods (verified destructive: removes ALL
     # silence >= threshold anywhere in the stream in ffmpeg 8) — the repaired
     # chain trims via areverse + leading-only filter, keeping natural pacing
-    assert "stop_periods" not in cmds[1]
-    assert cmds[1].count("areverse") == 2 and "start_silence=2.0" in cmds[1]
+    assert "stop_periods" not in cmds[2]
+    assert cmds[2].count("areverse") == 2 and "start_silence=2.0" in cmds[2]
     # the output file has no usable extension (".postmp") — ffmpeg cannot infer
     # a muxer from it, so the format must be given explicitly (regression:
     # "Unable to choose an output format" killed every post-processed chapter)
-    assert "-f mp3" in cmds[0] and "-f mp3" in cmds[1]
+    assert "-f mp3" in cmds[1]
 
 
 def test_postprocess_chapter_file_failure_keeps_original(tmp_path, capsys):

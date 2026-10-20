@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { t } from "@/i18n";
 import {
   callSidecar,
   CANCEL_METHODS_FETCH,
@@ -122,9 +123,6 @@ export function useFetcher(): UseFetcherReturn {
         const u2 = await onLogLine((payload: LogLineEvent) => {
           if (cancelled) return;
           setLogs((prev) => [...prev, payload.line].slice(-200));
-          if (payload.line.includes("pominięto") || payload.line.includes("wykryto")) {
-            setBadge(payload.line);
-          }
         });
         unlistenLog = u2;
         const u3 = await onChapterStatus((payload: ChapterStatusEvent) => {
@@ -246,18 +244,30 @@ export function useFetcher(): UseFetcherReturn {
           skipped = (obj.skipped as number) ?? 0;
           const chapters = (obj.chapters as unknown[]) ?? [];
           fetchedCount = chapters.length;
-          badgeMsg = (obj.badge as string | null) ?? null;
+          // the structured badge is formatted in the user's language; the
+          // Polish text is only a fallback (it used to be pattern-matched,
+          // which silently broke the English UI)
+          const badgeData = obj.badgeData as
+            | { skipped?: number; from?: number | null; to?: number | null }
+            | undefined;
+          if (badgeData && typeof badgeData === "object") {
+            const bSkipped = Number(badgeData.skipped ?? 0);
+            const bFrom = typeof badgeData.from === "number" ? badgeData.from : null;
+            const bTo = typeof badgeData.to === "number" ? badgeData.to : null;
+            if (bSkipped > 0 && bFrom !== null && bTo !== null) {
+              badgeMsg = t("fetch.badge.range", { skipped: String(bSkipped), from: String(bFrom), to: String(bTo) });
+            } else if (bSkipped > 0) {
+              badgeMsg = t("fetch.badge.skipped", { skipped: String(bSkipped) });
+            } else {
+              badgeMsg = null;
+            }
+          }
           // logs from backend — cap to 200
           if (Array.isArray(obj.logs)) {
             const lines = (obj.logs as string[]).slice(-200);
             setLogs((prev) => [...prev, ...lines].slice(-200));
-            for (const line of lines) {
-              if (line.includes("pominięto") || line.includes("wykryto")) {
-                badgeMsg = line;
-              }
-            }
           }
-          if (obj.badge && typeof obj.badge === "string") {
+          if (!badgeMsg && obj.badge && typeof obj.badge === "string") {
             badgeMsg = obj.badge as string;
           }
           if (Array.isArray(obj.throttles) && obj.throttles.length > 0) {

@@ -32,8 +32,9 @@ def _normalize_cache_key(url: str) -> str:
     """Normalize url for cache key to avoid duplicate entries for same novel.
 
     Host lower + port distinct (except default :80/:443 which are stripped),
-    trailing dot stripped, query/fragment stripped,
-    path trailing slash/dot stripped, scheme lower.
+    trailing dot stripped, path trailing slash/dot stripped, scheme lower.
+    The QUERY is kept: a site that addresses its chapters with ?chapter=N
+    would otherwise serve chapter 1's HTML for every chapter.
     Single source — core/config.py delegates here (M1 dedupe).
     """
     try:
@@ -50,7 +51,13 @@ def _normalize_cache_key(url: str) -> str:
             port = None
         netloc = host + (f":{port}" if port else "")
         path = p.path.rstrip("/").rstrip(".")
-        normalized = urlunparse((scheme, netloc, path, "", "", ""))
+        # the query is part of the resource (the fragment never is); the
+        # parameters are sorted so ?a=1&b=2 and ?b=2&a=1 share an entry
+        query = p.query or ""
+        if query:
+            pairs = sorted(part for part in query.split("&") if part)
+            query = "&".join(pairs)
+        normalized = urlunparse((scheme, netloc, path, query, "", ""))
         return normalized.rstrip("/.")
     except Exception:
         try:
@@ -200,11 +207,16 @@ def prune_cache(
                 files.append((st.st_mtime, f, st.st_size))
             except OSError:
                 continue
-        # TTL first
-        ttl_sec = max(0, ttl_days) * 86400
+        # TTL first — a NEGATIVE ttl disables the TTL, 0 means "delete
+        # everything" (the old behaviour of ttl_days=0 was surprising:
+        # it wiped the whole cache)
+        if ttl_days < 0:
+            ttl_sec = None
+        else:
+            ttl_sec = max(0, ttl_days) * 86400
         for mtime, f, size in files:
             try:
-                if ttl_days >= 0 and (now - mtime) > ttl_sec:
+                if ttl_sec is not None and (now - mtime) > ttl_sec:
                     f.unlink(missing_ok=True)
                     # the cover file lives in the same directory — it must go
                     # too, or the directory can never be removed
@@ -535,9 +547,13 @@ def fetch_one(
                 try:
                     from core.ports import AdapterError
 
-                    raise AdapterError(f"LIST_FAILED: {url} {msg}", code="LIST_FAILED") from e
+                    # a chapter BODY failure is not a listing failure — but an
+                    # error that already carries a code (e.g. the adapter's
+                    # LIST_FAILED for an unsupported host) keeps it
+                    _code = code or "FETCH_FAILED"
+                    raise AdapterError(f"{_code}: {url} {msg}", code=_code) from e
                 except ImportError:
-                    raise Exception(f"LIST_FAILED: {url} {msg}") from e
+                    raise Exception(f"{code or 'FETCH_FAILED'}: {url} {msg}") from e
 
             if attempt >= max_retries:
                 if on_status:
@@ -571,9 +587,11 @@ def fetch_one(
                 try:
                     from core.ports import AdapterError
 
-                    raise AdapterError(f"LIST_FAILED: {url} {msg}", code="LIST_FAILED") from e
+                    # a chapter BODY failure is not a listing failure —
+                    # the GUI shows a different hint for each
+                    raise AdapterError(f"FETCH_FAILED: {url} {msg}", code="FETCH_FAILED") from e
                 except ImportError:
-                    raise Exception(f"LIST_FAILED: {url} {msg}") from e
+                    raise Exception(f"FETCH_FAILED: {url} {msg}") from e
             else:
                 # adaptive 429 → safe tier
                 if is_429:
@@ -634,7 +652,7 @@ def fetch_one(
         try:
             from core.ports import AdapterError
 
-            raise AdapterError(f"LIST_FAILED: {url} {last_exc}", code="LIST_FAILED") from last_exc
+            raise AdapterError(f"FETCH_FAILED: {url} {last_exc}", code="FETCH_FAILED") from last_exc
         except ImportError:
             raise Exception(f"LIST_FAILED: {url} {last_exc}") from last_exc
     raise RuntimeError(f"fetch_one failed {url}")
@@ -671,6 +689,8 @@ def fetch_many(
     # handle legacy aliases: if cache passed as Path/string, treat as cache_dir
     if cache is not None and cache_dir is None:
         cache_dir = cache
+    # the structured badge (the GUI formats it in the user's language)
+    badge_data: dict = {}
     if desired_range is not None:
         # spec mentions desired_range vs cache; if desired_range provided, it may be tuple (from,to)
         try:
@@ -766,6 +786,7 @@ def fetch_many(
                     pass
             # badge for open-ended
             badge = f"pominięto {skipped}, wykryto {new_count} nowe"
+            badge_data = {"skipped": skipped, "from": None, "to": None, "new": new_count, "total": len(desired)}
         else:
             # bounded case: desired is urls list, or derive from range if urls empty but from_idx/to_idx+novel_url
             if not urls and novel_url and from_idx is not None:
@@ -862,13 +883,17 @@ def fetch_many(
                     _end = int(to_idx)
                     if _start > _end:
                         _start = int(from_idx)
-                    badge = f"pominięto {skipped}, pobieram {_start}–{_end}"
                 else:
-                    badge = f"pominięto {skipped}, pobieram {skipped+1}–{skipped+len(missing)}"
+                    _start = skipped + 1
+                    _end = skipped + len(missing)
+                badge = f"pominięto {skipped}, pobieram {_start}–{_end}"
+                badge_data = {"skipped": skipped, "from": _start, "to": _end, "total": len(desired)}
             elif skipped:
                 badge = f"pominięto {skipped}"
+                badge_data = {"skipped": skipped, "from": None, "to": None, "total": len(desired)}
             else:
                 badge = None
+                badge_data = {"skipped": 0, "from": None, "to": None, "total": len(desired)}
 
         # Sequential loop fetching missing only, polite delay between
         results: List[Any] = []
@@ -981,6 +1006,7 @@ def fetch_many(
         else:
             if badge is None and skipped:
                 badge = f"pominięto {skipped}"
+                badge_data = {"skipped": skipped, "from": None, "to": None, "total": len(desired)}
 
         # the cache budget is applied after every run (it used to grow
         # without limit — the TTL/size policy was never executed)
@@ -993,6 +1019,9 @@ def fetch_many(
             "failed": failed,
             "results": results,
             "badge": badge,
+            # the structured badge: the GUI formats it in the user's language
+            # instead of pattern-matching the Polish text
+            "badgeData": badge_data,
             "desired": desired,
             "pruned": _pruned.get("removed", 0),
         }

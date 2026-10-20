@@ -55,6 +55,7 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
   // local (Piper) TTS
   const [engine, setEngine] = useState<string>("auto");
   const [localVoice, setLocalVoice] = useState<string>("");
+  const [localCuda, setLocalCuda] = useState<boolean>(false);
   const [localVoiceList, setLocalVoiceList] = useState<
     Array<{ id: string; lang: string; quality: string; sizeMb: number; downloaded: boolean }>
   >([]);
@@ -214,6 +215,9 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
         const lvVal = typeof data.localVoice === "string" ? (data.localVoice as string).trim() : "";
         setLocalVoice(lvVal);
         prevRef.current["localVoice"] = lvVal;
+        const cudaVal = data.localCuda === true;
+        setLocalCuda(cudaVal);
+        prevRef.current["localCuda"] = cudaVal;
         // dialogue voice + post-processing flags
         const dvVal = typeof data.dialogueVoice === "string" ? (data.dialogueVoice as string).trim() : "";
         setDialogueVoice(dvVal);
@@ -455,6 +459,12 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
     setLocalVoice(val);
     setLocalMsg("");
     void persist({ localVoice: val }, "localVoice", prev);
+  };
+
+  const handleLocalCudaChange = (checked: boolean): void => {
+    const prev = prevRef.current["localCuda"];
+    setLocalCuda(checked);
+    void persist({ localCuda: checked }, "localCuda", prev);
   };
 
   const handleDialogueVoiceChange = async (e: React.ChangeEvent<HTMLSelectElement>): Promise<void> => {
@@ -1041,6 +1051,16 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                       ))}
                     </select>
                     <span className="text-body-sm text-muted-foreground">{t("settings.localVoice.helper")}</span>
+                    <label className="mt-1 flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        data-testid="settings-local-cuda"
+                        checked={localCuda}
+                        onChange={(e) => void handleLocalCudaChange(e.target.checked)}
+                        className="h-4 w-4 accent-[var(--accent)]"
+                      />
+                      <span className="text-body-sm">{t("settings.localVoice.cuda")}</span>
+                    </label>
                   </label>
 
                   <div className="flex flex-wrap items-center gap-3">

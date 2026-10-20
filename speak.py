@@ -309,6 +309,7 @@ async def convert(
     dialogue_voice: str | None = None,
     normalize_audio: bool = False,
     trim_silence: bool = False,
+    cuda: bool = False,
 ) -> None:
     try:
         chapters = extract_chapters(epub_path, start_chapter=start_chapter, end_chapter=end_chapter)
@@ -344,6 +345,11 @@ async def convert(
     if engine and engine != "edge":
         suffix = f" ({local_voice})" if local_voice else ""
         print(f"TTS engine: {engine}{suffix}")
+    if cuda:
+        # the local engine may run on the GPU (onnxruntime-gpu); the flag is
+        # honoured by core.tts_local, which falls back to the CPU
+        os.environ["SPEAK_EPUB_PIPER_CUDA"] = "1"
+        print("Local TTS engine: GPU (CUDA) requested — falls back to the CPU when unavailable")
     dialogue_voice = (dialogue_voice or "").strip() or None
     if dialogue_voice:
         print(f"Dialogue voice: {dialogue_voice}")
@@ -451,6 +457,11 @@ def main() -> None:
     parser.add_argument("--bitrate", default="32k", help="M4B/M4A audio bitrate like 32k (16k-128k, speech default: 32k).")
     parser.add_argument("--normalize-audio", action="store_true", help="Normalize chapter loudness (podcast levels) after merging.")
     parser.add_argument("--trim-silence", action="store_true", help="Trim leading/trailing silence of each chapter (dramatic pauses kept).")
+    parser.add_argument(
+        "--cuda",
+        action="store_true",
+        help="Run the local Piper engine on the GPU (needs onnxruntime-gpu; falls back to the CPU).",
+    )
 
     args = parser.parse_args()
 
@@ -550,6 +561,7 @@ def main() -> None:
                     dialogue_voice=dialogue_voice_arg,
                     normalize_audio=args.normalize_audio,
                     trim_silence=args.trim_silence,
+                    cuda=args.cuda,
                 )
             )
         except (KeyboardInterrupt, SystemExit):

@@ -97,7 +97,10 @@ def acquire_resume_lock(root: Any, _attempt: int = 0) -> Optional[Path]:
                 # lock vanished between open failure and stat (process exit
                 # race) — just retry the acquisition once.
                 return acquire_resume_lock(base, _attempt + 1)
-            if age > RESUME_LOCK_STALE_SEC:
+            if _lock_owner_alive(lock) and age <= RESUME_LOCK_STALE_SEC:
+                # the owner is still running — a live run must not be stolen
+                pass
+            elif age > RESUME_LOCK_STALE_SEC or not _lock_owner_alive(lock):
                 try:
                     lock.unlink(missing_ok=True)
                 except OSError:
@@ -115,6 +118,45 @@ def acquire_resume_lock(root: Any, _attempt: int = 0) -> Optional[Path]:
         )
     except OSError:
         return None
+
+
+def _lock_owner_alive(lock: Path) -> bool:
+    """Is the process that created the lock still running?
+
+    The lock file carries the owner's PID; a lock whose owner is gone is
+    stale even when its mtime is fresh (a crashed run would otherwise block
+    the next one for the whole stale window).
+    """
+    try:
+        raw = lock.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    if not raw.isdigit():
+        return False
+    pid = int(raw)
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **subprocess_kwargs(),
+            ).stdout
+            return str(pid) in out
+        except Exception:
+            return True  # cannot tell — assume alive (safer)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return True
 
 
 def release_resume_lock(lock: Any) -> None:
@@ -497,8 +539,14 @@ def split_text_for_tts(text: str, max_chars: int = 3500) -> List[str]:
     """
     if not isinstance(max_chars, int) or max_chars < 1:
         raise ValueError("max_chars must be a positive integer")
-    if max_chars > 5000:
-        print(f"Warning: max_chars={max_chars} > 5000 truncates in Edge TTS — consider 2000-3500")
+    if max_chars > MAX_CHARS_PER_REQUEST:
+        # Edge TTS truncates above 5000 characters — clamping keeps the
+        # request valid instead of silently losing the tail of a chapter
+        print(
+            f"Warning: max_chars={max_chars} > {MAX_CHARS_PER_REQUEST} truncates in Edge TTS "
+            f"— clamped to {MAX_CHARS_PER_REQUEST} (consider 2000-3500)"
+        )
+        max_chars = MAX_CHARS_PER_REQUEST
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return []
@@ -551,6 +599,10 @@ def split_text_for_tts(text: str, max_chars: int = 3500) -> List[str]:
 EDGE_SAVE_TIMEOUT_MIN = 300.0
 EDGE_SAVE_TIMEOUT_MAX = 1200.0
 EDGE_SAVE_TIMEOUT_PER_CHAR = 0.35
+
+#: Edge TTS truncates requests above 5000 characters — the chunk size is
+#: clamped to this value.
+MAX_CHARS_PER_REQUEST = 5000
 
 #: Pause (s) between a chapter-title part and the chapter body. The title is
 #: synthesized as its own leading part and this silence is appended to it,
@@ -818,10 +870,59 @@ def check_build_identity(
     return True, False
 
 
+def _measure_loudness(path: str) -> Optional[dict]:
+    """Measure the input loudness (one ffmpeg pass, loudnorm print_format=json).
+
+    Returns the measured values (input_i, input_tp, input_lra, input_thresh)
+    or None when the measurement fails — the caller then falls back to the
+    dynamic single pass.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg, "-hide_banner", "-nostats",
+                "-i", path,
+                "-af", "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json",
+                "-f", "null", "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            **subprocess_kwargs(),
+        )
+        text = (getattr(proc, "stderr", "") or "") + (getattr(proc, "stdout", "") or "")
+    except Exception:
+        return None
+    start = text.rfind("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        import json as _json
+
+        data = _json.loads(text[start : end + 1])
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    needed = ("input_i", "input_tp", "input_lra", "input_thresh")
+    if not all(k in data for k in needed):
+        return None
+    try:
+        return {k: str(data[k]) for k in needed}
+    except Exception:
+        return None
+
+
 def postprocess_chapter_file(path: str, normalize_audio: bool = False, trim_silence: bool = False) -> bool:
     """Apply loudness normalization and/or silence trimming in place.
 
-    Loudness: single-pass loudnorm (podcast levels). Silence: only long
+    Loudness: two-pass loudnorm (the input is measured first, then the
+    measured values are applied with `linear=true`) — a single dynamic
+    pass is only approximate and pumps on speech. Silence: only long
     leading/trailing silence (>~2 s) is trimmed; natural speech pauses and
     the post-title pause survive intact. Returns True when the file was
     re-encoded. Never raises: failures warn and leave the original file
@@ -834,7 +935,20 @@ def postprocess_chapter_file(path: str, normalize_audio: bool = False, trim_sile
         return False
     filters: List[str] = []
     if normalize_audio:
-        filters.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+        measured = _measure_loudness(path)
+        if measured:
+            filters.append(
+                "loudnorm=I=-16:TP=-1.5:LRA=11"
+                f":measured_I={measured.get('input_i', '')}"
+                f":measured_TP={measured.get('input_tp', '')}"
+                f":measured_LRA={measured.get('input_lra', '')}"
+                f":measured_thresh={measured.get('input_thresh', '')}"
+                ":offset=0:linear=true:print_format=summary"
+            )
+        else:
+            # no measurement available (ffprobe/ffmpeg hiccup) — the dynamic
+            # single pass is still better than nothing
+            filters.append("loudnorm=I=-16:TP=-1.5:LRA=11")
     if trim_silence:
         # this build's silenceremove stop_periods removes ALL silence >= the
         # threshold anywhere in the stream (verified against ffmpeg 8.0), so
@@ -1308,11 +1422,13 @@ class AdaptiveGate:
         self._waiters: List[asyncio.Future] = []
 
     def _wake(self) -> None:
+        # wake EVERY waiter that fits into the new limit (waking only one
+        # left the pool idle until the next release)
         while self._waiters and self.active < self.limit:
             fut = self._waiters.pop(0)
             if not fut.done():
                 fut.set_result(True)
-                return
+                self.active += 1
 
     def _set_limit(self, new: int) -> None:
         new = max(1, min(int(new), self.maximum))
@@ -1343,13 +1459,22 @@ class AdaptiveGate:
                 return
             fut = asyncio.get_running_loop().create_future()
             self._waiters.append(fut)
+            granted = False
             try:
                 await fut
+                granted = True
             finally:
                 try:
                     self._waiters.remove(fut)
                 except ValueError:
                     pass
+                if not granted and fut.done() and not fut.cancelled():
+                    # we were woken (the slot was reserved in _wake) but the
+                    # task was cancelled before it could use it — hand the
+                    # slot back instead of leaking it
+                    self.active = max(0, self.active - 1)
+                    self._wake()
+            return
 
     def release(self) -> None:
         if self.active > 0:

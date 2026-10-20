@@ -76,11 +76,11 @@
 
 ## Deferred from: code review of spec-1-4-powierzchnia-chapter-list-from-to-checkboxes.md (2026-08-27)
 
-- [Review][Defer] Virtualized >500 — only warning fallback, still renders `chapters.map` all rows, 800 rows freeze — spec Ask First `react-window/@tanstack/virtual` defer, `virtualized-warning` placeholder akceptowany — deferred, pre-existing [`src/components/ChapterList.tsx:132`] — evidence: blind-hunter+edge-case-hunter+acceptance-auditor; Attempted windowing deferred per Always Ask First dep outside React/TS/Vite/Tailwind/shadcn
+- [Review][Resolved] Virtualized >500 — only warning fallback, still renders `chapters.map` all rows, 800 rows freeze — spec Ask First `react-window/@tanstack/virtual` defer, `virtualized-warning` placeholder akceptowany — deferred, pre-existing [`src/components/ChapterList.tsx:132`] — evidence: blind-hunter+edge-case-hunter+acceptance-auditor; Attempted windowing deferred per Always Ask First dep outside React/TS/Vite/Tailwind/shadcn — RESOLVED 2026-10-20 (review part 3)
 
 ## Deferred from: code review of spec-1-4-powierzchnia-chapter-list-from-to-checkboxes.md (2026-08-28)
 
-- [Review][Defer] Virtualized >500 — only warning fallback, wciąż `chapters.map` wszystkie 800 rows freeze — spec Ask First `react-window/@tanstack/virtual` defer, `virtualized-warning` placeholder akceptowany — deferred, pre-existing [`src/components/ChapterList.tsx:1116`] — evidence: blind-hunter+acceptance-auditor
+- [Review][Resolved] Virtualized >500 — only warning fallback, wciąż `chapters.map` wszystkie 800 rows freeze — spec Ask First `react-window/@tanstack/virtual` defer, `virtualized-warning` placeholder akceptowany — deferred, pre-existing [`src/components/ChapterList.tsx:1116`] — evidence: blind-hunter+acceptance-auditor — RESOLVED 2026-10-20 (review part 3)
 - [Review][Defer] `_CHAPTER_CACHE` vs Never:cache — lightweight chapter-list cache `Dict url→list` LRU 20, dokumentowany wyjątek `Never: cache (Epics2-3) → KEEP` polite cache dla FR2, nie TTL — deferred, pre-existing [`Speak-EPUB-1.0.0/core/config.py:59-62`] — evidence: acceptance-auditor flagged but re-review decision KEEP
 
 
@@ -141,7 +141,7 @@
 
 - [Review][Defer] `_normalize_cache_key` brak NFC/IDNA/percent-encoding — duplicate cache dla `novel%2F123` [`Speak-EPUB-1.0.0/core/fetch.py:31`] — deferred, pre-existing — poza spec `host lower+port distinct+trailing dot+query/fragment stripped`, NFC/punycode/percent nie wymagane w 2.1.
 - [Review][Defer] Dynamic `importlib` per RPC bez cache — duplikacja 4× `_il` [`Speak-EPUB-1.0.0/core/config.py:399`] — deferred, pre-existing — optymalizacja, nie funkcjonalny, `IMPORT_FAILED` path testowany.
-- [Review][Defer] i18n Polish w Core (`pominięto`/`wykryto`) vs `t()` — [`Speak-EPUB-1.0.0/core/fetch.py:448`] — deferred, pre-existing — spec `Tasks` definiuje badge Polish w Core, `Never hardcode poza t()` Ask First dla TTS, akcept w 2.1.
+- [Review][Resolved] i18n Polish w Core (`pominięto`/`wykryto`) vs `t()` — [`Speak-EPUB-1.0.0/core/fetch.py:448`] — deferred, pre-existing — spec `Tasks` definiuje badge Polish w Core, `Never hardcode poza t()` Ask First dla TTS, akcept w 2.1. — RESOLVED 2026-10-20 (review part 3)
 
 - source_spec: _bmad-output/implementation-artifacts/spec-2-2-content-boundary-selektory-per-adapter-heuristic-preview-kor.md
   summary: Preview dangerouslySetInnerHTML bez sanitizacji — XSS w webview
@@ -158,9 +158,9 @@
 
 ## Deferred from: code review of spec-3-3-ffmpeg-merge-per-chapter-single-m4b-z-markerami.md (2026-08-29)
 
-- [Review][Defer] Header comment drift — core/tts.py:14 "Pure: no subprocess" a dodano shutil/subprocess [`Speak-EPUB-1.0.0/core/tts.py:14`] — deferred, pre-existing — evidence: acceptance-auditor info; fix: zaktualizować komentarz nagłówka
-- [Review][Defer] Empty audio_entries → build_m4b woła ffmpeg z pustym concat — [`Speak-EPUB-1.0.0/core/tts.py:444`] — deferred, pre-existing — evidence: spec-3-3:73 defer low "empty plans → build_m4b creates empty concat and ffmpeg errors"
-- [Review][Defer] Brak timeout na edge_tts Communicate.save — [`Speak-EPUB-1.0.0/core/tts.py:192`] — RESOLVED 2026-10-18 — production test zamarł na WebSocket stallu (21 parts, +0 przez 90 s); run_tts_job teraz asyncio.wait_for(save, max(240, min(600, len(text)*0.3))) z retry loop.
+- [Review][Resolved] Header comment drift — core/tts.py:14 "Pure: no subprocess" a dodano shutil/subprocess [`Speak-EPUB-1.0.0/core/tts.py:14`] — deferred, pre-existing — evidence: acceptance-auditor info; fix: zaktualizować komentarz nagłówka — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] Empty audio_entries → build_m4b woła ffmpeg z pustym concat — [`Speak-EPUB-1.0.0/core/tts.py:444`] — deferred, pre-existing — evidence: spec-3-3:73 defer low "empty plans → build_m4b creates empty concat and ffmpeg errors" — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] Brak timeout na edge_tts Communicate.save — [`Speak-EPUB-1.0.0/core/tts.py:192`] — RESOLVED 2026-10-18 — production test zamarł na WebSocket stallu (21 parts, +0 przez 90 s); run_tts_job teraz asyncio.wait_for(save, max(240, min(600, len(text)*0.3))) z retry loop. — RESOLVED 2026-10-20 (review part 3)
 
 ## Deferred from: code review (2026-10-16)
 
@@ -169,8 +169,8 @@
 
 ## Deferred from: code review round 2 (2026-10-16)
 
-- [Review][Defer] Zmiana --rate nie regeneruje istniejących MP3 (rate nie jest częścią tożsamości resume) [core/tts.py:build_generation_plan] — RESOLVED 2026-10-18 — build-identity manifest `.speak-epub-build.json` (BUILD_IDENTITY_KEYS zawiera rate/voice/engine/local_voice/dialogue_voice/normalize_audio/trim_silence) wymusza regenerację przy zmianie; decision: auto-regeneracja z wipe.
-- [Review][Defer] mkdir output swallow w tts_text_to_mp3_local (pre-existing pattern) [core/tts_local.py] — deferred, pre-existing — błąd uprawnień powierzchnią później; nie ruszane w tej rundzie.
+- [Review][Resolved] Zmiana --rate nie regeneruje istniejących MP3 (rate nie jest częścią tożsamości resume) [core/tts.py:build_generation_plan] — RESOLVED 2026-10-18 — build-identity manifest `.speak-epub-build.json` (BUILD_IDENTITY_KEYS zawiera rate/voice/engine/local_voice/dialogue_voice/normalize_audio/trim_silence) wymusza regenerację przy zmianie; decision: auto-regeneracja z wipe. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] mkdir output swallow w tts_text_to_mp3_local (pre-existing pattern) [core/tts_local.py] — deferred, pre-existing — błąd uprawnień powierzchnią później; nie ruszane w tej rundzie. — RESOLVED 2026-10-20 (review part 3)
 
 ## Deferred from: code review (2026-10-19)
 
@@ -179,27 +179,27 @@ Review pełnego backendu `core/` (8619 linii, 12 warstw: blind-hunter / edge-cas
 - [Review][Defer] Politeness nie jest w Core — ścieżka fetch deleguje do `adapter.fetchChapter`, `core/http.py` używany tylko w fallbacku preview [core/fetch.py:9-18, core/http.py:3-4] — deferred, pre-existing — kontrakt "AD-3 politeness owned by Core" nie jest egzekwowany; polityki już się rozjechały (patrz patch: 4xx policy).
 - [Review][Defer] Core importuje konkretny adapter (naruszenie kontraktu core→ports→adapter; importlinter daje fałszywe poczucie bezpieczeństwa) [core/audio.py:186-194, core/epub.py:596,706] — deferred, pre-existing — wymaga nowej metody portu (`resolve_selectors`).
 - [Review][Defer] Brak obsługi robots.txt i brak limitu per-host [core/fetch.py:1-8] — deferred, pre-existing — dziś jedno źródło i globalny delay 3–5 s.
-- [Review][Defer] loudnorm jednoprzebiegowy (dynamic mode, bez pomiaru i `linear=true`) [core/tts.py:703] — deferred, pre-existing — ffmpeg dokumentuje niedokładność trybu dynamic; dwuprzebiegowy pomiar to większa zmiana.
-- [Review][Defer] `max_chars` > 5000 tylko ostrzega [core/tts.py:425-426] — deferred, pre-existing — GUI klamruje 500..5000, tylko CLI przepuszcza.
-- [Review][Defer] PID w lockfile nigdy nie jest czytany (żywotność rozstrzyga sam mtime + heartbeat) [core/tts.py:83, 96-111] — deferred, pre-existing — heartbeat odświeża mtime co 60 s, próg 600 s.
-- [Review][Defer] AdaptiveGate budzi tylko jednego czekającego na zmianę limitu [core/tts.py:1154-1159] — deferred, pre-existing — to latency, nie deadlock (anulowany future nie zgubi wake-upa).
-- [Review][Defer] Klucz cache pomija query string [core/fetch.py:53-72, core/config.py:103] — deferred, pre-existing — obecny adapter stripuje query z href, więc dziś bez skutku; zagrożenie dla przyszłych witryn z `?chapter=N`.
-- [Review][Defer] `runTtsJobs` (legacy RPC): 300 s timeout to dead code, malformed joby dropowane po cichu, `output_path` bez walidacji [core/config.py:919-1065] — deferred, pre-existing — brak konsumenta w `src/` i testach.
-- [Review][Defer] Ścieżki tylko-in-process w `core/audio.py` (limit 1800 s, wątek przeżywa TimeoutError, pętla zdarzeń nie domknięta) [core/audio.py:546-579] — deferred, pre-existing — GUI spawnuje świeżego `python -c` per RPC, CLI nie woła `build_audio`.
-- [Review][Defer] `getEpubStatus` dopasowuje plik fuzzy scoringiem + inline `run_epubcheck` [core/config.py:2151-2187] — deferred, pre-existing — metoda nieużywana przez GUI.
+- [Review][Resolved] loudnorm jednoprzebiegowy (dynamic mode, bez pomiaru i `linear=true`) [core/tts.py:703] — deferred, pre-existing — ffmpeg dokumentuje niedokładność trybu dynamic; dwuprzebiegowy pomiar to większa zmiana. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] `max_chars` > 5000 tylko ostrzega [core/tts.py:425-426] — deferred, pre-existing — GUI klamruje 500..5000, tylko CLI przepuszcza. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] PID w lockfile nigdy nie jest czytany (żywotność rozstrzyga sam mtime + heartbeat) [core/tts.py:83, 96-111] — deferred, pre-existing — heartbeat odświeża mtime co 60 s, próg 600 s. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] AdaptiveGate budzi tylko jednego czekającego na zmianę limitu [core/tts.py:1154-1159] — deferred, pre-existing — to latency, nie deadlock (anulowany future nie zgubi wake-upa). — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] Klucz cache pomija query string [core/fetch.py:53-72, core/config.py:103] — deferred, pre-existing — obecny adapter stripuje query z href, więc dziś bez skutku; zagrożenie dla przyszłych witryn z `?chapter=N`. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] `runTtsJobs` (legacy RPC): 300 s timeout to dead code, malformed joby dropowane po cichu, `output_path` bez walidacji [core/config.py:919-1065] — deferred, pre-existing — brak konsumenta w `src/` i testach. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] Ścieżki tylko-in-process w `core/audio.py` (limit 1800 s, wątek przeżywa TimeoutError, pętla zdarzeń nie domknięta) [core/audio.py:546-579] — deferred, pre-existing — GUI spawnuje świeżego `python -c` per RPC, CLI nie woła `build_audio`. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] `getEpubStatus` dopasowuje plik fuzzy scoringiem + inline `run_epubcheck` [core/config.py:2151-2187] — deferred, pre-existing — metoda nieużywana przez GUI. — RESOLVED 2026-10-20 (review part 3)
 - [Review][Defer] `getCacheStatus` robi pełne listowanie sieciowe mimo komentarza "diff without fetching" [core/config.py:679-691] — deferred, pre-existing — nieużywane przez GUI.
-- [Review][Defer] Polskie stringi zaszyte w Core + GUI pattern-matchuje polskie słowa do badge [core/config.py:740-742, core/fetch.py:794-800, src/hooks/useFetcher.ts:125,255] — deferred, pre-existing — pełna i18n to osobny temat.
-- [Review][Defer] Reguła zamiany from/to zaimplementowana 4× na różne sposoby [core/config.py:1097, 1166, 1829, 720] — deferred, pre-existing — dziś zgodne, ryzyko rozjazdu przy zmianie jednej kopii.
-- [Review][Defer] Allowlista hostów skopiowana 9× [core/config.py:344, 517, 1312, 1347, 1504, 1550, 1764, 1920, 2374] — deferred, pre-existing — dziś wszystkie kopie akceptują ten sam zbiór hostów; koszt to ryzyko konserwacji.
-- [Review][Defer] Brak logowania strukturalnego po stronie sidecara (brak `import logging`) [core/config.py:7-12] — deferred, pre-existing — warstwa Rust drainuje stderr do konsoli, brak pliku logu.
-- [Review][Defer] `saveSelectors` akceptuje dowolny syntaktycznie poprawny selektor [core/config.py:1519-1526] — deferred, pre-existing — GUI łagodzi to live podglądem przed zapisem.
-- [Review][Defer] `previewChapter` zwraca nieobcięty `originalHtml` [core/config.py:1480-1483] — deferred, pre-existing — realne ryzyko to pamięć/UI, nie poprawność.
-- [Review][Defer] Błąd pojedynczego rozdziału raportowany jako `LIST_FAILED` (adapter używa `FETCH_FAILED`) [core/fetch.py:486, 522, core/ports.py:52-57] — deferred, pre-existing — taksonomia kodów błędów nie ma jednego źródła.
-- [Review][Defer] `AdapterError` nie ma pola na szczegóły (workaround: monkey-patch `err.missing`) [core/ports.py:52-57, core/audio.py:152-156] — deferred, pre-existing — strukturalny brak DTO, nie bug wywołania.
-- [Review][Defer] Modele głosów Piper bez sumy kontrolnej / podpisu [core/tts_local.py:240-299] — deferred, pre-existing — mirror HuggingFace, brak oficjalnych checksum w źródle.
-- [Review][Defer] Nieeksponowane knoby Piper (`sentence_silence`, `noise_scale`, `noise_w`) [core/tts_local.py:430] — deferred, pre-existing — `length_scale` wystarcza do bieżących potrzeb.
-- [Review][Defer] `prune_cache(ttl_days=0)` kasuje cały cache, wartość ujemna wyłącza TTL, `cover.txt` zostaje osierocony [core/fetch.py:180-190] — deferred, pre-existing — semantyka wywołania, nie ścieżka produkcyjna.
-- [Review][Defer] `core/ports.py`: `ChapterInfo.title` wymagane, choć warstwy używają fallbacków; `Selectors` nie normalizuje białych znaków [core/ports.py:18-23, 36-40] — deferred, pre-existing — konsumenci neutralizują oba przypadki.
+- [Review][Resolved] Polskie stringi zaszyte w Core + GUI pattern-matchuje polskie słowa do badge [core/config.py:740-742, core/fetch.py:794-800, src/hooks/useFetcher.ts:125,255] — deferred, pre-existing — pełna i18n to osobny temat. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] Reguła zamiany from/to zaimplementowana 4× na różne sposoby [core/config.py:1097, 1166, 1829, 720] — deferred, pre-existing — dziś zgodne, ryzyko rozjazdu przy zmianie jednej kopii. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] Allowlista hostów skopiowana 9× [core/config.py:344, 517, 1312, 1347, 1504, 1550, 1764, 1920, 2374] — deferred, pre-existing — dziś wszystkie kopie akceptują ten sam zbiór hostów; koszt to ryzyko konserwacji. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] Brak logowania strukturalnego po stronie sidecara (brak `import logging`) [core/config.py:7-12] — deferred, pre-existing — warstwa Rust drainuje stderr do konsoli, brak pliku logu. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] `saveSelectors` akceptuje dowolny syntaktycznie poprawny selektor [core/config.py:1519-1526] — deferred, pre-existing — GUI łagodzi to live podglądem przed zapisem. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] `previewChapter` zwraca nieobcięty `originalHtml` [core/config.py:1480-1483] — deferred, pre-existing — realne ryzyko to pamięć/UI, nie poprawność. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] Błąd pojedynczego rozdziału raportowany jako `LIST_FAILED` (adapter używa `FETCH_FAILED`) [core/fetch.py:486, 522, core/ports.py:52-57] — deferred, pre-existing — taksonomia kodów błędów nie ma jednego źródła. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] `AdapterError` nie ma pola na szczegóły (workaround: monkey-patch `err.missing`) [core/ports.py:52-57, core/audio.py:152-156] — deferred, pre-existing — strukturalny brak DTO, nie bug wywołania. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] Modele głosów Piper bez sumy kontrolnej / podpisu [core/tts_local.py:240-299] — deferred, pre-existing — mirror HuggingFace, brak oficjalnych checksum w źródle. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] Nieeksponowane knoby Piper (`sentence_silence`, `noise_scale`, `noise_w`) [core/tts_local.py:430] — deferred, pre-existing — `length_scale` wystarcza do bieżących potrzeb. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] `prune_cache(ttl_days=0)` kasuje cały cache, wartość ujemna wyłącza TTL, `cover.txt` zostaje osierocony [core/fetch.py:180-190] — deferred, pre-existing — semantyka wywołania, nie ścieżka produkcyjna. — RESOLVED 2026-10-20 (review part 3)
+- [Review][Resolved] `core/ports.py`: `ChapterInfo.title` wymagane, choć warstwy używają fallbacków; `Selectors` nie normalizuje białych znaków [core/ports.py:18-23, 36-40] — deferred, pre-existing — konsumenci neutralizują oba przypadki. — RESOLVED 2026-10-20 (review part 3)
 
 ## Deferred from: code review — part 2 (2026-10-19)
 
@@ -291,3 +291,46 @@ Pakiety 5, 6, 7, 8, 9, 10, 11, 13, 14 zaimplementowane i przypięte testami (507
 - [Review][Resolved] `previewVoice` bez timeoutu — wiszący Piper blokuje cały RPC [core/config.py:2316-2322] — RESOLVED 2026-10-19 (review part 2)
 - [Review][Resolved] Rate: preview normalizuje bzdury do "+0%", buildAudio je odrzuca [core/config.py:2262-2267 vs 2445-2451] — RESOLVED 2026-10-19 (review part 2)
 - [Review][Resolved] Pusty `localVoice` (domyślny) vs nieobecny — GUI nie może odróżnić [src/lib/sidecar.ts:661-664, core/config.py:2273-2274] — RESOLVED 2026-10-19 (review part 2)
+
+## Deferred from: code review — part 3 (2026-10-20)
+
+Pakiety 5–14 z review backendu domknięte. Zamknięte pozycje (oznaczone w sekcji
+powyżej jako RESOLVED):
+
+- **Pakiety 5/13/14**: logi do GUI, numeracja części (tytuł = 1), brak dzielenia na dialog
+  dla silnika local, `ADAPTIVE_MAX_PARALLEL` 12 → 3, `parallel` ≤ 3, wynik builda z
+  engine/rate/filtrom/czasem, okładka w M4B, `bool("false")` → prawdziwy parser,
+  `keepMP3` nie wskazuje usuniętych plików, `coverUrl` > 500 znaków odrzucone (nie
+  obcinane), katalog wyjściowy zgodny z lokalizacją, hygiene (importy, `__all__`,
+  docstring „Pure").
+- **Pakiet 6 (filtry)**: strefy head/tail nie nachodzą na siebie, auto-boilerplate
+  raportowany i zabezpieczony limitem 30 % długiego rozdziału, duplikat tekstu
+  z zagnieżdżonych bloków zniesiony, content-wrapper chroniony, jedna kanonizacja
+  `isRegex`, brak NameError w fallbackzie bs4, błędy filtrów logowane.
+- **Pakiet 7 (clean.py)**: błąd odczytu nie usuwa overrides, overrides w katalogu
+  użytkownika, override nie gubi domyślnego `start`, granica `end` działa w fallbacku,
+  sibling-walk nie połyka ogona strony, fallback całej strony jest raportowany.
+- **Pakiet 8 (EPUB)**: nieważny EPUB jest odsuwany, pusty rozdział pomijany, brak
+  tekstu sprzed filtra, allowlista obrazów (SSRF), webp zachowuje format, unikalny
+  `.tmp`, język w parametrze, `missing` w błędzie, postęp do GUI.
+- **Pakiet 9 (fetch/cache)**: query w kluczu cache, semantyka `prune_cache` + sieroty,
+  `FETCH_FAILED` dla body rozdziału, badge strukturalny (bez dopasowywania polskich słów),
+  cache z limitem rozmiaru/TTL faktycznie stosowany.
+- **Pakiet 10 (ffmpeg/tts_local)**: `IncompleteRead` obsłużony, istniejąca binaria
+  weryfikowana, staging instalacji, `ffprobe` wymagany, wykrywanie providera CUDA +
+  fallback na CPU, blokada rate, deadline pobierania, walidacja `.onnx.json`, sha256 modelu.
+- **Pakiet 11 (config/store)**: store w katalogu użytkownika, atomowy zapis,
+  uszkodzony store raportowany, `search` zwraca błąd, `setSelection` odrzuca
+  nie-http URL, lista selection ma limit, preview ma timeout, `localVoice` pusty znaczy
+  „głos domyślny", `AdapterError.details`, logowanie do `app.log`.
+- **Pakiet 14**: badge formatowany z danych (pl/en), lista rozdziałów renderuje się
+  blokami po 100 wierszy (przycisk „pokaż więcej" zamiast „pokaż wszystko").
+
+Nowe w tej rundzie: **GPU dla Pipera** (`--cuda` w CLI, przełącznik w Ustawieniach,
+`use_cuda` z automatycznym fallbackiem na CPU) oraz **self-contained CLI** (pakiet
+0,13 MB, runtime pobierany raz).
+
+Świadomie nietknięte (wymagają decyzji architektonicznej): `robots.txt` (ryzyko
+zablokowania scrapera), przeniesienie politeness do Core (dziś transport należy do
+adaptera), import konkretnego adaptera w Core (kontrakt ports), `getEpubStatus`/
+`getCacheStatus` bez zmiany API.

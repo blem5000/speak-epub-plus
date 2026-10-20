@@ -296,6 +296,44 @@ def local_voice_paths(voice: str) -> tuple[Path, Path]:
     return root / f"{voice}.onnx", root / f"{voice}.onnx.json"
 
 
+def _model_digest_path(voice: str) -> Path:
+    """Sidecar with the sha256 of the downloaded model (integrity check)."""
+    onnx, _ = local_voice_paths(voice)
+    return onnx.with_suffix(onnx.suffix + ".sha256")
+
+
+def _file_sha256(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _model_integrity_ok(voice: str) -> bool:
+    """Verify the model against the digest recorded at download time.
+
+    The publisher offers no checksums, so the digest is computed locally
+    after the download — it catches a truncated or swapped model file (the
+    ONNX loader would fail much later with a cryptic error).
+    """
+    onnx, _ = local_voice_paths(voice)
+    digest_path = _model_digest_path(voice)
+    try:
+        if not digest_path.is_file():
+            return True  # nothing recorded (an old download) — size check only
+        expected = digest_path.read_text(encoding="utf-8").strip().split()[0]
+        if len(expected) != 64:
+            return True
+        return _file_sha256(onnx) == expected
+    except (OSError, IndexError):
+        return True
+    except Exception:
+        return True
+
+
 def local_voice_ready(voice: Any) -> bool:
     """True when the model files are downloaded AND piper is importable."""
     if not isinstance(voice, str) or voice.strip() not in LOCAL_VOICES:
@@ -311,6 +349,8 @@ def local_voice_ready(voice: Any) -> bool:
         if cfg.stat().st_size < 64:
             return False
     except OSError:
+        return False
+    if not _model_integrity_ok(voice.strip()):
         return False
     return _piper_available()
 
@@ -408,6 +448,14 @@ def download_local_voice(voice: Any, on_log: Optional[Callable[[str], None]] = N
             shutil.rmtree(staging, ignore_errors=True)
         if not local_voice_ready(name):
             raise RuntimeError(f"download finished but model files are incomplete for {name}")
+        # record the digest of the model: the publisher offers no checksum,
+        # so a local digest catches a truncated or swapped file later
+        try:
+            _model_digest_path(name).write_text(
+                f"{_file_sha256(onnx)}  {onnx.name}\n", encoding="utf-8"
+            )
+        except OSError:
+            pass
         _log(f"local voice {name} downloaded")
     return {
         "id": name,
@@ -572,6 +620,36 @@ class _TruncatedLocalError(RuntimeError):
     """Internal: local synth produced a complete-but-short file (deterministic)."""
 
 
+def cuda_available() -> bool:
+    """True when the installed onnxruntime can use the GPU.
+
+    The CUDA execution provider only exists in the `onnxruntime-gpu` wheel;
+    the CPU wheel reports CPUExecutionProvider only.
+    """
+    try:
+        import onnxruntime
+
+        providers = list(onnxruntime.get_available_providers())
+    except Exception:
+        return False
+    return any("CUDA" in p or "Tensorrt" in p for p in providers)
+
+
+def cuda_requested() -> bool:
+    """Did the user ask for the GPU? (env var or the store flag)."""
+    env = os.environ.get("SPEAK_EPUB_PIPER_CUDA", "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    if env in ("0", "false", "no", "off"):
+        return False
+    try:
+        from core.config import load_store
+
+        return bool(load_store().get("localCuda", False))
+    except Exception:
+        return False
+
+
 def _load_voice(voice: str):
     with _VOICE_LOCK:
         cached = _VOICE_CACHE.get(voice)
@@ -580,7 +658,25 @@ def _load_voice(voice: str):
         onnx, _ = local_voice_paths(voice)
         from piper import PiperVoice
 
-        loaded = PiperVoice.load(str(onnx))
+        use_cuda = False
+        if cuda_requested():
+            if cuda_available():
+                use_cuda = True
+            else:
+                print(
+                    "Warning: the GPU was requested but onnxruntime has no CUDA provider "
+                    "(install onnxruntime-gpu) — using the CPU."
+                )
+        try:
+            loaded = PiperVoice.load(str(onnx), use_cuda=use_cuda)
+        except Exception as e:
+            if use_cuda:
+                # the GPU failed to initialise (no CUDA runtime/driver) — fall
+                # back to the CPU instead of failing the whole part
+                print(f"Warning: the GPU engine failed ({e}) — falling back to the CPU.")
+                loaded = PiperVoice.load(str(onnx), use_cuda=False)
+            else:
+                raise
         _VOICE_CACHE[voice] = loaded
         return loaded
 
@@ -624,8 +720,10 @@ def tts_text_to_mp3_local(
     output = Path(output_path)
     try:
         output.parent.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
+    except OSError as e:
+        # a permission problem must surface here, not as a cryptic ffmpeg
+        # error later ("No such file or directory")
+        raise RuntimeError(f"cannot create the output directory {output.parent}: {e}") from e
     wav_path = output.with_suffix(".part.wav")
 
     # deterministic pre-checks stay outside the retry loop: a missing binary

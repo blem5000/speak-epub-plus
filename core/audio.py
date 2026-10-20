@@ -796,6 +796,7 @@ def _build_audio_locked(
             resume_lock=resume_lock,
         )
 
+    _loop_owned = False
     try:
         loop = asyncio.get_event_loop()
         if loop.is_closed():
@@ -803,6 +804,7 @@ def _build_audio_locked(
     except Exception:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        _loop_owned = True
     # Long silent stretches (TTS gaps between parts, per-chapter merges, and
     # especially the final multi-minute M4B re-encode) must not look dead:
     # the desktop sidecar times out after seconds of silence. Heartbeat lines
@@ -840,6 +842,17 @@ def _build_audio_locked(
                 asyncio.run(_runner())
             else:
                 raise
+        finally:
+            if _loop_owned:
+                # the loop we created must not leak its file descriptors
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+                try:
+                    asyncio.set_event_loop(None)
+                except Exception:
+                    pass
 
         audio_entries = finalize_chapter_audio(
             plans,
