@@ -334,3 +334,21 @@ Nowe w tej rundzie: **GPU dla Pipera** (`--cuda` w CLI, przełącznik w Ustawien
 zablokowania scrapera), przeniesienie politeness do Core (dziś transport należy do
 adaptera), import konkretnego adaptera w Core (kontrakt ports), `getEpubStatus`/
 `getCacheStatus` bez zmiany API.
+
+## Nowe w tej rundzie (2026-10-20, po robots.txt)
+
+- **Pełny katalog głosów Edge** (322) zamiast 4 hardkodowanych — nowy RPC `listVoices`
+  (`core/config.py`), pole z wyszukiwaniem w Ustawieniach (`<datalist>` + przyjazna nazwa
+  i locale wybranego głosu).
+- **Pełny katalog Pipera** (177 głosów upstreamu, 5 polskich) zamiast shortlisty — katalog
+  pobierany raz i cache'owany w `%LOCALAPPDATA%\speak-epub\piper-voices.json`; walidacja
+  głosu wobec katalogu (literówka = czytelny błąd), a poza siecią fallback na wzorzec
+  nazewniczy Pipera.
+- **Regenerowanie pojedynczego rozdziału** — nowy RPC `rebuildChapter` +
+  `core/tts.py:invalidate_chapter_artifacts`: kasuje pliki jednego rozdziału, build wznowi
+  wszystkie pozostałe (dowód: `tests/test_chapter_regeneration.py`).
+- **Kolejka konwersji (batch) w GUI** — książki dodaje się z wyników wyszukiwania,
+  konwersja idzie po kolei (list chapters → fetch → build); błąd jednej książki nie
+  zatrzymuje kolejki.
+- **Okładka w M4B/M4A z GUI** — backend przyjmował `cover_url` od v0.3.10, ale GUI go nie
+  wysyłało; teraz `App → Audiobook → buildAudio` przekazuje okładkę.
