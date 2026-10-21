@@ -1,6 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { t } from "@/i18n";
 import {
+  addLibraryEntry,
   buildAudio,
   CANCEL_METHODS_AUDIO,
   cancelSidecarJob,
@@ -35,6 +36,10 @@ type AudiobookProps = {
   outputDir?: string;
   /** Cover image URL — embedded into the M4B/M4A metadata. */
   coverUrl?: string | null;
+  /** Author — stored with the library entry. */
+  author?: string | null;
+  /** Called after a successful build (the library entry was saved). */
+  onLibraryChanged?: () => void;
 };
 
 /** Imperative API for the App orchestrator (single Start button). */
@@ -80,6 +85,8 @@ const Audiobook = forwardRef<AudiobookHandle, AudiobookProps>(function Audiobook
   showControls = true,
   format: formatProp,
   coverUrl,
+  author,
+  onLibraryChanged,
   outputDir,
 }: AudiobookProps, ref): JSX.Element {
   const [formatState, setFormatState] = useState<AudioFormat>("m4b");
@@ -232,6 +239,24 @@ const Audiobook = forwardRef<AudiobookHandle, AudiobookProps>(function Audiobook
         const done = res.result as unknown as AudioResult;
         setResult(done);
         setError(null);
+        // remember the audiobook in the per-user library
+        const libraryPath = done.audiobook?.path ?? done.audio_dir;
+        if (libraryPath) {
+          void addLibraryEntry({
+            path: libraryPath,
+            title: title || libraryPath,
+            author: author ?? "",
+            cover: coverUrl ?? "",
+            format: done.audiobook?.format ?? done.format ?? "",
+            size: done.audiobook?.size ?? 0,
+            chapters: done.chapter_count ?? 0,
+            sourceUrl: novelUrl ?? "",
+          })
+            .then(() => onLibraryChanged?.())
+            .catch(() => {
+              // the library is a convenience — a failure must not break the build
+            });
+        }
         void notifyBuildDone(
           t("audio.title") as string,
           t("notify.audio.done", { n: done.chapter_count }) as string

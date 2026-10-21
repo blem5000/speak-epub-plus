@@ -13,6 +13,9 @@ vi.mock("@/lib/sidecar", () => ({
   ensureLocalEngine: (...a: unknown[]) => mockEnsureLocalEngine(...a),
   downloadLocalVoice: vi.fn(),
   previewVoice: vi.fn(),
+  listVoices: vi.fn().mockResolvedValue({ id: "1", result: { voices: [] } }),
+  getPronunciation: vi.fn().mockResolvedValue({ id: "1", result: { entries: [] } }),
+  setPronunciation: vi.fn().mockResolvedValue({ id: "1", result: { entries: [] } }),
 }));
 
 import Settings from "@/components/Settings";

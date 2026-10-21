@@ -636,6 +636,67 @@ export async function listVoices(opts?: { signal?: AbortSignal }): Promise<RpcRe
   return callSidecar("listVoices", {}, opts);
 }
 
+/** The recent searches (per user, kept by the backend). */
+export async function getSearchHistory(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
+  return callSidecar("getSearchHistory", {}, opts);
+}
+
+/** Remember a search — the most recent one first. */
+export async function addSearchHistory(
+  query: string,
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  return callSidecar("addSearchHistory", { query: String(query ?? "") }, opts);
+}
+
+/** Forget every remembered search. */
+export async function clearSearchHistory(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
+  return callSidecar("clearSearchHistory", {}, opts);
+}
+
+/** The audiobooks that were produced (the per-user library). */
+export async function getLibrary(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
+  return callSidecar("getLibrary", {}, opts);
+}
+
+/** Add (or replace) a library entry — the same path is replaced. */
+export async function addLibraryEntry(
+  entry: {
+    path: string;
+    title?: string;
+    author?: string;
+    cover?: string;
+    format?: string;
+    size?: number;
+    chapters?: number;
+    sourceUrl?: string;
+  },
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  return callSidecar("addLibraryEntry", { ...entry }, opts);
+}
+
+/** Drop a library entry (the file on disk is NOT deleted). */
+export async function removeLibraryEntry(
+  path: string,
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  return callSidecar("removeLibraryEntry", { path: String(path ?? "") }, opts);
+}
+
+/** The pronunciation dictionary: how a word should be read. */
+export async function getPronunciation(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
+  return callSidecar("getPronunciation", {}, opts);
+}
+
+/** Replace the pronunciation dictionary. */
+export async function setPronunciation(
+  entries: Array<{ from: string; to: string }>,
+  opts?: { signal?: AbortSignal }
+): Promise<RpcResponse> {
+  return callSidecar("setPronunciation", { entries }, opts);
+}
+
 /**
  * Drop one chapter's audio artifacts so the next build regenerates just
  * that chapter (every other chapter is resumed from the existing parts).

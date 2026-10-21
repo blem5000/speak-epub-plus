@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { t } from "@/i18n";
-import { getStore, setStore, localVoices, listVoices, downloadLocalVoice, ensureLocalEngine, previewVoice } from "@/lib/sidecar";
+import { getStore, setStore, localVoices, listVoices, downloadLocalVoice, ensureLocalEngine, previewVoice, getPronunciation, setPronunciation } from "@/lib/sidecar";
+import PronunciationEditor, { type PronunciationEntry } from "./PronunciationEditor";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentVersion, manualCheck } from "@/lib/updater";
 
@@ -118,6 +119,27 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
   const [defaultLocalVoice, setDefaultLocalVoice] = useState<string>("en_US-lessac-medium");
   const [localBusy, setLocalBusy] = useState<boolean>(false);
   const [localMsg, setLocalMsg] = useState<string>("");
+  // show only the "high" quality Piper voices in the catalogue
+  const [highOnly, setHighOnly] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem("speak-epub:localVoiceHighOnly") === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  // the pronunciation dictionary (per user, kept by the backend)
+  const [pronEntries, setPronEntries] = useState<PronunciationEntry[]>([]);
+  const handlePronunciationChange = useCallback((entries: PronunciationEntry[]): void => {
+    setPronEntries(entries);
+    void setPronunciation(entries)
+      .then(() => {
+        setLocalMsg("");
+      })
+      .catch(() => {
+        setLocalMsg(t("pronunciation.saveFailed") as string);
+      });
+  }, [t]);
 
   // dialogue voice (Edge only) + chapter audio post-processing
   const [dialogueVoice, setDialogueVoice] = useState<string>("");
@@ -307,6 +329,28 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
       setEdgeVoices(voices);
       setEdgeVoicesFailed(voices.length === 0);
     })();
+    return () => { alive = false; };
+  }, [open, variant]);
+
+  // the pronunciation dictionary (per user, kept by the backend)
+  useEffect(() => {
+    if (variant !== "inline" && !open) return;
+    let alive = true;
+    void getPronunciation()
+      .then((res) => {
+        if (!alive) return;
+        const r = (res.result as Record<string, unknown>) ?? {};
+        const arr = Array.isArray(r.entries) ? (r.entries as Array<Record<string, unknown>>) : [];
+        setPronEntries(
+          arr.map((e) => ({
+            from: String(e.from ?? ""),
+            to: String(e.to ?? ""),
+          }))
+        );
+      })
+      .catch(() => {
+        // the sidecar may be unavailable (tests/dev) — an empty dictionary is fine
+      });
     return () => { alive = false; };
   }, [open, variant]);
 
@@ -858,6 +902,11 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
         selectedLocal.downloaded ? " ✓" : ""
       }`
     : "";
+
+  // "high only" hides the medium/low voices from the catalogue list
+  const visibleLocalVoices = highOnly
+    ? localVoiceCatalog.filter((v) => v.quality === "high")
+    : localVoiceCatalog;
   const isInline = variant === "inline";
 
   const body = (
@@ -1098,7 +1147,7 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                       className="h-9 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     />
                     <datalist id="piper-voice-catalog">
-                      {localVoiceCatalog.map((v) => (
+                      {visibleLocalVoices.map((v) => (
                         <option key={v.id} value={v.id}>
                           {`${v.name} · ${v.language} · ${v.quality} · ${v.sizeMb} MB${v.downloaded ? " ✓" : ""}`}
                         </option>
@@ -1107,10 +1156,31 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                     <span className="text-body-sm text-muted-foreground" data-testid="settings-local-voice-hint">
                       {localVoiceCatalog.length
                         ? `${t("settings.localVoice.catalogue") as string}: ${localVoiceCatalog.length}${
-                            selectedLocalVoiceHint ? ` · ${selectedLocalVoiceHint}` : ""
-                          }`
+                            highOnly ? ` (${visibleLocalVoices.length} ${t("settings.localVoice.highOnly") as string})` : ""
+                          }${selectedLocalVoiceHint ? ` · ${selectedLocalVoiceHint}` : ""}`
                         : (t("settings.localVoice.helper") as string)}
                     </span>
+                    <label className="mt-1 flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        data-testid="settings-local-high-only"
+                        checked={highOnly}
+                        onChange={(e) => {
+                          setHighOnly(e.target.checked);
+                          try {
+                            window.localStorage.setItem(
+                              "speak-epub:localVoiceHighOnly",
+                              e.target.checked ? "1" : "0"
+                            );
+                          } catch {
+                            // storage unavailable (private mode) — the filter
+                            // still works for this session
+                          }
+                        }}
+                        className="h-4 w-4 accent-[var(--accent)]"
+                      />
+                      <span className="text-body-sm">{t("settings.localVoice.highOnlyLabel")}</span>
+                    </label>
                   </label>
                     <label className="mt-1 flex items-center gap-2">
                       <input
@@ -1151,6 +1221,9 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                   </div>
                 </div>
               </section>
+
+              {/* Pronunciation dictionary */}
+              <PronunciationEditor entries={pronEntries} onChange={handlePronunciationChange} />
 
               {/* Performance */}
               <section className="rounded-lg border bg-card p-6 shadow-sm" aria-label={t("settings.performance.title") as string}>

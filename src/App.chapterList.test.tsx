@@ -8,6 +8,12 @@ vi.mock("@/lib/sidecar", () => ({
   setStore: vi.fn().mockResolvedValue({ id: "0", result: {} }),
   buildEpub: vi.fn().mockResolvedValue({ id: "0", result: { path: "dummy.epub", size: 1234, chapter_count: 1, epubcheck_ok: true, messages: [] } }),
   isEpubResult: vi.fn().mockReturnValue(true),
+  getSearchHistory: vi.fn().mockResolvedValue({ id: "0", result: { history: [] } }),
+  addSearchHistory: vi.fn().mockResolvedValue({ id: "0", result: { history: [] } }),
+  clearSearchHistory: vi.fn().mockResolvedValue({ id: "0", result: { history: [] } }),
+  getLibrary: vi.fn().mockResolvedValue({ id: "0", result: { library: [] } }),
+  removeLibraryEntry: vi.fn().mockResolvedValue({ id: "0", result: { library: [] } }),
+  openPath: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/hooks/useChapterList", async () => {

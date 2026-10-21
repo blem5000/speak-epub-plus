@@ -31,6 +31,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+try:  # the pronunciation dictionary is optional data (a missing file is fine)
+    from core.userdata import apply_pronunciation, get_pronunciation
+except Exception:  # pragma: no cover - the core must import without user data
+    def apply_pronunciation(text: str, entries: Optional[List[Dict[str, str]]] = None) -> str:
+        return text
+
+    def get_pronunciation() -> List[Dict[str, str]]:
+        return []
+
 Chapter = Tuple[int, str, str]
 AudioEntry = Tuple[int, str, str]
 
@@ -752,6 +761,7 @@ BUILD_IDENTITY_KEYS = (
     "filters",
     "auto_boilerplate",
     "source",
+    "pronunciation",
 )
 
 
@@ -1035,6 +1045,7 @@ def build_generation_plan(
     migrate_titles: bool = False,
     on_log: Optional[Callable[[str], None]] = None,
     engine: Optional[str] = None,
+    pronunciation: Optional[List[Dict[str, str]]] = None,
 ) -> Tuple[List[ChapterPlan], List[PartJob]]:
     """
     Build global PartJob queue in reading order.
@@ -1079,10 +1090,21 @@ def build_generation_plan(
     if isinstance(engine, str) and engine.strip().lower() == "local":
         dlg_voice = None
     can_pause = ffmpeg_available()
+    if pronunciation is None:
+        # the dictionary is per-user data — read it once per build
+        try:
+            pronunciation = get_pronunciation()
+        except Exception:
+            pronunciation = []
 
     for chapter_number, title, text in chapters:
         safe_title = sanitize_filename(title, fallback=f"Chapter_{chapter_number:03d}")
         chapter_mp3 = os.path.join(output_dir, f"{chapter_number:03d}_{safe_title}.mp3")
+
+        # the pronunciation dictionary replaces the words it knows BEFORE the
+        # text is split — the reading is what gets synthesized
+        if pronunciation:
+            text = apply_pronunciation(text, pronunciation)
 
         # 1 s title pause: split a leading title off the body. Only when the
         # title is actually read as part of the text — never invent audio.

@@ -755,6 +755,18 @@ def _build_audio_locked(
     # silently reusing wrong audio (fresh manifest => one-time title migration)
     from core.tts import check_build_identity as _check_ident
 
+    # the pronunciation dictionary changes what is spoken, so it is part of
+    # the build identity: a new word changes the reading of the whole book
+    try:
+        from core.userdata import get_pronunciation
+
+        _pronunciation = get_pronunciation()
+    except Exception:
+        _pronunciation = []
+    _pronunciation_digest = hashlib.sha256(
+        json.dumps(_pronunciation, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()[:16]
+
     _filters_digest = _filters_digest_for(filters)
     _wiped, _fresh = _check_ident(
         str(audio_dir),
@@ -770,6 +782,7 @@ def _build_audio_locked(
             "filters": _filters_digest,
             "auto_boilerplate": bool(auto_boilerplate),
             "source": novel_url,
+            "pronunciation": _pronunciation_digest,
         },
         on_log=on_log,
     )
@@ -783,6 +796,7 @@ def _build_audio_locked(
         migrate_titles=_fresh,
         on_log=_emit_log,
         engine=engine,
+        pronunciation=_pronunciation,
     )
     _emit_log(f"queued {len(jobs)} TTS part job(s) for {len(chapters)} chapter(s)")
 

@@ -2321,6 +2321,81 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         except Exception as e:
             return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
 
+    if method in ("getSearchHistory", "searchHistory", "get_search_history"):
+        try:
+            from core.userdata import get_search_history
+
+            return {"id": rid, "result": {"history": get_search_history()}}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+    if method in ("addSearchHistory", "add_search_history"):
+        try:
+            from core.userdata import add_search_history
+
+            params = request.get("params") or {}
+            query = params.get("query", params.get("q", "")) if isinstance(params, dict) else ""
+            return {"id": rid, "result": {"history": add_search_history(str(query or ""))}}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+    if method in ("clearSearchHistory", "clear_search_history"):
+        try:
+            from core.userdata import clear_search_history
+
+            return {"id": rid, "result": {"history": clear_search_history()}}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+    if method in ("getLibrary", "listLibrary", "get_library"):
+        try:
+            from core.userdata import get_library
+
+            return {"id": rid, "result": {"library": get_library()}}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+    if method in ("addLibraryEntry", "add_library_entry"):
+        try:
+            from core.userdata import add_library_entry
+
+            params = request.get("params") or {}
+            if not isinstance(params, dict):
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "params must be object"}}
+            return {"id": rid, "result": {"library": add_library_entry(params)}}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+    if method in ("removeLibraryEntry", "remove_library_entry"):
+        try:
+            from core.userdata import remove_library_entry
+
+            params = request.get("params") or {}
+            path = params.get("path", params.get("id", "")) if isinstance(params, dict) else ""
+            return {"id": rid, "result": {"library": remove_library_entry(str(path or ""))}}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+    if method in ("getPronunciation", "get_pronunciation"):
+        try:
+            from core.userdata import get_pronunciation
+
+            return {"id": rid, "result": {"entries": get_pronunciation()}}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+    if method in ("setPronunciation", "set_pronunciation"):
+        try:
+            from core.userdata import set_pronunciation
+
+            params = request.get("params") or {}
+            entries = params.get("entries", params.get("items", [])) if isinstance(params, dict) else []
+            if not isinstance(entries, list):
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "entries must be a list"}}
+            return {"id": rid, "result": {"entries": set_pronunciation(entries)}}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
     if method in ("listVoices", "list_voices", "edgeVoices", "edge_voices"):
         # the Edge voice catalogue (hundreds of voices) — the GUI needs it for
         # a searchable picker; only the short name is kept

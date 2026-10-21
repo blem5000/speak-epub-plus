@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { t, getLocale, setLocale } from "./i18n";
 import { buildEpub, callSidecar, cancelSidecarJob, getStore, isEpubResult, setStore, type EpubResult } from "./lib/sidecar";
+import { addSearchHistory, clearSearchHistory, getLibrary, getSearchHistory, openPath, removeLibraryEntry } from "./lib/sidecar";
+import SearchHistory, { type SearchHistoryEntry } from "./components/SearchHistory";
+import LibraryPanel, { type LibraryEntry } from "./components/LibraryPanel";
 import QueuePanel, { type QueueItem, type QueueOutcome } from "./components/QueuePanel";
 import FindInput from "./components/FindInput";
 import ResultsTable from "./components/ResultsTable";
@@ -211,6 +214,100 @@ export default function App(): JSX.Element {
 
   const trimmedQuery = query.trim();
   const showNoResults = !searching && trimmedQuery.length > 0 && results.length === 0;
+
+  // The recent searches — remembered by the backend, not by the browser.
+  const [history, setHistory] = useState<SearchHistoryEntry[]>([]);
+  useEffect(() => {
+    let alive = true;
+    void getSearchHistory()
+      .then((res) => {
+        if (!alive) return;
+        const r = (res.result as Record<string, unknown>) ?? {};
+        const arr = Array.isArray(r.history) ? (r.history as Array<Record<string, unknown>>) : [];
+        setHistory(
+          arr.map((h) => ({
+            query: String(h.query ?? ""),
+            at: Number(h.at ?? 0),
+          }))
+        );
+      })
+      .catch(() => {
+        // the sidecar may be unavailable (tests/dev) — the history is optional
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // remember a search that produced results
+  useEffect(() => {
+    if (!trimmedQuery || results.length === 0) return;
+    let alive = true;
+    void addSearchHistory(trimmedQuery)
+      .then((res) => {
+        if (!alive) return;
+        const r = (res.result as Record<string, unknown>) ?? {};
+        const arr = Array.isArray(r.history) ? (r.history as Array<Record<string, unknown>>) : [];
+        setHistory(
+          arr.map((h) => ({
+            query: String(h.query ?? ""),
+            at: Number(h.at ?? 0),
+          }))
+        );
+      })
+      .catch(() => {
+        // history is best-effort
+      });
+    return () => {
+      alive = false;
+    };
+  }, [trimmedQuery, results.length]);
+
+  const handleHistoryClear = useCallback((): void => {
+    void clearSearchHistory()
+      .then(() => setHistory([]))
+      .catch(() => setHistory([]));
+  }, []);
+
+  // The library — the audiobooks that were produced
+  const [library, setLibrary] = useState<LibraryEntry[]>([]);
+  const refreshLibrary = useCallback((): void => {
+    void getLibrary()
+      .then((res) => {
+        const r = (res.result as Record<string, unknown>) ?? {};
+        const arr = Array.isArray(r.library) ? (r.library as Array<Record<string, unknown>>) : [];
+        setLibrary(
+          arr.map((e) => ({
+            id: String(e.id ?? ""),
+            title: String(e.title ?? ""),
+            author: String(e.author ?? ""),
+            cover: String(e.cover ?? ""),
+            path: String(e.path ?? ""),
+            format: String(e.format ?? ""),
+            size: Number(e.size ?? 0),
+            chapters: Number(e.chapters ?? 0),
+            sourceUrl: String(e.sourceUrl ?? ""),
+            createdAt: Number(e.createdAt ?? 0),
+          }))
+        );
+      })
+      .catch(() => {
+        // the sidecar may be unavailable (tests/dev)
+      });
+  }, []);
+
+  useEffect(() => {
+    refreshLibrary();
+  }, [refreshLibrary]);
+
+  const handleLibraryRemove = useCallback(
+    (path: string): void => {
+      void removeLibraryEntry(path)
+        .then(() => refreshLibrary())
+        .catch(() => refreshLibrary());
+    },
+    [refreshLibrary]
+  );
 
   const handleRangeChange = (nextFrom: number, nextTo: number): void => {
     setFrom(nextFrom);
@@ -706,6 +803,11 @@ export default function App(): JSX.Element {
           <div className="mt-4">
             <FindInput value={query} onChange={setQuery} searching={searching} />
             <p className="mt-2 text-body-sm text-muted-foreground">{t("find.hint")}</p>
+            <SearchHistory
+              entries={history}
+              onPick={(q) => setQuery(q)}
+              onClear={handleHistoryClear}
+            />
           </div>
 
           {/* searching skeleton */}
@@ -783,6 +885,17 @@ export default function App(): JSX.Element {
               </div>
             </div>
           ) : null}
+
+          {/* The library — the audiobooks that were produced */}
+          <LibraryPanel
+            entries={library}
+            onOpen={(path) => {
+              void openPath(path).catch(() => {
+                // the file may have been moved — the panel stays as it is
+              });
+            }}
+            onRemove={handleLibraryRemove}
+          />
 
           {/* Batch queue — several novels converted one after another */}
           <QueuePanel
@@ -962,6 +1075,8 @@ export default function App(): JSX.Element {
               onBuildingChange={setAudioBuilding}
               showControls={false}
               coverUrl={chapterCover ?? undefined}
+              author={buildAuthor ?? undefined}
+              onLibraryChanged={refreshLibrary}
               format={audioFormat}
               outputDir={outputDir}
             />

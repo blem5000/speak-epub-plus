@@ -16,6 +16,9 @@ Convert any EPUB file into a spoken-word audiobook using Microsoft Edge's free n
 - **Podcast-grade post-processing** — optional loudness normalization and edge-silence trimming of finished chapter files (`--normalize-audio`, `--trim-silence`)
 - **Metadata + cover in M4B** — author name and cover art are embedded in the audiobook file
 - **Full voice catalogue** — all 322 Edge voices and all 177 upstream Piper voices, searchable in Settings
+- **Pronunciation dictionary** — teach the synthesizer how to read a name
+- **Library** — the produced audiobooks are remembered with their covers
+- **Recent searches** — the last searches are remembered and re-run with one click
 - **Single-chapter regeneration** — rebuild one chapter instead of the whole book
 - **Batch queue in the app** — queue several novels and convert them one after another
 - **Batch mode** — convert several EPUBs in a single command (CLI)
@@ -242,6 +245,35 @@ a failing book is reported and the queue continues with the next one.
 
 The cover shown in the app is embedded into the produced M4B/M4A, so audiobook
 players show the artwork instead of a generic icon.
+
+### Pronunciation dictionary
+
+*Settings → Pronunciation dictionary* teaches the synthesizer how to read a
+word: `Arystoteles` → `ary-stoteles`. The replacement is plain text (not
+SSML), so it works with the local Piper engine too, and the dictionary is
+applied before the text is split into parts.
+
+Changing the dictionary changes what is spoken, so it is part of the build
+identity — the next build regenerates the book instead of silently reusing
+the old audio.
+
+### Library
+
+Every produced audiobook is remembered in a per-user library (with its
+cover), so the finished books can be browsed and opened again. *Remove*
+only forgets the entry; the file on disk is never deleted.
+
+### Recent searches
+
+The last searches are remembered per user and can be run again with one
+click. The history is kept by the backend (`search-history.json` in the
+user data directory), not by the browser.
+
+### Only high-quality Piper voices
+
+The Piper catalogue offers a quality per voice (`low`, `medium`, `high`).
+*Settings → Local voice* has an **only high-quality voices** switch that
+hides the rest from the list.
 
 ## Desktop app (Tauri + Python sidecar)
 

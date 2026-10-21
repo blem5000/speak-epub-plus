@@ -352,3 +352,14 @@ adaptera), import konkretnego adaptera w Core (kontrakt ports), `getEpubStatus`/
   zatrzymuje kolejki.
 - **Okładka w M4B/M4A z GUI** — backend przyjmował `cover_url` od v0.3.10, ale GUI go nie
   wysyłało; teraz `App → Audiobook → buildAudio` przekazuje okładkę.
+## Nowe w tej rundzie (2026-10-21, po v0.3.15)
+
+- **Slownik wymowy** (`core/userdata.py:pronunciation`) — zamiana tekstu przed synteza
+  (nie SSML, wiec dziala takze z Piperem); slownik jest czescia tozsamosci builda, wiec
+  zmiana slownika wymusza regeneracje ksiazki.
+- **Biblioteka** — kazdy zbudowany audiobook jest zapisywany (`library.json`) z okladka,
+  formatem, rozmiarem i liczba rozdzialow; usuniecie wpisu nie usuwa pliku.
+- **Historia wyszukiwan** (`search-history.json`) — 20 ostatnich zapytan, de-duplikacja,
+  wyczyszczenie z UI.
+- **Tylko glosy Pipera jakosci high** — przelacznik w Ustawieniach (filtr listy, zapamietany
+  w localStorage GUI).

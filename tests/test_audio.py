@@ -256,7 +256,7 @@ class TestBuildAudioWiring:
         captured = {}
 
         def _fake_plan(chapters, output_dir, chunk_size, rate=None, dialogue_voice=None, migrate_titles=False,
-                       on_log=None, engine=None):
+                       on_log=None, engine=None, pronunciation=None):
             captured["dialogue_voice"] = dialogue_voice
             return [], []
 
