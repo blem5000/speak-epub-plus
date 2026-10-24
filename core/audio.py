@@ -771,6 +771,29 @@ def _build_audio_locked(
     ).hexdigest()[:16]
 
     _filters_digest = _filters_digest_for(filters)
+
+    # The Kokoro voice belongs to the identity ONLY when Kokoro can actually
+    # speak this build. Including it unconditionally would add "am_michael"
+    # to every Edge/Piper manifest and wipe audio that nothing about changed;
+    # omitting it for an explicit Kokoro build would silently reuse parts
+    # voiced by the previous Kokoro voice.
+    _eng_norm = str(engine or "").strip().lower()
+    _identity_kokoro_voice = None
+    if _eng_norm == "kokoro":
+        _identity_kokoro_voice = kokoro_voice
+    elif _eng_norm == "auto":
+        try:
+            from core.tts_kokoro import (
+                DEFAULT_KOKORO_VOICE as _IKV_DEFAULT,
+                kokoro_ready as _ikv_ready,
+            )
+
+            _ikv = kokoro_voice if isinstance(kokoro_voice, str) and kokoro_voice.strip() else _IKV_DEFAULT
+            if _ikv_ready(_ikv):
+                _identity_kokoro_voice = _ikv
+        except Exception:
+            _identity_kokoro_voice = None
+
     _wiped, _fresh = _check_ident(
         str(audio_dir),
         {
@@ -778,6 +801,7 @@ def _build_audio_locked(
             "voice": voice,
             "engine": engine,
             "local_voice": local_voice,
+            "kokoro_voice": _identity_kokoro_voice,
             "dialogue_voice": dialogue_voice,
             "normalize_audio": bool(normalize_audio),
             "trim_silence": bool(trim_silence),

@@ -648,3 +648,94 @@ class TestBuildAudioRpc:
             assert Path(ch["path"]).is_file()
         assert touched == [], "denied CWD must be probed, never touched"
         assert "not usable" in capsys.readouterr().out
+
+
+class TestKokoroVoiceWiring:
+    """The Kokoro voice lives in its own namespace next to the Piper one.
+
+    Regression: the build preflight validated `localVoice` (a PIPER model id)
+    as if it were a Kokoro voice, so a Kokoro build failed with
+    "unknown Kokoro voice 'en_US-ryan-high'" even though the user had picked
+    bm_daniel in Settings.
+    """
+
+    def test_preflight_validates_the_kokoro_voice_not_the_piper_one(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        res = handle_rpc({"id": "1", "method": "buildAudio", "params": {
+            "novelUrl": "https://www.novelphoenix.com/novel/123",
+            "engine": "kokoro",
+            "localVoice": "en_US-ryan-high",
+            "kokoroVoice": "bm_daniel",
+            "format": "mp3",
+        }})
+        assert res["error"]["code"] == "VALUE_ERROR"
+        msg = res["error"]["message"]
+        # the error must be about the model being absent, not about the
+        # Piper id having leaked into the Kokoro namespace
+        assert "en_US-ryan-high" not in msg, msg
+        assert "bm_daniel" in msg, msg
+
+    def test_preflight_falls_back_to_the_default_kokoro_voice(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        res = handle_rpc({"id": "1", "method": "buildAudio", "params": {
+            "novelUrl": "https://www.novelphoenix.com/novel/123",
+            "engine": "kokoro",
+            "localVoice": "en_US-ryan-high",
+            "format": "mp3",
+        }})
+        assert res["error"]["code"] == "VALUE_ERROR"
+        msg = res["error"]["message"]
+        assert "en_US-ryan-high" not in msg, msg
+        assert "am_michael" in msg, msg
+
+    def _manifest(self, audio_dir):
+        import json as _json
+
+        return _json.loads((Path(audio_dir) / ".speak-epub-build.json").read_text(encoding="utf-8"))
+
+    def test_explicit_kokoro_build_records_its_voice(self, tmp_path):
+        _seed(tmp_path)
+        with patch("core.audio.run_part_jobs", side_effect=_fake_run):
+            res = build_audio(
+                "https://www.novelphoenix.com/novel/123", from_idx=1, to_idx=1,
+                title="T", output_dir=tmp_path / "out", cache_dir=tmp_path,
+                chapter_urls=[CH1], audio_format="mp3",
+                engine="kokoro", kokoro_voice="bm_george",
+            )
+        manifest = self._manifest(res["audio_dir"])
+        # a changed Kokoro voice must regenerate, otherwise the previous
+        # voice is silently reused (the manifest is the resume guard)
+        assert manifest["kokoro_voice"] == "bm_george"
+        assert manifest["engine"] == "kokoro"
+
+    def test_changing_the_kokoro_voice_invalidates_the_build(self, tmp_path):
+        _seed(tmp_path)
+        kwargs = dict(
+            from_idx=1, to_idx=1, title="T", output_dir=tmp_path / "out",
+            cache_dir=tmp_path, chapter_urls=[CH1], audio_format="mp3", engine="kokoro",
+        )
+        with patch("core.audio.run_part_jobs", side_effect=_fake_run):
+            build_audio("https://www.novelphoenix.com/novel/123", kokoro_voice="am_puck", **kwargs)
+        first = self._manifest(tmp_path / "out")
+        with patch("core.audio.run_part_jobs", side_effect=_fake_run):
+            build_audio("https://www.novelphoenix.com/novel/123", kokoro_voice="bm_daniel", **kwargs)
+        second = self._manifest(tmp_path / "out")
+        assert first["kokoro_voice"] == "am_puck"
+        assert second["kokoro_voice"] == "bm_daniel"
+
+    def test_edge_build_keeps_the_kokoro_voice_out_of_its_identity(self, tmp_path):
+        """An Edge/Piper build must not gain a Kokoro key.
+
+        Adding it unconditionally would change every existing manifest and
+        wipe audio that nothing about had changed.
+        """
+        _seed(tmp_path)
+        with patch("core.audio.run_part_jobs", side_effect=_fake_run):
+            res = build_audio(
+                "https://www.novelphoenix.com/novel/123", from_idx=1, to_idx=1,
+                title="T", output_dir=tmp_path / "out", cache_dir=tmp_path,
+                chapter_urls=[CH1], audio_format="mp3",
+                engine="edge", kokoro_voice="bm_george",
+            )
+        manifest = self._manifest(res["audio_dir"])
+        assert manifest["kokoro_voice"] is None

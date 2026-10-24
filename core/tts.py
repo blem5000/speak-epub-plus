@@ -754,6 +754,7 @@ BUILD_IDENTITY_KEYS = (
     "voice",
     "engine",
     "local_voice",
+    "kokoro_voice",
     "dialogue_voice",
     "normalize_audio",
     "trim_silence",

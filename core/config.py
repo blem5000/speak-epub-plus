@@ -2929,7 +2929,9 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     validate_kokoro_voice as _kokoro_validate,
                 )
 
-                _kcheck = _kokoro_validate(local_voice_p or _DEFAULT_KOKORO_VOICE)
+                # the KOKORO voice, not the Piper one: local_voice_p holds
+                # the Piper model id and is a different namespace entirely
+                _kcheck = _kokoro_validate(kokoro_voice_p or _DEFAULT_KOKORO_VOICE)
             except ValueError as e:
                 return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
             if not _kokoro_ready(_kcheck):
