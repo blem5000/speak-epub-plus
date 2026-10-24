@@ -252,33 +252,94 @@ def _download_image(url: str, timeout: float = 10.0):
             pass
 
 
-def _allowed_image_host(url: str, page_url: str) -> bool:
+def _ip_is_internal(ip: Any) -> bool:
+    """True when an IP address must never be fetched (internal/metadata)."""
+    try:
+        return bool(
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        )
+    except Exception:
+        return True
+
+
+def _resolve_host(host: str) -> Optional[List[str]]:
+    """All addresses a host resolves to, or None when it cannot be resolved."""
+    try:
+        import socket
+
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except Exception:
+        return None
+    out: List[str] = []
+    for info in infos:
+        try:
+            out.append(str(info[4][0]))
+        except Exception:
+            continue
+    return out or None
+
+
+def _allowed_image_host(url: str, page_url: str, resolve=None) -> bool:
     """True when an image URL may be fetched.
 
     Images legitimately live on a CDN (a different host), so the host is NOT
     restricted to the page's own. What must never be fetched is an INTERNAL
     address: a scraped page may name http://169.254.169.254/... and the
     response would be embedded in the EPUB.
+
+    Only http(s) is allowed, and a HOSTNAME is resolved before the check:
+    checking the literal text alone let a public name that resolves to a
+    link-local address through — e.g. http://169.254.169.254.nip.io/ — which
+    is the classic SSRF bypass around an IP-literal filter.
+
+    `resolve(host) -> list[str] | None` is injectable so tests need no DNS.
+    A host that does not resolve is refused: there is nothing to fetch, and
+    failing closed keeps the decision deterministic.
     """
     try:
-        host = (urlparse(url).hostname or "").lower().rstrip(".")
+        parsed = urlparse(url)
+        scheme = (parsed.scheme or "").lower()
+        host = (parsed.hostname or "").lower().rstrip(".")
     except Exception:
+        return False
+    if scheme not in ("http", "https"):
         return False
     if not host:
         return False
     # obvious local names
     if host in ("localhost", "localhost.localdomain") or host.endswith((".local", ".internal", ".localdomain")):
         return False
+
+    # a literal IP can be judged directly
     try:
         import ipaddress
 
-        ip = ipaddress.ip_address(host)
+        return not _ip_is_internal(ipaddress.ip_address(host))
     except ValueError:
-        return True  # a regular public hostname
+        pass  # not a literal IP — resolve it below
+
+    resolver = resolve or _resolve_host
+    addresses = resolver(host)
+    if not addresses:
+        return False
+    # EVERY answer must be public: checking only the first would let a
+    # round-robin attacker hide an internal address behind a benign one
     try:
-        return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast)
+        import ipaddress
+
+        for addr in addresses:
+            if _ip_is_internal(ipaddress.ip_address(addr)):
+                return False
+    except ValueError:
+        return False
     except Exception:
         return False
+    return True
 
 
 def embed_chapter_images(cleaned_html: str, page_url: str, chapter_idx: int, download=None, max_images: int = _MAX_IMAGES_PER_CHAPTER):

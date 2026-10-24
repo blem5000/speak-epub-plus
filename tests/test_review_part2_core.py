@@ -166,6 +166,47 @@ class TestEpubGate:
     def test_image_host_guard_blocks_internal_addresses(self):
         import core.epub as epub_mod
 
-        assert epub_mod._allowed_image_host("http://169.254.169.254/x.png", "https://site.com/a") is False
-        assert epub_mod._allowed_image_host("http://localhost/x.png", "https://site.com/a") is False
-        assert epub_mod._allowed_image_host("https://cdn.site.net/x.png", "https://site.com/a") is True
+        # a resolver is injected so the test needs no DNS: the guard resolves
+        # names now (see the SSRF note below)
+        public = lambda host: ["93.184.216.34"]
+        assert epub_mod._allowed_image_host("http://169.254.169.254/x.png", "https://site.com/a", resolve=public) is False
+        assert epub_mod._allowed_image_host("http://localhost/x.png", "https://site.com/a", resolve=public) is False
+        assert epub_mod._allowed_image_host("https://cdn.site.net/x.png", "https://site.com/a", resolve=public) is True
+
+    def test_image_host_guard_resolves_names_to_block_ssrf(self):
+        """A public NAME that resolves to an internal address must be refused.
+
+        Checking only the literal text passed http://169.254.169.254.nip.io/
+        (the classic bypass around an IP-literal filter) and the fetched body
+        was embedded into the EPUB.
+        """
+        import core.epub as epub_mod
+
+        link_local = lambda host: ["169.254.169.254"]
+        assert (
+            epub_mod._allowed_image_host(
+                "http://169.254.169.254.nip.io/latest/meta-data/", "https://site.com/a", resolve=link_local
+            )
+            is False
+        )
+
+        # every answer must be public — a round-robin host cannot hide an
+        # internal address behind a benign one
+        mixed = lambda host: ["93.184.216.34", "10.0.0.5"]
+        assert epub_mod._allowed_image_host("https://mixed.example/x.png", "https://site.com/a", resolve=mixed) is False
+
+    def test_image_host_guard_fails_closed_on_unresolvable_hosts(self):
+        import core.epub as epub_mod
+
+        unresolvable = lambda host: None
+        assert (
+            epub_mod._allowed_image_host("https://nowhere.invalid/x.png", "https://site.com/a", resolve=unresolvable)
+            is False
+        )
+
+    def test_image_host_guard_only_allows_http_and_https(self):
+        import core.epub as epub_mod
+
+        public = lambda host: ["93.184.216.34"]
+        for bad in ("ftp://cdn.example.com/x.png", "file:///etc/passwd", "gopher://cdn.example.com/x"):
+            assert epub_mod._allowed_image_host(bad, "https://site.com/a", resolve=public) is False, bad
