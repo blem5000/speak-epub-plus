@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 # ---------------------------------------------------------------------------
@@ -267,13 +267,27 @@ def _ip_is_internal(ip: Any) -> bool:
         return True
 
 
+#: Per-run memo of host -> addresses (a chapter can name 20 images on one
+#: CDN host, and a book has hundreds of chapters: without this every <img>
+#: would trigger its own DNS lookup).
+_HOST_CACHE: Dict[str, Optional[List[str]]] = {}
+
+
 def _resolve_host(host: str) -> Optional[List[str]]:
-    """All addresses a host resolves to, or None when it cannot be resolved."""
+    """All addresses a host resolves to, or None when it cannot be resolved.
+
+    Memoised per process: the answer decides whether an image may be fetched,
+    and a book repeats the same CDN host for every image. A negative result is
+    cached too — retrying a dead name per image would cost a DNS timeout each.
+    """
+    if host in _HOST_CACHE:
+        return _HOST_CACHE[host]
     try:
         import socket
 
         infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     except Exception:
+        _HOST_CACHE[host] = None
         return None
     out: List[str] = []
     for info in infos:
@@ -281,7 +295,9 @@ def _resolve_host(host: str) -> Optional[List[str]]:
             out.append(str(info[4][0]))
         except Exception:
             continue
-    return out or None
+    result = out or None
+    _HOST_CACHE[host] = result
+    return result
 
 
 def _allowed_image_host(url: str, page_url: str, resolve=None) -> bool:
