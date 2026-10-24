@@ -70,6 +70,7 @@ DEFAULT_STORE: Dict[str, Any] = {
     "locale": "",
     "engine": "auto",
     "localVoice": "",
+    "kokoroVoice": "am_michael",
     "localCuda": False,
     "dialogueVoice": "",
     "normalizeAudio": False,
@@ -2321,6 +2322,71 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         except Exception as e:
             return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
 
+    if method in ("kokoroVoices", "kokoro_voices", "listKokoroVoices"):
+        try:
+            from core.tts_kokoro import list_kokoro_voices
+
+            return {"id": rid, "result": list_kokoro_voices()}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+    if method in ("ensureKokoroEngine", "ensure_kokoro_engine"):
+        # the Kokoro packages are an optional download — fetch on demand
+        def _emit_kokoro_engine_log(line: str) -> None:
+            if emit_fn:
+                try:
+                    emit_fn("logLine", {"line": line})
+                except Exception:
+                    pass
+
+        try:
+            from core.tts_kokoro import ensure_kokoro_engine
+
+            result = ensure_kokoro_engine(on_log=_emit_kokoro_engine_log)
+            if not result.get("ok"):
+                return {
+                    "id": rid,
+                    "error": {"code": "KOKORO_ENGINE_UNAVAILABLE", "message": str(result.get("message", ""))},
+                }
+            return {"id": rid, "result": result}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
+    if method in ("downloadKokoroModel", "download_kokoro_model"):
+        params = request.get("params") or {}
+        if not isinstance(params, dict):
+            params = {}
+
+        def _flag_kokoro(value: Any) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return value != 0
+            if isinstance(value, str):
+                return value.strip().lower() not in ("", "0", "false", "no", "off")
+            return False
+
+        force_k = _flag_kokoro(params.get("force", False))
+
+        def _emit_kokoro_dl_log(line: str) -> None:
+            if emit_fn:
+                try:
+                    emit_fn("logLine", {"line": line})
+                except Exception:
+                    pass
+
+        try:
+            from core.tts_kokoro import download_kokoro_model
+
+            result = download_kokoro_model(on_log=_emit_kokoro_dl_log, force=force_k)
+            return {"id": rid, "result": result}
+        except ValueError as e:
+            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+        except RuntimeError as e:
+            return {"id": rid, "error": {"code": "DOWNLOAD_FAILED", "message": str(e)}}
+        except Exception as e:
+            return {"id": rid, "error": {"code": "EXCEPTION", "message": str(e)}}
+
     if method in ("getSearchHistory", "searchHistory", "get_search_history"):
         try:
             from core.userdata import get_search_history
@@ -2552,7 +2618,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         if engine_pv is None:
             engine_pv = store_pv.get("engine", "auto")
         engine_pv = engine_pv.strip().lower() if isinstance(engine_pv, str) else "auto"
-        if engine_pv not in ("auto", "edge", "local"):
+        if engine_pv not in ("auto", "edge", "local", "kokoro"):
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid engine {engine_pv}"}}
         local_voice_given = "localVoice" in params or "local_voice" in params
         local_voice_pv = params.get("localVoice", params.get("local_voice"))
@@ -2577,9 +2643,30 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             _pv_voice = local_voice_pv or _DEF_PV
             if local_voice_pv is not None:
                 _pv_voice = _validate_pv(local_voice_pv)
-            engine_used = _resolve_pv(engine_pv, local_voice_pv)
-            if engine_used == "local" and not _ready_pv(_pv_voice):
-                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": _unavail_pv(_pv_voice)}}
+            if engine_pv == "kokoro":
+                from core.tts_kokoro import (
+                    DEFAULT_KOKORO_VOICE as _DKV_PV,
+                    kokoro_ready as _kready_pv,
+                    validate_kokoro_voice as _kvalidate_pv,
+                )
+
+                _pv_voice = _kvalidate_pv(local_voice_pv or _DKV_PV)
+                if not _kready_pv(_pv_voice):
+                    return {
+                        "id": rid,
+                        "error": {
+                            "code": "VALUE_ERROR",
+                            "message": (
+                                f"Kokoro voice {_pv_voice} is unavailable — "
+                                "download the Kokoro model in Settings first"
+                            ),
+                        },
+                    }
+                engine_used = "kokoro"
+            else:
+                engine_used = _resolve_pv(engine_pv, local_voice_pv)
+                if engine_used == "local" and not _ready_pv(_pv_voice):
+                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": _unavail_pv(_pv_voice)}}
             preview_dir = _uob_pv() / "_preview"
             try:
                 preview_dir.mkdir(parents=True, exist_ok=True)
@@ -2599,14 +2686,20 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                         engine_used,
                         str(rate_pv),
                         voice_pv,
-                        _pv_voice if engine_used == "local" else "",
+                        _pv_voice if engine_used in ("local", "kokoro") else "",
                     ]
                 ).encode("utf-8")
             ).hexdigest()[:16]
             out_pv = preview_dir / f"voice_sample_{_pv_digest}.mp3"
 
             async def _preview_run():
-                if engine_used == "local":
+                if engine_used == "kokoro":
+                    import asyncio as _aio_pv
+
+                    from core.tts_kokoro import tts_text_to_mp3_kokoro as _kok_pv
+
+                    await _aio_pv.to_thread(_kok_pv, text_pv, str(out_pv), _pv_voice, 3, rate_pv)
+                elif engine_used == "local":
                     import asyncio as _aio_pv
 
                     from core.tts_local import tts_text_to_mp3_local as _local_pv
@@ -2676,6 +2769,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         rate_p = params.get("rate")
         engine_p = params.get("engine")
         local_voice_p = params.get("localVoice", params.get("local_voice"))
+        kokoro_voice_p = params.get("kokoroVoice", params.get("kokoro_voice"))
         dialogue_voice_p = params.get("dialogueVoice", params.get("dialogue_voice"))
         normalize_audio_p = params.get("normalizeAudio", params.get("normalize_audio"))
         trim_silence_p = params.get("trimSilence", params.get("trim_silence"))
@@ -2795,13 +2889,18 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             except Exception:
                 engine_p = "auto"
         engine_p = engine_p.strip().lower() if isinstance(engine_p, str) else "auto"
-        if engine_p not in ("auto", "edge", "local"):
+        if engine_p not in ("auto", "edge", "local", "kokoro"):
             return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid engine {engine_p}"}}
         if local_voice_p is None:
             try:
                 local_voice_p = store_audio.get("localVoice") if isinstance(store_audio, dict) else None
             except Exception:
                 local_voice_p = None
+        if kokoro_voice_p is None:
+            try:
+                kokoro_voice_p = store_audio.get("kokoroVoice") if isinstance(store_audio, dict) else None
+            except Exception:
+                kokoro_voice_p = None
         local_voice_p = local_voice_p.strip() if isinstance(local_voice_p, str) else None
         if local_voice_p == "":
             local_voice_p = None
@@ -2821,6 +2920,29 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             _check_voice = local_voice_p or _DEFAULT_LOCAL_VOICE
             if not _local_voice_ready(_check_voice):
                 return {"id": rid, "error": {"code": "VALUE_ERROR", "message": _local_unavail_msg(_check_voice)}}
+        if engine_p == "kokoro":
+            # same contract: the model download is an explicit Settings action
+            try:
+                from core.tts_kokoro import (
+                    DEFAULT_KOKORO_VOICE as _DEFAULT_KOKORO_VOICE,
+                    kokoro_ready as _kokoro_ready,
+                    validate_kokoro_voice as _kokoro_validate,
+                )
+
+                _kcheck = _kokoro_validate(local_voice_p or _DEFAULT_KOKORO_VOICE)
+            except ValueError as e:
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
+            if not _kokoro_ready(_kcheck):
+                return {
+                    "id": rid,
+                    "error": {
+                        "code": "VALUE_ERROR",
+                        "message": (
+                            f"Kokoro voice {_kcheck} is unavailable — "
+                            "download the Kokoro model in Settings first"
+                        ),
+                    },
+                }
         if chunk_p is None:
             try:
                 chunk_p = (store_audio.get("chunk-size", 3500) if isinstance(store_audio, dict) else 3500)
@@ -2941,6 +3063,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 rate=rate_p,
                 engine=engine_p,
                 local_voice=local_voice_p,
+                kokoro_voice=kokoro_voice_p,
                 dialogue_voice=dialogue_voice_p,
                 author=author_p,
                 cover_url=cover_url_p,
@@ -3035,6 +3158,8 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     return "engine"
                 if low in ("localvoice", "local_voice", "local-voice"):
                     return "localVoice"
+                if low in ("kokorovoice", "kokoro_voice", "kokoro-voice"):
+                    return "kokoroVoice"
                 if low in ("dialoguevoice", "dialogue_voice", "dialogue-voice"):
                     return "dialogueVoice"
                 if low in ("normalizeaudio", "normalize_audio", "normalize-audio"):
@@ -3092,7 +3217,7 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                     if not isinstance(v, str):
                         return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "engine must be string"}}
                     vv = v.strip().lower()
-                    if vv not in ("auto", "edge", "local"):
+                    if vv not in ("auto", "edge", "local", "kokoro"):
                         return {"id": rid, "error": {"code": "VALUE_ERROR", "message": f"invalid engine {vv}"}}
                     sanitized[ck] = vv
                 elif ck == "localVoice":
@@ -3113,6 +3238,27 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                             sanitized[ck] = vv
                     else:
                         return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "localVoice must be string"}}
+                elif ck == "kokoroVoice":
+                    if v is None:
+                        sanitized[ck] = ""
+                    elif isinstance(v, str):
+                        vv = v.strip()
+                        if not vv:
+                            sanitized[ck] = ""
+                        else:
+                            try:
+                                from core.tts_kokoro import validate_kokoro_voice as _kv_validate
+
+                                sanitized[ck] = _kv_validate(vv)
+                            except ValueError:
+                                return {
+                                    "id": rid,
+                                    "error": {"code": "VALUE_ERROR", "message": f"unknown Kokoro voice {vv}"},
+                                }
+                            except ImportError:
+                                sanitized[ck] = vv
+                    else:
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": "kokoroVoice must be string"}}
                 elif ck == "dialogueVoice":
                     # second Edge voice for quoted dialogue; "" = single voice
                     if v is None:

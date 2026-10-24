@@ -103,6 +103,32 @@ jobs:
           if (-not (Test-Path "$localZipBase.zip")) { throw "local engine archive missing" }
           Write-Host "Local engine asset: $localZipBase.zip ($([math]::Round((Get-Item "$localZipBase.zip").Length/1MB,1)) MB)"
 
+          # ---- the optional Kokoro-engine tier --------------------------------
+          # A second offline engine (higher quality than Piper). Same contract
+          # as the Piper tier: its own folder, its own archive, downloaded only
+          # when the user picks Kokoro. Also BEFORE the runtime trim.
+          $kokoroReq = Join-Path $reqDir 'requirements-kokoro.txt'
+          $kokoroDir = Join-Path $env:GITHUB_WORKSPACE 'build/kokoro-engine'
+          Remove-Item $kokoroDir -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $kokoroDir | Out-Null
+          $ErrorActionPreference = 'Continue'
+          & $py -m pip install --disable-pip-version-check --quiet --target $kokoroDir -r $kokoroReq
+          $kokoroExit = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          if ($kokoroExit -ne 0) { throw "pip install (kokoro engine) failed ($kokoroExit)" }
+          # The packages must be importable from the target folder alone.
+          $kimp = & $py -c "import sys; sys.path.insert(0, r'$kokoroDir'); import kokoro_onnx, onnxruntime, numpy; print('ok')" 2>&1
+          if ($LASTEXITCODE -ne 0 -or ($kimp -join "`n") -ne 'ok') {
+            throw "the Kokoro engine does not import: $kimp"
+          }
+          Get-ChildItem $kokoroDir -Recurse -Directory -Filter '__pycache__' | ForEach-Object {
+            Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          $kokoroZipBase = Join-Path $env:GITHUB_WORKSPACE ([System.IO.Path]::GetFileNameWithoutExtension($descriptor.kokoro_asset))
+          & $py -c "import shutil, sys; shutil.make_archive(sys.argv[1], 'zip', root_dir=sys.argv[2], base_dir='.')" $kokoroZipBase $kokoroDir
+          if (-not (Test-Path "$kokoroZipBase.zip")) { throw "kokoro engine archive missing" }
+          Write-Host "Kokoro engine asset: $kokoroZipBase.zip ($([math]::Round((Get-Item "$kokoroZipBase.zip").Length/1MB,1)) MB)"
+
       - name: Build the self-contained CLI package
         shell: pwsh
         run: |
@@ -196,6 +222,7 @@ jobs:
             - **`Speak-EPUB-<version>-x64-portable.zip`** — portable build: unzip anywhere and run `speak-epub.exe`
             - **`speak-epub-runtime-<hash>.zip`** — the Python runtime tier (downloaded once and cached, see below)
             - **`speak-epub-local-<hash>.zip`** — the optional local TTS engine (Piper + ONNX), only needed for offline synthesis
+            - **`speak-epub-kokoro-<hash>.zip`** — the optional Kokoro TTS engine (higher quality than Piper, still offline)
             - **`speak-epub-cli-<version>-x64.zip`** — the self-contained CLI (no Python needed; the runtime is downloaded on the first run)
             - **`latest.json`** + the signed updater bundle — used by the in-app updater
             - Source code archive (auto-added by GitHub)
@@ -257,7 +284,8 @@ jobs:
           $desc = Get-Content (Join-Path $runtime 'runtime.json') -Raw | ConvertFrom-Json
           $assets = @(
             (Join-Path $env:GITHUB_WORKSPACE $desc.asset),
-            (Join-Path $env:GITHUB_WORKSPACE $desc.local_asset)
+            (Join-Path $env:GITHUB_WORKSPACE $desc.local_asset),
+            (Join-Path $env:GITHUB_WORKSPACE $desc.kokoro_asset)
           )
           foreach ($zip in $assets) {
             if (-not (Test-Path $zip)) { throw "tier asset missing: $zip" }

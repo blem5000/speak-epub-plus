@@ -394,6 +394,7 @@ def build_audio(
     rate: str | None = None,
     engine: str | None = None,
     local_voice: str | None = None,
+    kokoro_voice: str | None = None,
     dialogue_voice: str | None = None,
     author: str | None = None,
     cover_url: str | None = None,
@@ -473,7 +474,7 @@ def build_audio(
         if local_voice is None:
             local_voice = _store_engine.get("localVoice") if isinstance(_store_engine, dict) else None
     engine = engine.strip().lower() if isinstance(engine, str) else "auto"
-    if engine not in ("auto", "edge", "local"):
+    if engine not in ("auto", "edge", "local", "kokoro"):
         engine = "auto"
     if isinstance(local_voice, str):
         local_voice = local_voice.strip() or None
@@ -650,8 +651,8 @@ def build_audio(
     # fail fast / warn upfront: truncation auto-repair, chapter merging and
     # M4B/M4A all need ffmpeg — better to know before hours of synthesis
     if not ffmpeg_available():
-        if str(engine or "").strip().lower() == "local":
-            raise RuntimeError("local TTS engine requires ffmpeg on PATH — install it and re-run")
+        if str(engine or "").strip().lower() in ("local", "kokoro"):
+            raise RuntimeError(f"{engine} TTS engine requires ffmpeg on PATH — install it and re-run")
         _emit_log("warning: ffmpeg not found on PATH — chapter merging, M4B/M4A and truncation auto-repair are disabled")
 
     # The resume lock covers the WHOLE build: the identity wipe, the TTS run,
@@ -807,6 +808,7 @@ def _build_audio_locked(
             jobs, voice, parallel, retries,
             on_part_status=on_part_status, on_log=_emit_log, on_progress=on_progress,
             rate=rate, adaptive=True, engine=engine, local_voice=local_voice,
+            kokoro_voice=kokoro_voice,
             resume_lock=resume_lock,
         )
 

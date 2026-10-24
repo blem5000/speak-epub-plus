@@ -1554,6 +1554,7 @@ async def run_part_jobs(
     parallel_max: Optional[int] = None,
     engine: str = "edge",
     local_voice: Optional[str] = None,
+    kokoro_voice: Optional[str] = None,
     resume_lock: Any = None,
 ) -> None:
     """
@@ -1607,11 +1608,35 @@ async def run_part_jobs(
                 pass
         return
 
-    # Engine resolution: 'auto' falls back to Edge when the local model is
-    # missing or the machine is below the local-synthesis CPU threshold.
+    # Engine resolution: 'auto' falls back to Edge when neither offline model
+    # is usable. Explicit 'local' (Piper) and 'kokoro' both require their own
+    # model to be downloaded; 'auto' only upgrades when one actually is.
     engine_used = "edge"
     local_voice_eff: Optional[str] = None
-    if isinstance(engine, str) and engine.strip().lower() not in ("", "edge"):
+    _eng_req = engine.strip().lower() if isinstance(engine, str) else "auto"
+    if _eng_req == "kokoro":
+        from core.tts_kokoro import (
+            DEFAULT_KOKORO_VOICE as _DKV,
+            kokoro_ready as _kready,
+            validate_kokoro_voice as _kvalidate,
+        )
+
+        _kv = kokoro_voice if isinstance(kokoro_voice, str) and kokoro_voice.strip() else _DKV
+        _kv = _kvalidate(_kv)
+        if not _kready(_kv):
+            raise ValueError(
+                f"Kokoro voice {_kv} is unavailable — download the Kokoro model in Settings first"
+            )
+        engine_used = "kokoro"
+        local_voice_eff = _kv
+        _engine_msg = f"engine: Kokoro {_kv} (offline synthesis)"
+        print(_engine_msg)
+        if on_log:
+            try:
+                on_log(_engine_msg)
+            except Exception:
+                pass
+    elif _eng_req not in ("", "edge", "auto"):
         from core.tts_local import DEFAULT_LOCAL_VOICE, effective_local_parallel, resolve_engine
 
         try:
@@ -1640,6 +1665,43 @@ async def run_part_jobs(
                 on_log(_engine_msg)
             except Exception:
                 pass
+    elif _eng_req == "auto":
+        # auto: prefer an offline engine when one is actually installed
+        try:
+            from core.tts_kokoro import (
+                DEFAULT_KOKORO_VOICE as _DKV2,
+                kokoro_ready as _kready2,
+            )
+
+            _kv2 = kokoro_voice if isinstance(kokoro_voice, str) and kokoro_voice.strip() else _DKV2
+            if _kready2(_kv2):
+                engine_used = "kokoro"
+                local_voice_eff = _kv2
+                _engine_msg = f"engine: auto -> Kokoro {_kv2} (offline synthesis)"
+                print(_engine_msg)
+                if on_log:
+                    try:
+                        on_log(_engine_msg)
+                    except Exception:
+                        pass
+            else:
+                from core.tts_local import DEFAULT_LOCAL_VOICE as _DLV3, resolve_engine as _re3
+
+                _r3 = _re3("auto", local_voice)
+                if _r3 == "local":
+                    engine_used = "local"
+                    local_voice_eff = (
+                        local_voice if isinstance(local_voice, str) and local_voice.strip() else _DLV3
+                    )
+                    _engine_msg = f"engine: auto -> local Piper {local_voice_eff} (offline synthesis)"
+                    print(_engine_msg)
+                    if on_log:
+                        try:
+                            on_log(_engine_msg)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
     _resume_lock: Any = resume_lock
     _owns_lock = _resume_lock is None
@@ -1700,6 +1762,10 @@ async def run_part_jobs(
     pool_size = parallel
     if engine_used == "local":
         pool_size = effective_local_parallel()
+    elif engine_used == "kokoro":
+        from core.tts_kokoro import effective_kokoro_parallel
+
+        pool_size = effective_kokoro_parallel()
     elif adaptive:
         max_par = ADAPTIVE_MAX_PARALLEL
         try:
@@ -1810,7 +1876,13 @@ async def run_part_jobs(
                     if rate:
                         tts_kwargs["rate"] = rate
                     try:
-                        if engine_used == "local":
+                        if engine_used == "kokoro":
+                            from core.tts_kokoro import tts_text_to_mp3_kokoro
+
+                            await asyncio.to_thread(
+                                tts_text_to_mp3_kokoro, job.text, job.output_path, local_voice_eff, **tts_kwargs
+                            )
+                        elif engine_used == "local":
                             from core.tts_local import tts_text_to_mp3_local
 
                             await asyncio.to_thread(

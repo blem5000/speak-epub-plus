@@ -628,6 +628,11 @@ export async function localVoices(opts?: { signal?: AbortSignal }): Promise<RpcR
   return callSidecar("localVoices", {}, opts);
 }
 
+/** Kokoro TTS status: curated voices, model download state, models dir. */
+export async function kokoroVoices(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
+  return callSidecar("kokoroVoices", {}, opts);
+}
+
 /**
  * The Edge voice catalogue (hundreds of voices) — used by the searchable
  * voice picker in Settings. The sidecar fetches it from edge-tts.
@@ -720,6 +725,27 @@ export async function rebuildChapter(
  */
 export async function ensureLocalEngine(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
   return callSidecar("ensureLocalEngine", {}, opts);
+}
+
+/**
+ * Download the optional Kokoro engine packages (kokoro-onnx + onnxruntime
+ * + phonemizer, ~65 MB). Idempotent: a cached engine returns immediately.
+ */
+export async function ensureKokoroEngine(opts?: { signal?: AbortSignal }): Promise<RpcResponse> {
+  return callSidecar("ensureKokoroEngine", {}, opts);
+}
+
+/**
+ * Download the Kokoro weights (`kokoro-v1.0.onnx` ~310 MB + the 27 MB voice
+ * pack) into the models directory. `force` re-downloads a present-but-broken
+ * model.
+ */
+export async function downloadKokoroModel(
+  opts?: { signal?: AbortSignal; force?: boolean }
+): Promise<RpcResponse> {
+  const params: Record<string, unknown> = {};
+  if (opts?.force) params.force = true;
+  return callSidecar("downloadKokoroModel", params, opts);
 }
 
 /**

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { t } from "@/i18n";
-import { getStore, setStore, localVoices, listVoices, downloadLocalVoice, ensureLocalEngine, previewVoice, getPronunciation, setPronunciation } from "@/lib/sidecar";
+import { getStore, setStore, localVoices, listVoices, downloadLocalVoice, ensureLocalEngine, previewVoice, getPronunciation, setPronunciation, kokoroVoices, ensureKokoroEngine, downloadKokoroModel } from "@/lib/sidecar";
 import PronunciationEditor, { type PronunciationEntry } from "./PronunciationEditor";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentVersion, manualCheck } from "@/lib/updater";
@@ -119,6 +119,16 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
   const [defaultLocalVoice, setDefaultLocalVoice] = useState<string>("en_US-lessac-medium");
   const [localBusy, setLocalBusy] = useState<boolean>(false);
   const [localMsg, setLocalMsg] = useState<string>("");
+  // Kokoro (the second offline engine; better quality than Piper)
+  const [kokoroVoice, setKokoroVoice] = useState<string>("am_michael");
+  const [kokoroVoiceList, setKokoroVoiceList] = useState<
+    Array<{ id: string; lang: string; gender: string; accent: string; note: string; downloaded: boolean }>
+  >([]);
+  const [kokoroAvailable, setKokoroAvailable] = useState<boolean>(false);
+  const [kokoroModelReady, setKokoroModelReady] = useState<boolean>(false);
+  const [defaultKokoroVoice, setDefaultKokoroVoice] = useState<string>("am_michael");
+  const [kokoroBusy, setKokoroBusy] = useState<boolean>(false);
+  const [kokoroMsg, setKokoroMsg] = useState<string>("");
   // show only the "high" quality Piper voices in the catalogue
   const [highOnly, setHighOnly] = useState<boolean>(() => {
     try {
@@ -197,6 +207,30 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
     } catch {
       // surface backend failure as a failed load, not as a missing model
       setLocalMsg(t("settings.localVoice.loadError") as string);
+    }
+  };
+
+  const refreshKokoroVoices = async (): Promise<void> => {
+    try {
+      const res = await kokoroVoices();
+      const r = (res.result as Record<string, unknown>) ?? {};
+      const arr = Array.isArray(r.voices) ? (r.voices as Array<Record<string, unknown>>) : [];
+      setKokoroVoiceList(
+        arr.map((v) => ({
+          id: String(v.id ?? ""),
+          lang: String(v.lang ?? ""),
+          gender: String(v.gender ?? ""),
+          accent: String(v.accent ?? ""),
+          note: String(v.note ?? ""),
+          downloaded: Boolean(v.downloaded),
+        }))
+      );
+      setKokoroAvailable(r.engineAvailable === true);
+      setKokoroModelReady(r.modelReady === true);
+      if (typeof r.default === "string" && r.default.trim()) setDefaultKokoroVoice(r.default.trim());
+    } catch {
+      // the engine is optional: a failure just leaves the section disabled
+      setKokoroAvailable(false);
     }
   };
 
@@ -295,6 +329,11 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
         const lvVal = typeof data.localVoice === "string" ? (data.localVoice as string).trim() : "";
         setLocalVoice(lvVal);
         prevRef.current["localVoice"] = lvVal;
+        const kvVal = typeof data.kokoroVoice === "string" ? (data.kokoroVoice as string).trim() : "";
+        if (kvVal) {
+          setKokoroVoice(kvVal);
+          prevRef.current["kokoroVoice"] = kvVal;
+        }
         const cudaVal = data.localCuda === true;
         setLocalCuda(cudaVal);
         prevRef.current["localCuda"] = cudaVal;
@@ -311,6 +350,7 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
         setTrimSilence(tsVal);
         prevRef.current["trimSilence"] = tsVal;
         void refreshLocalVoices();
+        void refreshKokoroVoices();
         setLoading(false);
       } catch {
         if (alive) setLoading(false);
@@ -440,6 +480,7 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
           else if (revertKey === "audioBitrate") setAudioBitrate(String(revertVal));
           else if (revertKey === "engine") setEngine(String(revertVal));
           else if (revertKey === "localVoice") setLocalVoice(String(revertVal));
+          else if (revertKey === "kokoroVoice") setKokoroVoice(String(revertVal));
           else if (revertKey === "dialogueVoice") {
             const rv = String(revertVal);
             setDialogueVoice(rv);
@@ -523,11 +564,65 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
   };
 
   const handleEngineChange = (val: string): void => {
-    if (!["auto", "edge", "local"].includes(val) || val === engine) return;
+    if (!["auto", "edge", "local", "kokoro"].includes(val) || val === engine) return;
     if (val === "local" && !piperAvailable) return; // button is disabled, belt and braces
+    if (val === "kokoro" && !kokoroAvailable) return; // ditto for the optional engine
     const prev = prevRef.current["engine"];
     setEngine(val);
     void persist({ engine: val }, "engine", prev);
+  };
+
+  const handleKokoroVoiceChange = (val: string): void => {
+    setKokoroVoice(val);
+    setKokoroMsg("");
+    // a SEPARATE store key: sharing `localVoice` with Piper made picking a
+    // Kokoro voice silently change the Piper voice (and vice versa)
+    const prev = prevRef.current["kokoroVoice"];
+    prevRef.current["kokoroVoice"] = val;
+    void persist({ kokoroVoice: val }, "kokoroVoice", prev);
+  };
+
+  const handleEnsureKokoro = async (): Promise<void> => {
+    if (kokoroBusy) return;
+    setKokoroBusy(true);
+    setKokoroMsg(t("settings.kokoro.installing") as string);
+    try {
+      const res = await ensureKokoroEngine();
+      if (res.error) {
+        const err = res.error as { message?: string };
+        setKokoroMsg(String(err.message ?? res.error));
+      } else {
+        setKokoroMsg(t("settings.kokoro.installed") as string);
+        showToast(t("settings.kokoro.installed") as string);
+        setKokoroAvailable(true);
+      }
+    } catch (e) {
+      setKokoroMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setKokoroBusy(false);
+      void refreshKokoroVoices();
+    }
+  };
+
+  const handleDownloadKokoroModel = async (force: boolean): Promise<void> => {
+    if (kokoroBusy) return;
+    setKokoroBusy(true);
+    setKokoroMsg(t("settings.kokoro.downloading") as string);
+    try {
+      const res = await downloadKokoroModel({ force });
+      if (res.error) {
+        const err = res.error as { message?: string };
+        setKokoroMsg(String(err.message ?? res.error));
+      } else {
+        setKokoroMsg(t("settings.kokoro.downloaded") as string);
+        showToast(t("settings.kokoro.downloaded") as string);
+      }
+    } catch (e) {
+      setKokoroMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setKokoroBusy(false);
+      void refreshKokoroVoices();
+    }
   };
 
   const handleLocalVoiceChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
@@ -597,7 +692,7 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
     const el = previewAudioRef.current;
     // replay/pause the cached clip — but only while voice/rate/engine are
     // unchanged; any change re-synthesizes so the sample matches the UI
-    const voiceKey = `${voice}|${rateNum}|${engine}|${localVoice}`;
+    const voiceKey = `${voice}|${rateNum}|${engine}|${localVoice}|${kokoroVoice}`;
     if (el && sampleReady && sampleVoiceKey === voiceKey) {
       if (el.paused) {
         void el.play().catch(() => setSampleError(t("settings.sample.error") as string));
@@ -617,7 +712,8 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
         voice,
         rate: rateStr,
         engine,
-        localVoice,
+        // the active offline voice: Kokoro and Piper keep separate keys
+        localVoice: engine === "kokoro" ? kokoroVoice : localVoice,
       });
       if (res.error) {
         const msg = (res.error as { message?: string }).message ?? String(res.error);
@@ -1097,14 +1193,14 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                   <div className="flex flex-col gap-2">
                     <span className="text-body-sm font-medium">{t("settings.engine.label")}</span>
                     <div className="flex flex-wrap gap-2" role="group" aria-label={t("settings.engine.label") as string}>
-                      {(["auto", "edge", "local"] as const).map((opt) => (
+                      {(["auto", "edge", "local", "kokoro"] as const).map((opt) => (
                         <button
                           key={opt}
                           type="button"
                           data-testid={`settings-engine-${opt}`}
                           onClick={() => handleEngineChange(opt)}
                           aria-pressed={engine === opt}
-                          disabled={opt === "local" && !piperAvailable}
+                          disabled={(opt === "local" && !piperAvailable) || (opt === "kokoro" && !kokoroAvailable)}
                           className={`h-9 rounded-md border px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60 ${
                             engine === opt
                               ? "border-accent bg-accent/10 font-medium text-accent"
@@ -1217,6 +1313,82 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                       {localMsg || (localVoiceList.find((v) => v.id === (localVoice || defaultLocalVoice))?.downloaded
                         ? t("settings.localVoice.ready")
                         : t("settings.localVoice.notDownloaded"))}
+                    </span>
+                  </div>
+                </div>
+              </section>
+
+              {/* Kokoro — the higher-quality offline engine */}
+              <section
+                className="rounded-lg border bg-card p-6 shadow-sm"
+                aria-label={t("settings.kokoro.title") as string}
+                data-testid="settings-kokoro"
+              >
+                <h3 className="text-heading font-semibold">{t("settings.kokoro.title")}</h3>
+                <p className="mt-1 text-body-sm text-muted-foreground">{t("settings.kokoro.helper")}</p>
+
+                {!kokoroAvailable && (
+                  <div className="mt-4 flex flex-col gap-2">
+                    <span data-testid="settings-kokoro-noengine" className="text-body-sm text-muted-foreground">
+                      {t("settings.kokoro.noEngine")}
+                    </span>
+                    <button
+                      type="button"
+                      data-testid="settings-kokoro-install-engine"
+                      disabled={kokoroBusy}
+                      onClick={() => void handleEnsureKokoro()}
+                      className="h-9 w-fit rounded-md border border-input bg-card px-3 text-body hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {kokoroBusy ? t("settings.kokoro.installing") : t("settings.kokoro.installEngine")}
+                    </button>
+                  </div>
+                )}
+
+                <div className="mt-4 space-y-4">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-body-sm font-medium">{t("settings.kokoro.voice")}</span>
+                    <select
+                      data-testid="settings-kokoro-voice"
+                      value={kokoroVoice || defaultKokoroVoice}
+                      onChange={(e) => handleKokoroVoiceChange(e.target.value)}
+                      disabled={!kokoroAvailable}
+                      className="h-9 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {(kokoroVoiceList.length
+                        ? kokoroVoiceList
+                        : [{ id: defaultKokoroVoice, lang: "", gender: "", accent: "", note: "", downloaded: false }]
+                      ).map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {`${v.id}${v.accent ? ` · ${v.accent}` : ""}${v.note ? ` · ${v.note}` : ""}`}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      data-testid="settings-kokoro-download"
+                      disabled={kokoroBusy || !kokoroAvailable}
+                      onClick={() => void handleDownloadKokoroModel(false)}
+                      className="h-9 rounded-md border border-input bg-card px-3 text-body hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {kokoroBusy ? t("settings.kokoro.downloading") : t("settings.kokoro.downloadModel")}
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="settings-kokoro-redownload"
+                      disabled={kokoroBusy || !kokoroAvailable}
+                      onClick={() => void handleDownloadKokoroModel(true)}
+                      className="h-9 rounded-md border border-input bg-card px-3 text-body hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {t("settings.kokoro.redownload")}
+                    </button>
+                    <span data-testid="settings-kokoro-status" className="text-body-sm text-muted-foreground">
+                      {kokoroMsg ||
+                        (kokoroModelReady
+                          ? t("settings.kokoro.ready")
+                          : t("settings.kokoro.notDownloaded"))}
                     </span>
                   </div>
                 </div>

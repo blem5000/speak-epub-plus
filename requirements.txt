@@ -1,8 +1,10 @@
 # Speak EPUB dependencies — ONE source of truth, split by the release tiers.
 #
 #   # core  -> installed into the runtime tier (bundled with the app, ~40 MB)
-#   # local -> the Piper engine; shipped as a separate optional download that
-#             is fetched only when the user turns the local engine on (~60 MB)
+#   # local  -> the Piper engine; shipped as a separate optional download that
+#              is fetched only when the user turns the local engine on (~60 MB)
+#   # kokoro -> the Kokoro-82M engine (ONNX); a second, optional offline engine
+#              with higher quality than Piper (~65 MB)
 #
 # The split is done by scripts/runtime_descriptor.py — do not maintain
 # separate requirement files by hand.
@@ -34,3 +36,9 @@ onnxruntime==1.31.0
 pathvalidate==3.3.1
 piper-tts==1.8.0
 protobuf==7.36.2
+
+# --- kokoro ---
+espeakng-loader==0.2.4
+kokoro-onnx==0.6.1
+phonemizer==3.4.0
+soundfile==0.14.0

@@ -38,17 +38,19 @@ RELEASE_URL_TEMPLATE = (
 
 CORE_MARKER = "# core"
 LOCAL_MARKER = "# local"
+KOKORO_MARKER = "# kokoro"
 
 
-def split_requirements(requirements_text: str) -> tuple[list[str], list[str]]:
-    """Split the requirement file into (core, local) by the section markers.
+def split_tiers(requirements_text: str) -> tuple[list[str], list[str], list[str]]:
+    """Split the requirement file into (core, local, kokoro) by the markers.
 
-    Lines before the local marker are core, the rest is local. A file
-    without markers is treated as core only. The marker may be written as
-    `# local`, `# --- local ---` or `# local engine`.
+    Lines before the first marker are core. A file without markers is core
+    only. The marker may be written as `# local`, `# --- local ---` or
+    `# local engine`; likewise `# kokoro`, `# --- kokoro ---`.
     """
     core: list[str] = []
     local: list[str] = []
+    kokoro: list[str] = []
     section = "core"
     for raw in requirements_text.replace("\r\n", "\n").split("\n"):
         line = raw.strip()
@@ -60,11 +62,29 @@ def split_requirements(requirements_text: str) -> tuple[list[str], list[str]]:
             if key.startswith("core"):
                 section = "core"
                 continue
+            if key.startswith("kokoro"):
+                section = "kokoro"
+                continue
             if key.startswith("local"):
                 section = "local"
                 continue
             continue
-        (local if section == "local" else core).append(line)
+        if section == "kokoro":
+            kokoro.append(line)
+        elif section == "local":
+            local.append(line)
+        else:
+            core.append(line)
+    return core, local, kokoro
+
+
+def split_requirements(requirements_text: str) -> tuple[list[str], list[str]]:
+    """Split the requirement file into (core, local) — the historical 2-way view.
+
+    Kept for callers/tests that predate the Kokoro tier; the authoritative
+    splitter is `split_tiers`.
+    """
+    core, local, _kokoro = split_tiers(requirements_text)
     return core, local
 
 
@@ -89,17 +109,24 @@ def local_hash(req_sha: str) -> str:
     return _tier_hash("n/a", req_sha, "local")
 
 
+def kokoro_hash(req_sha: str) -> str:
+    """Cache key of the optional Kokoro-engine tier."""
+    return _tier_hash("n/a", req_sha, "kokoro")
+
+
 def build_descriptor(
     python_version: str,
     requirements_text: str,
     release_url: str | None = None,
 ) -> dict:
     """The descriptor written next to the app tier (runtime.json)."""
-    core, local = split_requirements(requirements_text)
+    core, local, kokoro = split_tiers(requirements_text)
     core_sha = requirements_sha256(core)
     local_sha = requirements_sha256(local)
+    kokoro_sha = requirements_sha256(kokoro)
     rh = runtime_hash(python_version, core_sha)
     lh = local_hash(local_sha)
+    kh = kokoro_hash(kokoro_sha)
     url = (release_url or RELEASE_URL_TEMPLATE).rstrip("/")
     return {
         "format": RUNTIME_FORMAT_VERSION,
@@ -111,17 +138,26 @@ def build_descriptor(
         "local_hash": lh,
         "local_requirements_sha256": local_sha,
         "local_asset": f"speak-epub-local-{lh}.zip",
+        "kokoro_hash": kh,
+        "kokoro_requirements_sha256": kokoro_sha,
+        "kokoro_asset": f"speak-epub-kokoro-{kh}.zip",
     }
 
 
 def write_split_files(requirements_text: str, out_dir: Path) -> tuple[Path, Path]:
-    """Write the two pip requirement files the CI installs from."""
-    core, local = split_requirements(requirements_text)
+    """Write the pip requirement files the CI installs from.
+
+    Returns (core, local) for backward compatibility; the Kokoro file is
+    written alongside as `requirements-kokoro.txt`.
+    """
+    core, local, kokoro = split_tiers(requirements_text)
     out_dir.mkdir(parents=True, exist_ok=True)
     core_path = out_dir / "requirements-core.txt"
     local_path = out_dir / "requirements-local.txt"
+    kokoro_path = out_dir / "requirements-kokoro.txt"
     core_path.write_text("\n".join(core) + "\n", encoding="utf-8")
     local_path.write_text("\n".join(local) + "\n", encoding="utf-8")
+    kokoro_path.write_text("\n".join(kokoro) + "\n", encoding="utf-8")
     return core_path, local_path
 
 
@@ -142,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
     out.write_text(json.dumps(descriptor, indent=2) + "\n", encoding="utf-8")
     print(f"runtime {descriptor['hash']} -> {out} (asset {descriptor['asset']})")
     print(f"local   {descriptor['local_hash']} (asset {descriptor['local_asset']})")
+    print(f"kokoro  {descriptor['kokoro_hash']} (asset {descriptor['kokoro_asset']})")
     if args.split_out_dir:
         core_path, local_path = write_split_files(text, Path(args.split_out_dir))
         print(f"split requirements: {core_path} {local_path}")
