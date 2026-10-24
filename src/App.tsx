@@ -573,7 +573,7 @@ export default function App(): JSX.Element {
 
   // Wizard orchestrator — one Start: fetch → EPUB (if wanted) → audio (if wanted)
   const handleStartJob = async (rangeFrom?: number, rangeTo?: number): Promise<void> => {
-    if (!hasSelectedUrl || chapterLoading || N === 0 || jobRunning) return;
+    if (!hasSelectedUrl || chapterLoading || N === 0 || jobRunning || queueRunning) return;
     if (!epubWanted && !audioWanted) return;
     const rf = rangeFrom ?? from;
     const rt = rangeTo ?? to;
@@ -954,6 +954,10 @@ export default function App(): JSX.Element {
                 onChangeRange={handleRangeChange}
                 onStartRange={(rf, rt) => void handleStartJob(rf, rt)}
                 startLabel={t("wizard.start")}
+                onStop={handleStopAll}
+                stopLabel={t("wizard.stop")}
+                stopVisible={jobRunning || queueRunning}
+                startBlocked={queueRunning}
               />
               <div className="flex flex-wrap items-center gap-4 text-body-sm">
                 <label className="flex items-center gap-2">
@@ -1004,21 +1008,11 @@ export default function App(): JSX.Element {
                   {pickerToast}
                 </div>
               ) : null}
-              {jobRunning ? (
+              {jobRunning && phase !== "idle" ? (
                 <div className="flex flex-wrap items-center gap-3" data-testid="wizard-progress">
-                  <button
-                    type="button"
-                    data-testid="wizard-stop"
-                    onClick={handleStopAll}
-                    className="rounded-md border border-destructive/40 bg-card px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    {t("wizard.stop")}
-                  </button>
-                  {phase !== "idle" ? (
-                    <span data-testid="wizard-phase" className="text-body-sm text-muted-foreground" role="status" aria-live="polite">
-                      {t(`wizard.phase.${phase}`)}
-                    </span>
-                  ) : null}
+                  <span data-testid="wizard-phase" className="text-body-sm text-muted-foreground" role="status" aria-live="polite">
+                    {t(`wizard.phase.${phase}`)}
+                  </span>
                 </div>
               ) : null}
             </div>

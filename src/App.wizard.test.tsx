@@ -246,4 +246,29 @@ describe("App wizard — single Start orchestration", () => {
     });
     expect(screen.getByTestId("wizard-output-dir").textContent).toContain("D:\\Books\\Audio");
   });
+  it("offers the general Stop next to Start while a batch queue runs", async () => {
+    const user = userEvent.setup();
+    // a batch drives the sidecar directly, so it is NOT part of jobRunning:
+    // Start used to stay enabled with no Stop offered anywhere
+    mockCallSidecar.mockImplementation(async (method: unknown) => {
+      if (method === "getSelection")
+        return { id: "0", result: { selection: [], from: 1, to: 2, url: "https://www.novelphoenix.com/novel/123" } };
+      if (method === "listChapters") return await new Promise(() => {});
+      return { id: "0", result: {} };
+    });
+
+    render(<App />);
+    await screen.findByTestId("wizard-options");
+    // no Stop before anything runs
+    expect(screen.queryByTestId("wizard-stop")).toBeNull();
+
+    await user.click(screen.getByTestId("queue-add-0"));
+    await waitFor(() => expect(screen.getByTestId("queue-panel")).toBeInTheDocument());
+    await user.click(screen.getByTestId("queue-convert"));
+
+    const stop = await screen.findByTestId("wizard-stop");
+    expect(stop).toBeInTheDocument();
+    // the same Start must not be re-enterable while the batch holds the sidecar
+    expect(screen.getByTestId("range-start")).toBeDisabled();
+  });
 });

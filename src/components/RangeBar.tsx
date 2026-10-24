@@ -15,6 +15,23 @@ type RangeBarProps = {
   onStartRange: (from: number, to: number) => void;
   /** Wizard mode: override the Start button label (e.g. "Download & build"). */
   startLabel?: string;
+  /**
+   * General Stop: cancels EVERYTHING this app is running (fetch, EPUB build,
+   * audiobook build, batch queue). Rendered next to Start while `busy`.
+   */
+  onStop?: () => void;
+  stopLabel?: string;
+  /**
+   * Whether anything is running at all. `busy` disables Start; this decides
+   * whether Stop is offered, so a batch queue (which does not set `busy`)
+   * still gets a Stop.
+   */
+  stopVisible?: boolean;
+  /**
+   * Disable Start without implying THIS row is running (e.g. a batch queue
+   * holds the sidecar): `busy` would also swap the label to "starting…".
+   */
+  startBlocked?: boolean;
 };
 
 export default function RangeBar({
@@ -26,9 +43,13 @@ export default function RangeBar({
   onChangeRange,
   onStartRange,
   startLabel,
+  onStop,
+  stopLabel,
+  stopVisible,
+  startBlocked,
 }: RangeBarProps): JSX.Element {
   const N = total;
-  const disabled = N === 0 || busy;
+  const disabled = N === 0 || busy || Boolean(startBlocked);
 
   // local string state to allow empty field while typing
   const [fromStr, setFromStr] = useState(String(from));
@@ -206,6 +227,16 @@ export default function RangeBar({
         >
           {busy ? t("range.starting") : startLabel ?? t("range.start")}
         </button>
+        {(stopVisible ?? busy) && onStop ? (
+          <button
+            type="button"
+            data-testid="wizard-stop"
+            onClick={onStop}
+            className="rounded-md border border-destructive/40 bg-card px-4 py-2 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {stopLabel ?? t("wizard.stop")}
+          </button>
+        ) : null}
       </div>
 
       <div className="ml-auto text-body-sm text-muted-foreground" data-testid="selected-label">
