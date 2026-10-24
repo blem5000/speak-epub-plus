@@ -2585,7 +2585,25 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
                 preview_dir.mkdir(parents=True, exist_ok=True)
             except OSError as e:
                 return {"id": rid, "error": {"code": "EXCEPTION", "message": f"cannot create preview dir: {e}"}}
-            out_pv = preview_dir / "voice_sample.mp3"
+            # a FIXED name made the webview replay its cached copy: the
+            # asset URL stayed identical for every voice, so switching the
+            # voice (or the engine) played the PREVIOUS sample. Keying the
+            # file on the exact synthesis inputs makes each distinct
+            # preview a distinct URL.
+            import hashlib as _hashlib_pv
+
+            _pv_digest = _hashlib_pv.sha256(
+                "|".join(
+                    [
+                        text_pv,
+                        engine_used,
+                        str(rate_pv),
+                        voice_pv,
+                        _pv_voice if engine_used == "local" else "",
+                    ]
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+            out_pv = preview_dir / f"voice_sample_{_pv_digest}.mp3"
 
             async def _preview_run():
                 if engine_used == "local":
