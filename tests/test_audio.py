@@ -33,7 +33,7 @@ def _seed(tmp_path, url=CH1, title="Chapter 1", body="Short text one."):
 
 async def _fake_run(jobs, voice, parallel, retries, on_part_status=None, on_log=None, on_progress=None,
                     rate=None, adaptive=False, parallel_max=None, engine="edge", local_voice=None,
-                    resume_lock=None):
+                    kokoro_voice=None, resume_lock=None):
     for j in jobs:
         Path(j.output_path).parent.mkdir(parents=True, exist_ok=True)
         Path(j.output_path).write_bytes(b"FAKEMP3" * 100)
@@ -153,7 +153,7 @@ class TestBuildAudio:
 
         async def _capture(jobs, voice, parallel, retries, on_part_status=None, on_log=None, on_progress=None,
                            rate=None, adaptive=False, parallel_max=None, engine="edge", local_voice=None,
-                           resume_lock=None):
+                           kokoro_voice=None, resume_lock=None):
             for j in jobs:
                 seen_texts.append(j.text)
             await _fake_run(jobs, voice, parallel, retries, on_part_status, on_log, on_progress)
@@ -390,7 +390,7 @@ class TestBuildAudioRpc:
 
         async def _capture(jobs, voice, parallel, retries, on_part_status=None, on_log=None,
                            on_progress=None, rate=None, adaptive=False, parallel_max=None,
-                           engine="edge", local_voice=None, resume_lock=None):
+                           engine="edge", local_voice=None, kokoro_voice=None, resume_lock=None):
             captured["rate"] = rate
             captured["adaptive"] = adaptive
             await _fake_run(jobs, voice, parallel, retries, on_part_status, on_log, on_progress)
@@ -471,7 +471,7 @@ class TestBuildAudioRpc:
 
         async def _capture(jobs, voice, parallel, retries, on_part_status=None, on_log=None,
                            on_progress=None, rate=None, adaptive=False, parallel_max=None,
-                           engine="edge", local_voice=None, resume_lock=None):
+                           engine="edge", local_voice=None, kokoro_voice=None, resume_lock=None):
             captured["engine"] = engine
             captured["localVoice"] = local_voice
             await _fake_run(jobs, voice, parallel, retries, on_part_status, on_log, on_progress)
