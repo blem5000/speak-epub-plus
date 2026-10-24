@@ -1694,12 +1694,16 @@ async def run_part_jobs(
                         local_voice if isinstance(local_voice, str) and local_voice.strip() else _DLV3
                     )
                     _engine_msg = f"engine: auto -> local Piper {local_voice_eff} (offline synthesis)"
-                    print(_engine_msg)
-                    if on_log:
-                        try:
-                            on_log(_engine_msg)
-                        except Exception:
-                            pass
+                else:
+                    # neither offline model is installed: say so explicitly,
+                    # otherwise an "auto" build silently uses the network
+                    _engine_msg = "engine: auto -> Edge TTS (no offline model downloaded)"
+                print(_engine_msg)
+                if on_log:
+                    try:
+                        on_log(_engine_msg)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
