@@ -12,6 +12,7 @@ import Preview from "./components/Preview";
 import Filters from "./components/Filters";
 import Result from "./components/Result";
 import Audiobook, { type AudioFormat, type AudiobookHandle } from "./components/Audiobook";
+import VoicePicker from "./components/VoicePicker";
 import UpdaterBanner from "./components/UpdaterBanner";
 import RuntimeBanner from "./components/RuntimeBanner";
 import Queue from "./components/Queue";
@@ -964,6 +965,9 @@ export default function App(): JSX.Element {
                   </span>
                 ) : null}
               </div>
+              {/* Engine + voice right next to the targets: the two choices a
+                  user must make before Start, without opening Advanced. */}
+              {audioWanted ? <VoicePicker /> : null}
               <div className="flex flex-wrap items-center gap-2 text-body-sm">
                 <span className="text-muted-foreground">{t("wizard.outputLabel")}:</span>
                 <span className="mono break-all text-mono" data-testid="wizard-output-dir">

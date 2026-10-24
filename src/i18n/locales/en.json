@@ -266,5 +266,11 @@
   "settings.kokoro.installEngine": "Download the Kokoro engine (~65 MB)",
   "settings.kokoro.installing": "Downloading the Kokoro engine…",
   "settings.kokoro.installed": "The Kokoro engine is ready.",
-  "settings.kokoro.noEngine": "The Kokoro engine is not part of this build."
+  "settings.kokoro.noEngine": "The Kokoro engine is not part of this build.",
+  "settings.voice.label": "Edge voice",
+  "voice.autoUses": "uses",
+  "voice.download": "Download voice",
+  "voice.downloading": "Downloading…",
+  "voice.downloaded": "Voice downloaded.",
+  "voice.notDownloaded": "not downloaded"
 }

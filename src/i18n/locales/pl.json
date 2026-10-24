@@ -266,5 +266,11 @@
   "settings.kokoro.installEngine": "Pobierz silnik Kokoro (~65 MB)",
   "settings.kokoro.installing": "Pobieranie silnika Kokoro…",
   "settings.kokoro.installed": "Silnik Kokoro gotowy.",
-  "settings.kokoro.noEngine": "Silnik Kokoro nie jest zainstalowany w tej wersji."
+  "settings.kokoro.noEngine": "Silnik Kokoro nie jest zainstalowany w tej wersji.",
+  "settings.voice.label": "Głos Edge",
+  "voice.autoUses": "użyje",
+  "voice.download": "Pobierz głos",
+  "voice.downloading": "Pobieranie…",
+  "voice.downloaded": "Głos pobrany.",
+  "voice.notDownloaded": "niepobrany"
 }
