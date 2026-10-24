@@ -342,7 +342,14 @@ def _allowed_image_host(url: str, page_url: str, resolve=None) -> bool:
     return True
 
 
-def embed_chapter_images(cleaned_html: str, page_url: str, chapter_idx: int, download=None, max_images: int = _MAX_IMAGES_PER_CHAPTER):
+def embed_chapter_images(
+    cleaned_html: str,
+    page_url: str,
+    chapter_idx: int,
+    download=None,
+    max_images: int = _MAX_IMAGES_PER_CHAPTER,
+    resolve=None,
+):
     """Embed remote chapter <img> as local EPUB items.
 
     - Only http(s) src (data: already embedded; relative resolved via page_url).
@@ -401,7 +408,7 @@ def embed_chapter_images(cleaned_html: str, page_url: str, chapter_idx: int, dow
             continue
         # an allowlist: the page may name ANY host (an <img> pointing at an
         # internal address would be fetched and embedded in the EPUB)
-        if not _allowed_image_host(abs_url, page_url):
+        if not _allowed_image_host(abs_url, page_url, resolve=resolve):
             skipped += 1
             continue
         try:

@@ -24,12 +24,17 @@ def _fake_dl(mapping):
     return _dl
 
 
+def _public(host):
+    """Resolver stub: pretend every name is a public address (no DNS)."""
+    return ["93.184.216.34"]
+
+
 class TestEmbedChapterImages:
     def test_remote_img_embedded_and_src_rewritten(self):
         html = '<div><p>Text</p><img src="https://cdn.example.com/a.png" alt="A"/></div>'
         out, items, embedded, skipped = embed_chapter_images(
             html, "https://novelphoenix.com/novel/x/chapter-1", 1,
-            download=_fake_dl({"https://cdn.example.com/a.png": (PNG, "png")}),
+            download=_fake_dl({"https://cdn.example.com/a.png": (PNG, "png")}), resolve=_public,
         )
         assert embedded == 1
         assert skipped == 0
@@ -77,7 +82,7 @@ class TestEmbedChapterImages:
         html = "<div>" + "".join(f'<img src="https://c.example.com/{i}.png"/>' for i in range(25)) + "</div>"
         mapping = {f"https://c.example.com/{i}.png": (PNG, "png") for i in range(25)}
         out, items, embedded, skipped = embed_chapter_images(
-            html, "https://n/x/chapter-1", 1, download=_fake_dl(mapping), max_images=20
+            html, "https://n/x/chapter-1", 1, download=_fake_dl(mapping), max_images=20, resolve=_public
         )
         assert embedded == 20
         assert len(items) == 20
