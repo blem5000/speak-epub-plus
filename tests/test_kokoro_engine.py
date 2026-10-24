@@ -62,7 +62,21 @@ class TestRateMapping:
         assert tts_kokoro.rate_to_speed("-100%") == pytest.approx(0.75)
 
     def test_bare_number_is_accepted(self):
-        assert tts_kokoro.rate_to_speed("25") == pytest.approx(1.25)
+        """An int is a rate; a bare numeric STRING is garbage (no '%' sign).
+
+        This mirrors normalize_tts_rate / the Piper mapping exactly: the two
+        offline engines must interpret the same stored value identically, or
+        switching engines would silently change the reading speed.
+        """
+        assert tts_kokoro.rate_to_speed(25) == pytest.approx(1.25)
+        assert tts_kokoro.rate_to_speed("25") == pytest.approx(1.0)
+
+    def test_matches_the_piper_mapping(self):
+        from core.tts_local import rate_to_length_scale
+
+        for value in ("+0%", "+25%", "-25%", "+100%", "-100%", 25, -10):
+            piper_speed = 1.0 / rate_to_length_scale(value)
+            assert tts_kokoro.rate_to_speed(value) == pytest.approx(piper_speed), value
 
 
 class TestModelReadiness:
