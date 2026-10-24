@@ -158,4 +158,52 @@ describe("App — batch queue", () => {
       )
     );
   });
+  it("shows a Stop button while the batch runs and stops after the current book", async () => {
+    const user = userEvent.setup();
+    let buildCalls = 0;
+    const gate: { release: null | (() => void) } = { release: null };
+
+    mockCallSidecar.mockImplementation(async (method: string) => {
+      if (method === "listChapters") {
+        return {
+          id: "1",
+          result: { chapters: [{ index: 1, title: "Rozdział 1", url: "https://x.test/c1" }] },
+        };
+      }
+      if (method === "fetchChapters") return { id: "1", result: { ok: true } };
+      if (method === "buildAudio") {
+        buildCalls += 1;
+        if (buildCalls === 1) {
+          // hold the first book open so the Stop button is observable
+          await new Promise<void>((resolve) => {
+            gate.release = resolve;
+          });
+        }
+        return {
+          id: "1",
+          result: { audio_dir: "out", chapter_count: 1, part_count: 1, chapters: [], format: "m4b", audiobook: null },
+        };
+      }
+      if (method === "cancelSidecarJob") return { id: "1", result: 1 };
+      return { id: "1", result: {} };
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId("queue-add-0")).toBeInTheDocument());
+    // two books queued: the stop must prevent the second one from starting
+    await user.click(screen.getByTestId("queue-add-0"));
+    await user.click(screen.getByTestId("queue-add-1"));
+    await waitFor(() => expect(screen.getByTestId("queue-panel")).toBeInTheDocument());
+
+    await user.click(screen.getByTestId("queue-convert"));
+    // regression: the batch had no Stop at all
+    await waitFor(() => expect(screen.getByTestId("queue-stop")).toBeInTheDocument());
+    await user.click(screen.getByTestId("queue-stop"));
+
+    gate.release?.();
+    await waitFor(() => expect(screen.queryByTestId("queue-stop")).toBeNull());
+    // the second book must never be requested
+    const listed = mockCallSidecar.mock.calls.filter((c) => c[0] === "listChapters");
+    expect(listed.length).toBe(1);
+  });
 });

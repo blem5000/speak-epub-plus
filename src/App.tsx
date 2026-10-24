@@ -377,6 +377,9 @@ export default function App(): JSX.Element {
   const [queueOutcomes, setQueueOutcomes] = useState<QueueOutcome[]>([]);
   const [queueRunning, setQueueRunning] = useState(false);
   const [queueProgress, setQueueProgress] = useState<{ index: number; total: number; title: string } | null>(null);
+  // a ref, not state: the running loop must see the stop on its next await
+  // without waiting for a re-render
+  const queueStopRef = useRef(false);
   const audiobookRef = useRef<AudiobookHandle>(null);
   const epubAbortRef = useRef<AbortController | null>(null);
   const epubStopRef = useRef(false);
@@ -608,6 +611,9 @@ export default function App(): JSX.Element {
   };
 
   const handleStopAll = (): void => {
+    // a batch loop is not part of jobRunning (it drives the sidecar directly),
+    // so the wizard Stop has to cancel it explicitly
+    if (queueRunning) handleQueueStop();
     if (fetching) abortFetcher();
     if (epubBuilding || epubAbortRef.current) {
       epubStopRef.current = true;
@@ -630,6 +636,14 @@ export default function App(): JSX.Element {
     setQueueOutcomes((prev) => prev.filter((o) => o.url !== url));
   }, []);
 
+  /** Stop the batch: flag the loop and kill the in-flight sidecar job.
+   *  The current book is cancelled mid-build; the rest stay in the queue. */
+  const handleQueueStop = useCallback((): void => {
+    queueStopRef.current = true;
+    void cancelSidecarJob();
+    setQueueProgress(null);
+  }, []);
+
   const handleQueueClear = useCallback((): void => {
     setQueue([]);
     setQueueOutcomes([]);
@@ -644,11 +658,13 @@ export default function App(): JSX.Element {
   const handleQueueConvert = async (): Promise<void> => {
     if (queueRunning || queue.length === 0 || jobRunning) return;
     const items = [...queue];
+    queueStopRef.current = false;
     setQueueRunning(true);
     setQueueOutcomes([]);
     const outcomes: QueueOutcome[] = [];
     try {
       for (let i = 0; i < items.length; i++) {
+        if (queueStopRef.current) break;
         const item = items[i];
         setQueueProgress({ index: i + 1, total: items.length, title: item.title || item.url });
         try {
@@ -907,6 +923,7 @@ export default function App(): JSX.Element {
             onRemove={handleQueueRemove}
             onClear={handleQueueClear}
             onConvert={() => void handleQueueConvert()}
+            onStop={handleQueueStop}
           />
 
           {/* error toast inline */}

@@ -22,6 +22,8 @@ type QueuePanelProps = {
   onRemove: (url: string) => void;
   onClear: () => void;
   onConvert: () => void;
+  /** Stop the running batch; the in-flight book is cancelled too. */
+  onStop?: () => void;
 };
 
 /**
@@ -37,6 +39,7 @@ export default function QueuePanel({
   onRemove,
   onClear,
   onConvert,
+  onStop,
 }: QueuePanelProps): JSX.Element | null {
   if (items.length === 0 && outcomes.length === 0) return null;
 
@@ -74,6 +77,16 @@ export default function QueuePanel({
           >
             {running ? (t("queue.running") as string) : (t("queue.convert") as string)}
           </button>
+          {running && onStop ? (
+            <button
+              type="button"
+              data-testid="queue-stop"
+              onClick={onStop}
+              className="h-9 rounded-md border border-destructive/40 bg-card px-3 text-body hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {t("queue.stop") as string}
+            </button>
+          ) : null}
         </div>
       </div>
 
