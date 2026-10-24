@@ -115,3 +115,121 @@ class TestPreviewVoiceRpc:
                 })
         assert "error" not in res, res
         assert captured["voice"] == "en-GB-SoniaNeural"
+
+
+class TestPreviewVoiceKokoro:
+    """Kokoro voice ids live in a separate namespace from Piper model ids.
+
+    Regressions pinned here (all found by reviewing v0.3.22, fixed in v0.3.23):
+
+    1. previewVoice read only `localVoice` and validated it as a Kokoro voice,
+       so the UI's own payload failed with
+       "unknown Kokoro voice 'en_US-ryan-high'".
+    2. A stored `kokoroVoice` was never consulted, so a caller that omitted it
+       silently previewed the default voice.
+    3. The Piper id was validated eagerly, before the engine was known, so a
+       Kokoro preview was rejected with "unknown local voice".
+    4. A genuine synthesis error was caught as "already inside a loop" and
+       retried, hiding the real message behind
+       "a coroutine was expected, got <function ...>".
+    """
+
+    def _ready(self, monkeypatch):
+        """Kokoro reports ready, and voice validation passes ids through."""
+        import core.tts_kokoro as tk
+
+        monkeypatch.setattr(tk, "kokoro_ready", lambda v: True)
+        monkeypatch.setattr(
+            tk, "validate_kokoro_voice", lambda v: (v or "").strip() or "am_michael"
+        )
+        return tk
+
+    def test_the_kokoro_voice_field_is_used_and_the_piper_id_ignored(self, monkeypatch):
+        tk = self._ready(monkeypatch)
+        captured = {}
+
+        def _fake(text, out_path, voice, retries=5, rate=None, **kw):
+            captured["voice"] = voice
+            Path(out_path).write_bytes(b"mp3" * 100)
+
+        monkeypatch.setattr(tk, "tts_text_to_mp3_kokoro", _fake)
+
+        res = _preview(
+            {
+                "text": "hello",
+                "engine": "kokoro",
+                "kokoroVoice": "bm_daniel",
+                # a stale PIPER id must not be mistaken for a Kokoro voice
+                "localVoice": "en_US-ryan-high",
+            }
+        )
+        assert "error" not in res, res
+        assert res["result"]["engine"] == "kokoro"
+        assert captured["voice"] == "bm_daniel"
+
+    def test_a_stored_kokoro_voice_is_used_when_the_caller_omits_it(self, monkeypatch):
+        tk = self._ready(monkeypatch)
+        captured = {}
+
+        def _fake(text, out_path, voice, retries=5, rate=None, **kw):
+            captured["voice"] = voice
+            Path(out_path).write_bytes(b"mp3" * 100)
+
+        monkeypatch.setattr(tk, "tts_text_to_mp3_kokoro", _fake)
+
+        res = _preview(
+            {"text": "hello", "engine": "kokoro"},
+            store={"kokoroVoice": "bm_george"},
+        )
+        assert "error" not in res, res
+        assert captured["voice"] == "bm_george"
+
+    def test_the_piper_voice_is_not_validated_for_a_kokoro_preview(self, monkeypatch):
+        """Piper ids must be ignored entirely when Kokoro speaks."""
+        tk = self._ready(monkeypatch)
+        monkeypatch.setattr(tk, "tts_text_to_mp3_kokoro", lambda t, o, v, retries=5, rate=None, **k: Path(o).write_bytes(b"m" * 100))
+
+        # `en_US-ryan-high` is a real Piper id and NOT a Kokoro id: validating
+        # it against the Kokoro catalogue is what produced the user-visible
+        # "unknown Kokoro voice 'en_US-ryan-high'".
+        res = _preview(
+            {"text": "hello", "engine": "kokoro", "localVoice": "en_US-ryan-high"}
+        )
+        assert "error" not in res, res
+        assert res["result"]["engine"] == "kokoro"
+
+    def test_auto_prefers_kokoro_exactly_like_the_build(self, monkeypatch):
+        """`auto` must resolve to the same engine in the preview and the build."""
+        from unittest.mock import patch as _patch
+
+        tk = self._ready(monkeypatch)
+        captured = {}
+
+        def _fake(text, out_path, voice, retries=5, rate=None, **kw):
+            captured["engine"] = "kokoro"
+            Path(out_path).write_bytes(b"mp3" * 100)
+
+        monkeypatch.setattr(tk, "tts_text_to_mp3_kokoro", _fake)
+
+        # even with a Piper voice ready, run_part_jobs checks Kokoro first
+        with _patch("core.tts_local.local_voice_ready", return_value=True):
+            res = _preview(
+                {"text": "hello", "engine": "auto", "kokoroVoice": "am_puck"},
+                store={"localVoice": "en_US-ryan-high"},
+            )
+        assert "error" not in res, res
+        assert res["result"]["engine"] == "kokoro"
+
+    def test_a_synthesis_error_surfaces_instead_of_a_coroutine_complaint(self, monkeypatch):
+        """The real failure must reach the user, not a loop-handling artefact."""
+        tk = self._ready(monkeypatch)
+
+        def _boom(*a, **k):
+            raise RuntimeError("the synthesizer exploded")
+
+        monkeypatch.setattr(tk, "tts_text_to_mp3_kokoro", _boom)
+
+        res = _preview({"text": "hello", "engine": "kokoro", "kokoroVoice": "am_puck"})
+        assert res["error"]["code"] == "EXCEPTION", res
+        assert "the synthesizer exploded" in res["error"]["message"]
+        assert "coroutine was expected" not in res["error"]["message"]

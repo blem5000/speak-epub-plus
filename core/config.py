@@ -2630,6 +2630,17 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         local_voice_pv = local_voice_pv.strip() if isinstance(local_voice_pv, str) else None
         if local_voice_pv == "":
             local_voice_pv = None
+        # Kokoro and Piper are separate namespaces: an id valid for one is
+        # never valid for the other. Reading only `localVoice` here meant a
+        # Kokoro preview validated the PIPER model id and failed with
+        # "unknown Kokoro voice 'en_US-ryan-high'".
+        kokoro_voice_given = "kokoroVoice" in params or "kokoro_voice" in params
+        kokoro_voice_pv = params.get("kokoroVoice", params.get("kokoro_voice"))
+        if kokoro_voice_pv is None and not kokoro_voice_given:
+            kokoro_voice_pv = store_pv.get("kokoroVoice") or None
+        kokoro_voice_pv = kokoro_voice_pv.strip() if isinstance(kokoro_voice_pv, str) else None
+        if kokoro_voice_pv == "":
+            kokoro_voice_pv = None
         try:
             from core.tts_local import (
                 DEFAULT_LOCAL_VOICE as _DEF_PV,
@@ -2641,32 +2652,50 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             from core.tts import user_output_base as _uob_pv
 
             _pv_voice = local_voice_pv or _DEF_PV
-            if local_voice_pv is not None:
-                _pv_voice = _validate_pv(local_voice_pv)
-            if engine_pv == "kokoro":
+
+            def _kokoro_unavailable(voice_id: str) -> dict:
+                return {
+                    "id": rid,
+                    "error": {
+                        "code": "VALUE_ERROR",
+                        "message": (
+                            f"Kokoro voice {voice_id} is unavailable — "
+                            "download the Kokoro model in Settings first"
+                        ),
+                    },
+                }
+
+            if engine_pv in ("kokoro", "auto"):
                 from core.tts_kokoro import (
                     DEFAULT_KOKORO_VOICE as _DKV_PV,
                     kokoro_ready as _kready_pv,
                     validate_kokoro_voice as _kvalidate_pv,
                 )
 
-                _pv_voice = _kvalidate_pv(local_voice_pv or _DKV_PV)
-                if not _kready_pv(_pv_voice):
-                    return {
-                        "id": rid,
-                        "error": {
-                            "code": "VALUE_ERROR",
-                            "message": (
-                                f"Kokoro voice {_pv_voice} is unavailable — "
-                                "download the Kokoro model in Settings first"
-                            ),
-                        },
-                    }
-                engine_used = "kokoro"
+                _k_voice = _kvalidate_pv(kokoro_voice_pv or _DKV_PV)
+                _k_ok = _kready_pv(_k_voice)
+                if engine_pv == "kokoro":
+                    if not _k_ok:
+                        return _kokoro_unavailable(_k_voice)
+                    engine_used = "kokoro"
+                    _pv_voice = _k_voice
+                elif _k_ok:
+                    # auto must resolve exactly like run_part_jobs does:
+                    # Kokoro first, then Piper, then Edge
+                    engine_used = "kokoro"
+                    _pv_voice = _k_voice
+                else:
+                    engine_used = _resolve_pv("auto", local_voice_pv)
+                    if engine_used == "local":
+                        _pv_voice = _validate_pv(local_voice_pv) if local_voice_pv else _DEF_PV
+                        if not _ready_pv(_pv_voice):
+                            return {"id": rid, "error": {"code": "VALUE_ERROR", "message": _unavail_pv(_pv_voice)}}
             else:
                 engine_used = _resolve_pv(engine_pv, local_voice_pv)
-                if engine_used == "local" and not _ready_pv(_pv_voice):
-                    return {"id": rid, "error": {"code": "VALUE_ERROR", "message": _unavail_pv(_pv_voice)}}
+                if engine_used == "local":
+                    _pv_voice = _validate_pv(local_voice_pv) if local_voice_pv else _DEF_PV
+                    if not _ready_pv(_pv_voice):
+                        return {"id": rid, "error": {"code": "VALUE_ERROR", "message": _unavail_pv(_pv_voice)}}
             preview_dir = _uob_pv() / "_preview"
             try:
                 preview_dir.mkdir(parents=True, exist_ok=True)
@@ -2718,19 +2747,35 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             async def _preview_guarded():
                 await _asyncio_pv.wait_for(_preview_run(), timeout=PREVIEW_TIMEOUT_SEC)
 
-            try:
+            def _drive_preview() -> None:
                 _asyncio_pv.run(_preview_guarded())
+
+            try:
+                # Detect a running loop EXPLICITLY. Catching RuntimeError from
+                # asyncio.run() treated a genuine synthesis failure as "already
+                # inside a loop" and retried it — which then failed with a
+                # confusing "a coroutine was expected, got <function ...>",
+                # hiding the real error from the user.
+                try:
+                    _asyncio_pv.get_running_loop()
+                    _loop_running = True
+                except RuntimeError:
+                    _loop_running = False
+                if _loop_running:
+                    # a loop already owns this thread (library use): the
+                    # preview needs its own thread, and a thread executes the
+                    # CALLABLE, not the coroutine object
+                    import concurrent.futures as _cf_pv
+
+                    with _cf_pv.ThreadPoolExecutor(max_workers=1) as _ex:
+                        _ex.submit(_drive_preview).result()
+                else:
+                    _drive_preview()
             except _asyncio_pv.TimeoutError:
                 return {
                     "id": rid,
                     "error": {"code": "TIMEOUT", "message": f"voice preview timed out after {PREVIEW_TIMEOUT_SEC:.0f}s"},
                 }
-            except RuntimeError:
-                # already inside a loop (library use): drive on a fresh loop
-                import concurrent.futures as _cf_pv
-
-                with _cf_pv.ThreadPoolExecutor(max_workers=1) as _ex:
-                    _ex.submit(_asyncio_pv.run, _preview_guarded).result()
             try:
                 from core.tts import get_duration_ms as _dur_pv
 

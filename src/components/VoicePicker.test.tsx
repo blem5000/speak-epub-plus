@@ -173,9 +173,26 @@ describe("VoicePicker — engine row next to the audiobook checkbox", () => {
     await waitFor(() => expect(mockPreviewVoice).toHaveBeenCalled());
     const arg = mockPreviewVoice.mock.calls[0][0] as Record<string, unknown>;
     expect(arg.engine).toBe("kokoro");
-    // the Piper id must not leak into the Kokoro preview
-    expect(arg.localVoice).toBe("bm_daniel");
+    // Kokoro and Piper are separate namespaces: the Kokoro id must travel in
+    // kokoroVoice. Sending it as `localVoice` made the backend validate it
+    // against the PIPER catalogue ("unknown local voice 'bm_daniel'").
+    expect(arg.kokoroVoice).toBe("bm_daniel");
+    expect(arg.localVoice).toBe("");
     expect(arg.localVoice).not.toBe("en_US-ryan-high");
+  });
+
+  it("sends the Piper voice through localVoice and leaves kokoroVoice empty", async () => {
+    mockLocalVoices.mockImplementation(() => piperVoices(true));
+    mockGetStore.mockImplementation(() => storeWith({ engine: "local", localVoice: "en_US-ryan-high" }));
+    const user = userEvent.setup();
+    render(<VoicePicker />);
+    const btn = await screen.findByTestId("voice-picker-preview");
+    await user.click(btn);
+    await waitFor(() => expect(mockPreviewVoice).toHaveBeenCalled());
+    const arg = mockPreviewVoice.mock.calls[0][0] as Record<string, unknown>;
+    expect(arg.engine).toBe("local");
+    expect(arg.localVoice).toBe("en_US-ryan-high");
+    expect(arg.kokoroVoice).toBe("");
   });
 
   it("switching the engine persists it and swaps the voice list", async () => {

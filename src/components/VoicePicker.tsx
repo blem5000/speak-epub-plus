@@ -210,7 +210,10 @@ export default function VoicePicker(): JSX.Element {
         voice: effective === "edge" ? currentVoice : edgeVoice,
         rate,
         engine: effective,
-        localVoice: effective === "edge" ? "" : currentVoice,
+        // one field per namespace: a Kokoro id in `localVoice` is rejected
+        // as an unknown Piper voice
+        localVoice: effective === "local" ? currentVoice : "",
+        kokoroVoice: effective === "kokoro" ? currentVoice : "",
       });
       if (res.error) {
         setMsg(String((res.error as { message?: string }).message ?? res.error));

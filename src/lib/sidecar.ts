@@ -763,6 +763,7 @@ export async function previewVoice(
     rate?: string | null;
     engine?: string | null;
     localVoice?: string | null;
+    kokoroVoice?: string | null;
   },
   opts?: { signal?: AbortSignal }
 ): Promise<RpcResponse> {
@@ -785,6 +786,12 @@ export async function previewVoice(
     // the sample could play a different voice than the one on screen
     const lv = String(params.localVoice ?? "").trim();
     payload.localVoice = lv;
+  }
+  if (params.kokoroVoice !== undefined) {
+    // Kokoro ids are a separate namespace from Piper ids: sending a Kokoro
+    // voice through `localVoice` made the backend reject it as an unknown
+    // PIPER voice ("unknown local voice 'bm_daniel'").
+    payload.kokoroVoice = String(params.kokoroVoice ?? "").trim();
   }
   return callSidecar("previewVoice", payload, opts);
 }

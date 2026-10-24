@@ -712,8 +712,10 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
         voice,
         rate: rateStr,
         engine,
-        // the active offline voice: Kokoro and Piper keep separate keys
-        localVoice: engine === "kokoro" ? kokoroVoice : localVoice,
+        // the active offline voice: Kokoro and Piper keep separate keys, and
+        // the backend validates each id against its own namespace
+        localVoice: engine === "local" ? localVoice : "",
+        kokoroVoice: engine === "kokoro" ? kokoroVoice : "",
       });
       if (res.error) {
         const msg = (res.error as { message?: string }).message ?? String(res.error);
