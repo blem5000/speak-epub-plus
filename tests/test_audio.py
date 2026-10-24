@@ -715,11 +715,11 @@ class TestKokoroVoiceWiring:
             cache_dir=tmp_path, chapter_urls=[CH1], audio_format="mp3", engine="kokoro",
         )
         with patch("core.audio.run_part_jobs", side_effect=_fake_run):
-            build_audio("https://www.novelphoenix.com/novel/123", kokoro_voice="am_puck", **kwargs)
-        first = self._manifest(tmp_path / "out")
+            res_a = build_audio("https://www.novelphoenix.com/novel/123", kokoro_voice="am_puck", **kwargs)
+        first = self._manifest(res_a["audio_dir"])
         with patch("core.audio.run_part_jobs", side_effect=_fake_run):
-            build_audio("https://www.novelphoenix.com/novel/123", kokoro_voice="bm_daniel", **kwargs)
-        second = self._manifest(tmp_path / "out")
+            res_b = build_audio("https://www.novelphoenix.com/novel/123", kokoro_voice="bm_daniel", **kwargs)
+        second = self._manifest(res_b["audio_dir"])
         assert first["kokoro_voice"] == "am_puck"
         assert second["kokoro_voice"] == "bm_daniel"
 
