@@ -3771,7 +3771,7 @@ dependencies = [
 
 [[package]]
 name = "speak-epub"
-version = "0.3.16"
+version = "0.3.17"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
