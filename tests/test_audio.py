@@ -661,6 +661,9 @@ class TestKokoroVoiceWiring:
 
     def test_preflight_validates_the_kokoro_voice_not_the_piper_one(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        # hermetic: without this the result depends on whether the REAL
+        # machine happens to have the Kokoro model downloaded
+        monkeypatch.setenv("SPEAK_EPUB_KOKORO_MODELS_DIR", str(tmp_path / "nomodel"))
         res = handle_rpc({"id": "1", "method": "buildAudio", "params": {
             "novelUrl": "https://www.novelphoenix.com/novel/123",
             "engine": "kokoro",
@@ -677,6 +680,7 @@ class TestKokoroVoiceWiring:
 
     def test_preflight_falls_back_to_the_default_kokoro_voice(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("SPEAK_EPUB_KOKORO_MODELS_DIR", str(tmp_path / "nomodel"))
         res = handle_rpc({"id": "1", "method": "buildAudio", "params": {
             "novelUrl": "https://www.novelphoenix.com/novel/123",
             "engine": "kokoro",

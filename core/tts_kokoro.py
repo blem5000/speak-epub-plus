@@ -436,7 +436,13 @@ def _unavailable_message(voice: str) -> str:
     if not kokoro_model_ready():
         return "the Kokoro model is not downloaded (download it in Settings first)"
     if not kokoro_available():
-        return "the Kokoro engine is not installed in this build — install it or use another engine"
+        # the engine is an optional DOWNLOAD, not a build property: saying
+        # "not part of this build" told the user to give up instead of
+        # telling them what to click
+        return (
+            "the Kokoro engine is not installed — download it in Settings "
+            "(the model is already on disk), or pick another engine"
+        )
     return f"Kokoro voice {voice} is unavailable"
 
 
