@@ -122,10 +122,20 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
   // Kokoro (the second offline engine; better quality than Piper)
   const [kokoroVoice, setKokoroVoice] = useState<string>("am_michael");
   const [kokoroVoiceList, setKokoroVoiceList] = useState<
-    Array<{ id: string; lang: string; gender: string; accent: string; note: string; downloaded: boolean }>
+    Array<{
+      id: string;
+      lang: string;
+      gender: string;
+      accent: string;
+      note: string;
+      downloaded: boolean;
+      ready: boolean;
+    }>
   >([]);
   const [kokoroAvailable, setKokoroAvailable] = useState<boolean>(false);
   const [kokoroModelReady, setKokoroModelReady] = useState<boolean>(false);
+  /** Weights present AND engine packages installed — the only state that can speak. */
+  const [kokoroReady, setKokoroReady] = useState<boolean>(false);
   const [defaultKokoroVoice, setDefaultKokoroVoice] = useState<string>("am_michael");
   const [kokoroBusy, setKokoroBusy] = useState<boolean>(false);
   const [kokoroMsg, setKokoroMsg] = useState<string>("");
@@ -215,6 +225,8 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
       const res = await kokoroVoices();
       const r = (res.result as Record<string, unknown>) ?? {};
       const arr = Array.isArray(r.voices) ? (r.voices as Array<Record<string, unknown>>) : [];
+      const engineOk = r.engineAvailable === true;
+      const modelOk = r.modelReady === true;
       setKokoroVoiceList(
         arr.map((v) => ({
           id: String(v.id ?? ""),
@@ -223,10 +235,12 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
           accent: String(v.accent ?? ""),
           note: String(v.note ?? ""),
           downloaded: Boolean(v.downloaded),
+          ready: v.ready === true || (Boolean(v.downloaded) && engineOk),
         }))
       );
-      setKokoroAvailable(r.engineAvailable === true);
-      setKokoroModelReady(r.modelReady === true);
+      setKokoroAvailable(engineOk);
+      setKokoroModelReady(modelOk);
+      setKokoroReady(r.ready === true || (modelOk && engineOk));
       if (typeof r.default === "string" && r.default.trim()) setDefaultKokoroVoice(r.default.trim());
     } catch {
       // the engine is optional: a failure just leaves the section disabled
@@ -1388,9 +1402,11 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                     </button>
                     <span data-testid="settings-kokoro-status" className="text-body-sm text-muted-foreground">
                       {kokoroMsg ||
-                        (kokoroModelReady
+                        (kokoroReady
                           ? t("settings.kokoro.ready")
-                          : t("settings.kokoro.notDownloaded"))}
+                          : kokoroModelReady
+                            ? t("settings.kokoro.engineMissing")
+                            : t("settings.kokoro.notDownloaded"))}
                     </span>
                   </div>
                 </div>

@@ -117,11 +117,37 @@ const Audiobook = forwardRef<AudiobookHandle, AudiobookProps>(function Audiobook
         if (!alive) return;
         const data = (res as { result?: Record<string, unknown> }).result;
         if (data && typeof data === "object") {
-          const voice = typeof data.voice === "string" ? data.voice : "en-US-AndrewNeural";
+          // The summary must name the voice that will actually speak. It
+          // read `voice` (the EDGE voice) unconditionally, so a Kokoro build
+          // announced "Głos en-US-AndrewNeural" while bm_daniel did the work.
+          const engine = String(data.engine ?? "auto").trim().toLowerCase();
+          const edgeVoice = typeof data.voice === "string" ? data.voice : "en-US-AndrewNeural";
+          const localVoice = typeof data.localVoice === "string" ? data.localVoice.trim() : "";
+          const kokoroVoice = typeof data.kokoroVoice === "string" ? data.kokoroVoice.trim() : "";
           const parallel = Number(data.parallel ?? 3);
           const chunk = Number((data as Record<string, unknown>)["chunk-size"] ?? 3500);
           const bitrate = typeof data.audioBitrate === "string" ? data.audioBitrate : "32k";
-          setSummary(t("audio.summary", { voice, parallel, chunk, bitrate }) as string);
+          const engineLabel: Record<string, string> = {
+            edge: "Edge",
+            local: "Piper",
+            kokoro: "Kokoro",
+            auto: "Auto",
+          };
+          const shownVoice =
+            engine === "kokoro"
+              ? kokoroVoice || "am_michael"
+              : engine === "local"
+                ? localVoice || "en_US-lessac-medium"
+                : edgeVoice;
+          setSummary(
+            t("audio.summaryEngine", {
+              engine: engineLabel[engine] ?? engine,
+              voice: shownVoice,
+              bitrate,
+              parallel,
+              chunk,
+            }) as string
+          );
         }
       })
       .catch(() => {});

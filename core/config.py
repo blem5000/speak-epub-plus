@@ -2980,16 +2980,16 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
             except ValueError as e:
                 return {"id": rid, "error": {"code": "VALUE_ERROR", "message": str(e)}}
             if not _kokoro_ready(_kcheck):
-                return {
-                    "id": rid,
-                    "error": {
-                        "code": "VALUE_ERROR",
-                        "message": (
-                            f"Kokoro voice {_kcheck} is unavailable — "
-                            "download the Kokoro model in Settings first"
-                        ),
-                    },
-                }
+                # "download the model" was wrong when the weights were present
+                # and only the engine packages were missing — the user then
+                # clicked a download that had nothing left to do.
+                try:
+                    from core.tts_kokoro import _unavailable_message as _k_unavail
+
+                    _k_msg = _k_unavail(_kcheck)
+                except Exception:
+                    _k_msg = f"Kokoro voice {_kcheck} is unavailable"
+                return {"id": rid, "error": {"code": "VALUE_ERROR", "message": _k_msg}}
         if chunk_p is None:
             try:
                 chunk_p = (store_audio.get("chunk-size", 3500) if isinstance(store_audio, dict) else 3500)

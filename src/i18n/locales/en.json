@@ -272,5 +272,10 @@
   "voice.download": "Download voice",
   "voice.downloading": "Downloading…",
   "voice.downloaded": "Voice downloaded.",
-  "voice.notDownloaded": "not downloaded"
+  "voice.notDownloaded": "not downloaded",
+  "settings.kokoro.engineMissing": "Model downloaded — the Kokoro engine is missing (download it)",
+  "settings.kokoro.installEngineShort": "Download the Kokoro engine",
+  "audio.summaryEngine": "{engine} engine · voice {voice} · {bitrate} · {parallel} parallel · chunk {chunk} (change in Settings)",
+  "voice.engineDownloaded": "Kokoro engine downloaded — the voice is ready.",
+  "voice.modelDownloaded": "Kokoro model downloaded — the voice is ready."
 }

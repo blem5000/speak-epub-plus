@@ -177,3 +177,88 @@ class TestDescriptorTiers:
         assert a["hash"] == b["hash"]
         assert a["local_hash"] == b["local_hash"]
         assert a["kokoro_hash"] != b["kokoro_hash"]
+
+
+class TestModelDownloadAlsoInstallsTheEngine:
+    """Downloading the model must leave the engine usable.
+
+    Regression (v0.3.25, reported from the field): the weights and the engine
+    packages are two separate downloads. A machine that had the weights but
+    was missing the engine tier saw "Kokoro model already downloaded" on every
+    click, the picker still offered "Download voice", and every build failed
+    with "download the Kokoro model in Settings first" — advice that could
+    never help, because the model WAS downloaded.
+    """
+
+    @pytest.fixture()
+    def weights_only(self, tmp_path, monkeypatch):
+        """Weights present, engine missing — exactly the broken machine."""
+        monkeypatch.setenv("SPEAK_EPUB_KOKORO_MODELS_DIR", str(tmp_path))
+        (tmp_path / tts_kokoro.MODEL_FILE).write_bytes(b"\0" * 50_000_001)
+        (tmp_path / tts_kokoro.VOICES_FILE).write_bytes(b"\0" * 1_000_001)
+        calls = []
+
+        def _fake_ensure(on_log=None):
+            calls.append(True)
+            if on_log:
+                on_log("fake: engine tier installed")
+            return {"ok": True, "downloaded": True, "message": "Kokoro engine downloaded"}
+
+        monkeypatch.setattr(tts_kokoro, "ensure_kokoro_engine", _fake_ensure)
+        # the engine becomes importable once the fake install ran
+        monkeypatch.setattr(tts_kokoro, "kokoro_available", lambda: bool(calls))
+        monkeypatch.setattr(tts_kokoro, "validate_kokoro_voice", lambda v: v)
+        return tmp_path, calls
+
+    def test_download_installs_the_missing_engine(self, weights_only):
+        _tmp, calls = weights_only
+        assert tts_kokoro.kokoro_ready("am_michael") is False  # before
+
+        result = tts_kokoro.download_kokoro_model()
+
+        assert calls, "ensure_kokoro_engine was never called"
+        assert result["engineDownloaded"] is True
+        assert result["modelDownloaded"] is False, "the weights were already there"
+        # the whole point: the voice is usable afterwards
+        assert tts_kokoro.kokoro_ready("am_michael") is True
+
+    def test_download_fails_loudly_when_the_engine_cannot_install(self, weights_only, monkeypatch):
+        """A model-only download must not report success."""
+        monkeypatch.setattr(
+            tts_kokoro,
+            "ensure_kokoro_engine",
+            lambda on_log=None: {"ok": False, "downloaded": False, "message": "no engine asset"},
+        )
+        with pytest.raises(RuntimeError) as exc:
+            tts_kokoro.download_kokoro_model()
+        assert "no engine asset" in str(exc.value)
+
+
+class TestStatusPayloadSeparatesFilesFromReadiness:
+    def test_weights_without_engine_are_reported_not_ready(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SPEAK_EPUB_KOKORO_MODELS_DIR", str(tmp_path))
+        (tmp_path / tts_kokoro.MODEL_FILE).write_bytes(b"\0" * 50_000_001)
+        (tmp_path / tts_kokoro.VOICES_FILE).write_bytes(b"\0" * 1_000_001)
+        monkeypatch.setattr(tts_kokoro, "kokoro_available", lambda: False)
+
+        payload = tts_kokoro.list_kokoro_voices()
+
+        assert payload["modelReady"] is True
+        assert payload["engineAvailable"] is False
+        # files present but nothing can speak — the two are NOT the same
+        assert payload["ready"] is False
+        for voice in payload["voices"]:
+            assert voice["downloaded"] is True
+            assert voice["ready"] is False
+
+    def test_both_present_means_ready(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SPEAK_EPUB_KOKORO_MODELS_DIR", str(tmp_path))
+        (tmp_path / tts_kokoro.MODEL_FILE).write_bytes(b"\0" * 50_000_001)
+        (tmp_path / tts_kokoro.VOICES_FILE).write_bytes(b"\0" * 1_000_001)
+        monkeypatch.setattr(tts_kokoro, "kokoro_available", lambda: True)
+
+        payload = tts_kokoro.list_kokoro_voices()
+
+        assert payload["ready"] is True
+        for voice in payload["voices"]:
+            assert voice["ready"] is True

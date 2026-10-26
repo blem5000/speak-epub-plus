@@ -27,7 +27,10 @@ type Engine = "auto" | "edge" | "local" | "kokoro";
 type VoiceOption = {
   id: string;
   label: string;
+  /** The model FILES are on disk (weights present). */
   downloaded: boolean;
+  /** The engine can actually synthesize this voice (files AND packages). */
+  ready: boolean;
 };
 
 const ENGINES: Engine[] = ["auto", "edge", "local", "kokoro"];
@@ -43,6 +46,8 @@ export default function VoicePicker(): JSX.Element {
   const [piperOptions, setPiperOptions] = useState<VoiceOption[]>([]);
   const [kokoroOptions, setKokoroOptions] = useState<VoiceOption[]>([]);
   const [kokoroModelReady, setKokoroModelReady] = useState<boolean>(false);
+  const [kokoroEngineAvailable, setKokoroEngineAvailable] = useState<boolean>(false);
+  const [kokoroReady, setKokoroReady] = useState<boolean>(false);
   const [defaultPiper, setDefaultPiper] = useState<string>("en_US-lessac-medium");
   const [defaultKokoro, setDefaultKokoro] = useState<string>("am_michael");
 
@@ -59,9 +64,9 @@ export default function VoicePicker(): JSX.Element {
    *  "any downloaded voice", so this does too. */
   const effective: Exclude<Engine, "auto"> =
     engine === "auto"
-      ? kokoroModelReady && kokoroOptions.some((v) => v.id === selectedKokoro && v.downloaded)
+      ? kokoroReady && kokoroOptions.some((v) => v.id === selectedKokoro && v.ready)
         ? "kokoro"
-        : piperOptions.some((v) => v.id === selectedPiper && v.downloaded)
+        : piperOptions.some((v) => v.id === selectedPiper && v.ready)
           ? "local"
           : "edge"
       : engine;
@@ -89,6 +94,9 @@ export default function VoicePicker(): JSX.Element {
           id: String(v.id ?? ""),
           label: String(v.id ?? ""),
           downloaded: Boolean(v.downloaded),
+          // a downloaded Piper voice is immediately usable: the engine ships
+          // in the same tier
+          ready: Boolean(v.downloaded),
         }))
       );
       if (typeof r.default === "string" && r.default.trim()) setDefaultPiper(r.default.trim());
@@ -100,20 +108,31 @@ export default function VoicePicker(): JSX.Element {
       const res = await kokoroVoices();
       const r = (res.result as Record<string, unknown>) ?? {};
       const arr = Array.isArray(r.voices) ? (r.voices as Array<Record<string, unknown>>) : [];
+      const engineOk = r.engineAvailable === true;
+      const modelOk = r.modelReady === true;
+      const ready = r.ready === true || (modelOk && engineOk);
+      setKokoroEngineAvailable(engineOk);
+      setKokoroReady(ready);
       setKokoroOptions(
         arr.map((v) => ({
           id: String(v.id ?? ""),
           label: `${String(v.id ?? "")} · ${String(v.accent ?? "")}${
             v.note ? ` · ${String(v.note)}` : ""
           }`,
+          // `downloaded` = the weights are on disk; `ready` = the engine can
+          // speak. A machine with the weights but no engine tier used to look
+          // "not downloaded" while the download button had nothing left to do.
           downloaded: Boolean(v.downloaded),
+          ready: r.ready === true ? Boolean(v.ready) : Boolean(v.downloaded) && engineOk,
         }))
       );
-      setKokoroModelReady(r.modelReady === true);
+      setKokoroModelReady(modelOk);
       if (typeof r.default === "string" && r.default.trim()) setDefaultKokoro(r.default.trim());
     } catch {
       setKokoroOptions([]);
       setKokoroModelReady(false);
+      setKokoroEngineAvailable(false);
+      setKokoroReady(false);
     }
 
     try {
@@ -124,8 +143,9 @@ export default function VoicePicker(): JSX.Element {
         arr.map((v) => ({
           id: String(v.id ?? ""),
           label: `${String(v.id ?? "")} — ${String(v.friendlyName ?? "")}`,
-          // Edge voices are cloud-side: always "available"
+          // Edge voices are cloud-side: always usable
           downloaded: true,
+          ready: true,
         }))
       );
     } catch {
@@ -155,9 +175,14 @@ export default function VoicePicker(): JSX.Element {
 
   const currentOption =
     options.find((o) => o.id === currentVoice) ??
-    (effective === "edge" ? { id: currentVoice, label: currentVoice, downloaded: true } : undefined);
+    (effective === "edge"
+      ? { id: currentVoice, label: currentVoice, downloaded: true, ready: true }
+      : undefined);
 
-  const available = currentOption?.downloaded === true;
+  // the ONE rule the user asked for: a voice that cannot speak offers
+  // "download", one that can offers "listen". For Kokoro that means files
+  // AND engine, not files alone.
+  const available = currentOption?.ready === true;
 
   const handleVoice = (id: string): void => {
     setMsg("");
@@ -185,7 +210,14 @@ export default function VoicePicker(): JSX.Element {
       if (res.error) {
         setMsg(String((res.error as { message?: string }).message ?? res.error));
       } else {
-        setMsg(t("voice.downloaded") as string);
+        // say what actually happened: the weights and the engine are separate
+        // downloads, and "głos pobrany" was shown even when nothing was fetched
+        const r = (res.result as Record<string, unknown> | null) ?? {};
+        const engineDl = r.engineDownloaded === true;
+        const modelDl = r.modelDownloaded === true;
+        if (engineDl && !modelDl) setMsg(t("voice.engineDownloaded") as string);
+        else if (modelDl && !engineDl) setMsg(t("voice.modelDownloaded") as string);
+        else setMsg(t("voice.downloaded") as string);
       }
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e));
@@ -235,7 +267,12 @@ export default function VoicePicker(): JSX.Element {
     }
   };
 
-  const modelMissing = effective === "kokoro" && !kokoroModelReady;
+  // What is actually missing decides the label. Saying "download the model"
+  // when only the engine packages were absent sent the user to a button that
+  // had nothing left to do.
+  const kokoroNeedsEngine = effective === "kokoro" && !kokoroEngineAvailable;
+  const kokoroNeedsModel = effective === "kokoro" && !kokoroModelReady;
+  const modelMissing = kokoroNeedsModel;
 
   return (
     <div className="rounded-md border bg-card/40 p-3" data-testid="voice-picker">
@@ -311,9 +348,11 @@ export default function VoicePicker(): JSX.Element {
             >
               {busy
                 ? t("voice.downloading")
-                : modelMissing
-                  ? t("settings.kokoro.downloadModel")
-                  : t("voice.download")}
+                : kokoroNeedsEngine
+                  ? t("settings.kokoro.installEngine")
+                  : modelMissing
+                    ? t("settings.kokoro.downloadModel")
+                    : t("voice.download")}
             </button>
           )}
           <audio

@@ -327,10 +327,22 @@ def download_kokoro_model(on_log: Optional[Callable[[str], None]] = None, force:
     except OSError as e:
         raise RuntimeError(f"cannot create the Kokoro models directory {root}: {e}") from e
 
+    # The model files and the engine packages are two separate downloads, and
+    # a model without the engine cannot synthesize anything. Downloading the
+    # model used to stop here when the weights were present, so a machine
+    # missing only the engine tier reported "already downloaded" forever and
+    # every build failed with "download the model first".
+    engine_result = ensure_kokoro_engine(on_log=_log)
+    if not engine_result.get("ok"):
+        raise RuntimeError(str(engine_result.get("message") or "the Kokoro engine is unavailable"))
+    engine_downloaded = bool(engine_result.get("downloaded"))
+
     model, voices = kokoro_model_paths()
+    model_downloaded = False
     if kokoro_model_ready() and not force:
         _log("Kokoro model already downloaded")
     else:
+        model_downloaded = True
         _log("downloading the Kokoro model (~310 MB)…")
         _download_file(_MODEL_URL, model, "kokoro-v1.0.onnx", _log)
         _log("downloading the Kokoro voice pack (~27 MB)…")
@@ -343,6 +355,10 @@ def download_kokoro_model(on_log: Optional[Callable[[str], None]] = None, force:
         "voices": str(voices),
         "bytes": (model.stat().st_size if model.is_file() else 0)
         + (voices.stat().st_size if voices.is_file() else 0),
+        # what actually happened, so the UI stops claiming a download that
+        # did not happen (or hiding one that did)
+        "engineDownloaded": engine_downloaded,
+        "modelDownloaded": model_downloaded,
     }
 
 
@@ -350,6 +366,8 @@ def list_kokoro_voices() -> Dict[str, Any]:
     """Status payload for the Settings UI."""
     root = kokoro_models_root()
     model_ok = kokoro_model_ready()
+    engine_ok = kokoro_available()
+    ready = bool(model_ok and engine_ok)
     voices = []
     for vid, meta in KOKORO_VOICES.items():
         voices.append(
@@ -359,15 +377,21 @@ def list_kokoro_voices() -> Dict[str, Any]:
                 "gender": meta["gender"],
                 "accent": meta["accent"],
                 "note": meta.get("note", ""),
-                "downloaded": bool(model_ok and kokoro_available()),
+                # `downloaded` is the literal state of the model FILES; `ready`
+                # is whether the engine can actually speak. Conflating the two
+                # made a machine with the weights but no engine look "not
+                # downloaded" while the download button refused to act.
+                "downloaded": model_ok,
+                "ready": ready,
             }
         )
     return {
         "modelsDir": str(root),
         "default": DEFAULT_KOKORO_VOICE,
         "voices": voices,
-        "engineAvailable": kokoro_available(),
+        "engineAvailable": engine_ok,
         "modelReady": model_ok,
+        "ready": ready,
     }
 
 

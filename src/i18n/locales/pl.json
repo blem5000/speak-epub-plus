@@ -272,5 +272,10 @@
   "voice.download": "Pobierz głos",
   "voice.downloading": "Pobieranie…",
   "voice.downloaded": "Głos pobrany.",
-  "voice.notDownloaded": "niepobrany"
+  "voice.notDownloaded": "niepobrany",
+  "settings.kokoro.engineMissing": "Model pobrany — brakuje silnika Kokoro (pobierz silnik)",
+  "settings.kokoro.installEngineShort": "Pobierz silnik Kokoro",
+  "audio.summaryEngine": "Silnik {engine} · głos {voice} · {bitrate} · {parallel} równolegle · fragment {chunk} (zmień w Ustawieniach)",
+  "voice.engineDownloaded": "Silnik Kokoro pobrany — głos gotowy.",
+  "voice.modelDownloaded": "Model Kokoro pobrany — głos gotowy."
 }
