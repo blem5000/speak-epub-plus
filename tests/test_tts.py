@@ -1162,7 +1162,8 @@ def test_build_m4b_creates_with_markers(tmp_path, capsys):
     assert args[0] == "ffmpeg"
     assert "-y" in args and "-f" in args and "concat" in args
     assert "-map_metadata" in args and "1" in args
-    assert "-c:a" in args and "aac" in args and "-b:a" in args and "32k" in args
+    # the default matches the 48k part source (a higher value only grows the file)
+    assert "-c:a" in args and "aac" in args and "-b:a" in args and "48k" in args
     expected_out = str(out / f"{book_title}.m4b")
     # ffmpeg writes the sidecar; the final name is published atomically
     assert args[-1] == expected_out + ".tmp"
@@ -1179,8 +1180,8 @@ def test_build_m4b_bitrate_passthrough_and_validation(tmp_path):
 
     from core.tts import _estimate_m4b_size, _parse_audio_bitrate, build_m4b
 
-    assert _parse_audio_bitrate(None) == "32k"
-    assert _parse_audio_bitrate("") == "32k"
+    assert _parse_audio_bitrate(None) == "48k"
+    assert _parse_audio_bitrate("") == "48k"
     assert _parse_audio_bitrate("48K") == "48k"
     assert _parse_audio_bitrate(" 64k ") == "64k"
     for bad in ("ogg", "0k", "8k", "999k", 123):
@@ -1735,7 +1736,7 @@ def test_convert_wiring(tmp_path, monkeypatch):
         called["finalize"] = (len(plans), keep_parts)
         return [(36, "Ch36", "/tmp/036_Ch36.mp3"), (37, "Ch37", "/tmp/037_Ch37.mp3")]
 
-    def fake_build_m4b(output_dir_arg, entries, book_title_arg, ext_arg="m4b", bitrate="32k", cover_path=None, artist=None):
+    def fake_build_m4b(output_dir_arg, entries, book_title_arg, ext_arg="m4b", bitrate="48k", cover_path=None, artist=None):
         called["build_m4b"] = (output_dir_arg, entries, book_title_arg, ext_arg, bitrate)
 
     monkeypatch.setattr(speak_mod, "extract_chapters", fake_extract)

@@ -99,7 +99,7 @@
   "settings.helper.dialogue": "Drugi głos Edge TTS czytający cudzysłowy w dialogach (tekst w „…” itp.). Działa na silniku Edge; pusta wartość = jeden głos.",
   "settings.helper.normalize": "Wyrówna głośność każdego rozdziału do poziomu podcastu (ffmpeg loudnorm). Zmiana wyzwala regenerację istniejącego audio.",
   "settings.helper.trim": "Utnie ciszę na początku i końcu rozdziałów (poniżej -60 dB). Dramatyczne pauzy w środku rozdziału zostają.",
-  "settings.helper.bitrate": "Bitrate audio M4B/M4A. Domyślny dla mowy 32k (połowa rozmiaru 64k).",
+  "settings.helper.bitrate": "Bitrate audio M4B/M4A. 48k = tyle, ile ma źródło (najlepszy stosunek jakości do rozmiaru); 32k zmniejsza plik kosztem jakości. Przy silniku Kokoro dostępne tylko 32k/48k — wyżej nie ma czego odzyskać.",
   "settings.helper.rate": "Tempo mowy, np. +0% (suwak −50% do +50%, krok 5).",
   "settings.helper.parallel": "Startowa liczba równoległych zadań TTS (zalecane 2–3, zakres 1–6). Zwiększa się automatycznie, gdy Edge nie dławi, a cofa się przy ponowieniach (limit 12).",
   "settings.helper.chunkSize": "Maksymalna liczba znaków na fragment TTS (500–5000, zmniejsz jeśli słyszysz ucięcia).",

@@ -2374,7 +2374,7 @@ def finalize_chapter_audio(
     return audio_entries
 
 
-def _parse_audio_bitrate(value: Any, default: str = "32k") -> str:
+def _parse_audio_bitrate(value: Any, default: str = "48k") -> str:
     """Normalize an M4B/M4A audio bitrate like '32k' (16k-128k).
 
     Spoken-word TTS sources are ~24-48k MP3, so re-encoding above 64k only
@@ -2406,7 +2406,7 @@ def build_m4b(
     audio_entries: List[AudioEntry],
     book_title: str,
     ext: str = "m4b",
-    bitrate: str = "32k",
+    bitrate: str = "48k",
     on_progress: Optional[Callable[[int, int], None]] = None,
     on_probe: Optional[Callable[[int, int], None]] = None,
     cover_path: Optional[str] = None,

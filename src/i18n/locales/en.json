@@ -99,7 +99,7 @@
   "settings.helper.dialogue": "Second Edge TTS voice reading quoted dialogue (text wrapped in quotes). Applies to the Edge engine only; empty = single voice.",
   "settings.helper.normalize": "Levels every chapter to podcast loudness (ffmpeg loudnorm). Changing it regenerates existing audio.",
   "settings.helper.trim": "Trims leading/trailing silence below -60 dB. Dramatic mid-chapter pauses are kept.",
-  "settings.helper.bitrate": "M4B/M4A audio bitrate. Speech default 32k (halves file size vs 64k).",
+  "settings.helper.bitrate": "M4B/M4A audio bitrate. 48k matches the source (best quality/size); 32k shrinks the file at some cost. With the Kokoro engine only 32k/48k are offered — higher has nothing to recover.",
   "settings.helper.rate": "Speech rate, e.g. +0% (Slider −50% to +50%, step 5).",
   "settings.helper.parallel": "Starting parallel TTS jobs (2–3 recommended, clamped 1–6). Scales up automatically when Edge is not throttling, backs off on retries (ceiling 12).",
   "settings.helper.chunkSize": "Max characters per TTS chunk (500–5000, lower if you hear truncation).",

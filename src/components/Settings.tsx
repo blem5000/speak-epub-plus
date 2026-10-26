@@ -63,6 +63,9 @@ async function fetchEdgeVoices(): Promise<EdgeVoice[]> {
 }
 
 const BITRATE_OPTIONS = ["32k", "48k", "64k", "96k"];
+// Kokoro (and Piper/Edge) parts are encoded at 48k mono, so a higher M4B
+// bitrate only grows the file. Offer 32k/48k to stop the pointless choice.
+const KOKORO_BITRATE_OPTIONS = ["32k", "48k"];
 
 const PRESET_DELAYS = [3000, 4000, 5000] as const;
 
@@ -75,7 +78,7 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
 
   // form state
   const [voice, setVoice] = useState<string>("en-US-AndrewNeural");
-  const [audioBitrate, setAudioBitrate] = useState<string>("32k");
+  const [audioBitrate, setAudioBitrate] = useState<string>("48k");
   /** The Edge catalogue — hundreds of voices, fetched once and cached in the module. */
   const [edgeVoices, setEdgeVoices] = useState<EdgeVoice[]>([]);
   const [edgeVoicesFailed, setEdgeVoicesFailed] = useState<boolean>(false);
@@ -331,8 +334,8 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
         setUpdateAuto(ua);
         prevRef.current["updateAuto"] = ua;
         // audio bitrate
-        const bv = typeof data.audioBitrate === "string" ? (data.audioBitrate as string).trim().toLowerCase() : "32k";
-        const bitrateVal = BITRATE_OPTIONS.includes(bv) ? bv : "32k";
+        const bv = typeof data.audioBitrate === "string" ? (data.audioBitrate as string).trim().toLowerCase() : "48k";
+        const bitrateVal = BITRATE_OPTIONS.includes(bv) ? bv : "48k";
         setAudioBitrate(bitrateVal);
         prevRef.current["audioBitrate"] = bitrateVal;
         // TTS engine + local voice
@@ -569,9 +572,17 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
     void persist({ voice: vv }, "voice", prev);
   };
 
+  // Kokoro parts are encoded at 48k, so anything above that only inflates the
+  // file. The list narrows to 32k/48k while Kokoro is the engine.
+  const bitrateOptions = engine === "kokoro" ? KOKORO_BITRATE_OPTIONS : BITRATE_OPTIONS;
+  // a stored 64k/96k must never leave the select showing a value it does not
+  // offer (the browser would silently fall back to the first option while the
+  // store still held the old value)
+  const shownBitrate = bitrateOptions.includes(audioBitrate) ? audioBitrate : "48k";
+
   const handleBitrateChange = (e: React.ChangeEvent<HTMLSelectElement>): void => {
     const val = e.target.value.trim().toLowerCase();
-    if (!BITRATE_OPTIONS.includes(val)) return;
+    if (!bitrateOptions.includes(val)) return;
     const prev = prevRef.current["audioBitrate"];
     setAudioBitrate(val);
     void persist({ audioBitrate: val }, "audioBitrate", prev);
@@ -584,6 +595,13 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
     const prev = prevRef.current["engine"];
     setEngine(val);
     void persist({ engine: val }, "engine", prev);
+    // Kokoro tops out at its 48k source: pull a stale 64k/96k back down so the
+    // stored value agrees with what the UI can show (and what makes sense)
+    if (val === "kokoro" && !KOKORO_BITRATE_OPTIONS.includes(audioBitrate)) {
+      const prevBr = prevRef.current["audioBitrate"];
+      setAudioBitrate("48k");
+      void persist({ audioBitrate: "48k" }, "audioBitrate", prevBr);
+    }
   };
 
   const handleKokoroVoiceChange = (val: string): void => {
@@ -1159,11 +1177,11 @@ export default function Settings({ open, onClose, variant = "modal" }: SettingsP
                     <span className="text-body-sm font-medium">{t("settings.audio.bitrate")}</span>
                     <select
                       data-testid="settings-audio-bitrate"
-                      value={audioBitrate}
+                      value={shownBitrate}
                       onChange={handleBitrateChange}
                       className="h-9 rounded-md border border-input bg-card px-3 text-body focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
-                      {BITRATE_OPTIONS.map((opt) => (
+                      {bitrateOptions.map((opt) => (
                         <option key={opt} value={opt}>
                           {opt}
                         </option>

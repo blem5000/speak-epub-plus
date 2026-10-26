@@ -141,14 +141,15 @@ describe("Settings 4.2 — form + persist + i18n", () => {
     expect(screen.getByTestId("settings-scrape-delay")).toHaveValue("5000");
     expect(screen.getByTestId("settings-output-keepMP3")).not.toBeChecked();
   });
-  it("bitrate select 32k→48k calls setStore", async () => {
+  it("bitrate defaults to 48k and a change persists", async () => {
     const user = userEvent.setup();
     render(<Settings open={true} onClose={vi.fn()} />);
     await waitFor(() => expect(mockGetStore).toHaveBeenCalled());
     const sel = screen.getByTestId("settings-audio-bitrate") as HTMLSelectElement;
-    expect(sel.value).toBe("32k");
-    await user.selectOptions(sel, "48k");
-    await waitFor(() => expect(mockSetStore).toHaveBeenCalledWith({ audioBitrate: "48k" }));
+    // the default matches the 48k source, not the old lossy 32k
+    expect(sel.value).toBe("48k");
+    await user.selectOptions(sel, "32k");
+    await waitFor(() => expect(mockSetStore).toHaveBeenCalledWith({ audioBitrate: "32k" }));
   });
 
   it("engine segmented: auto active by default, clicking local persists", async () => {

@@ -247,7 +247,7 @@ def finalize_chapter_audio(plans: list[ChapterPlan], keep_parts: bool, normalize
     return _core_finalize(plans, keep_parts, normalize_audio=normalize_audio, trim_silence=trim_silence)
 
 
-def build_m4b(output_dir: str, audio_entries: list[AudioEntry], book_title: str, ext: str = "m4b", bitrate: str = "32k", cover_path: str | None = None, artist: str | None = None) -> None:
+def build_m4b(output_dir: str, audio_entries: list[AudioEntry], book_title: str, ext: str = "m4b", bitrate: str = "48k", cover_path: str | None = None, artist: str | None = None) -> None:
     return _core_m4b(output_dir, audio_entries, book_title, ext, bitrate=bitrate, cover_path=cover_path, artist=artist)
 
 
@@ -302,7 +302,7 @@ async def convert(
     keep_parts: bool = False,
     parallel: int = 3,
     retries: int = 5,
-    bitrate: str = "32k",
+    bitrate: str = "48k",
     rate: str = "+0%",
     engine: str = "auto",
     local_voice: str | None = None,
@@ -454,7 +454,7 @@ def main() -> None:
     parser.add_argument("--rate", default="+0%", help="Speech rate adjustment like +25%% or -10%% (clamped to ±100%%). Default: +0%%.")
     parser.add_argument("--engine", choices=["auto", "edge", "local"], default="auto", help="TTS engine: auto (local Piper on fast CPUs when the model is downloaded, else Edge), edge (cloud), local (offline Piper). Default: auto.")
     parser.add_argument("--local-voice", default="", help="Piper voice for the local engine, e.g. pl_PL-darkman-medium. Empty: default voice.")
-    parser.add_argument("--bitrate", default="32k", help="M4B/M4A audio bitrate like 32k (16k-128k, speech default: 32k).")
+    parser.add_argument("--bitrate", default="48k", help="M4B/M4A audio bitrate like 48k (16k-128k, speech default: 48k = the source bitrate).")
     parser.add_argument("--normalize-audio", action="store_true", help="Normalize chapter loudness (podcast levels) after merging.")
     parser.add_argument("--trim-silence", action="store_true", help="Trim leading/trailing silence of each chapter (dramatic pauses kept).")
     parser.add_argument(

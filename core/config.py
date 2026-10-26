@@ -60,7 +60,7 @@ DEFAULT_STORE: Dict[str, Any] = {
     "outputDir": "",
     "filters": [],
     "autoBoilerplate": True,
-    "audioBitrate": "32k",
+    "audioBitrate": "48k",
     "selection": [],
     "selection_from": 1,
     "selection_to": 30,
@@ -2901,9 +2901,9 @@ def handle_rpc(request: Any, emit_fn=None) -> Dict[str, Any]:
         os.environ["SPEAK_EPUB_PIPER_CUDA"] = "1" if cuda_p else "0"
         if bitrate_p is None:
             try:
-                bitrate_p = str(store_audio.get("audioBitrate", "32k")) if isinstance(store_audio, dict) else "32k"
+                bitrate_p = str(store_audio.get("audioBitrate", "48k")) if isinstance(store_audio, dict) else "48k"
             except Exception:
-                bitrate_p = "32k"
+                bitrate_p = "48k"
         # fail fast on garbage bitrate (audio.py re-validates authoritatively)
         _br_m = _re_audio.fullmatch(r"\s*(\d+)\s*k\s*", str(bitrate_p), _re_audio.I) if bitrate_p is not None else None
         if not _br_m or not (16 <= int(_br_m.group(1)) <= 128):

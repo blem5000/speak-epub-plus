@@ -126,7 +126,7 @@ const Audiobook = forwardRef<AudiobookHandle, AudiobookProps>(function Audiobook
           const kokoroVoice = typeof data.kokoroVoice === "string" ? data.kokoroVoice.trim() : "";
           const parallel = Number(data.parallel ?? 3);
           const chunk = Number((data as Record<string, unknown>)["chunk-size"] ?? 3500);
-          const bitrate = typeof data.audioBitrate === "string" ? data.audioBitrate : "32k";
+          const bitrate = typeof data.audioBitrate === "string" ? data.audioBitrate : "48k";
           const engineLabel: Record<string, string> = {
             edge: "Edge",
             local: "Piper",

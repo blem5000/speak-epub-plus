@@ -524,9 +524,9 @@ def build_audio(
         try:
             from core.config import load_store as _load_store_br  # dynamic, no cycles
 
-            audio_bitrate = str(_load_store_br().get("audioBitrate", "32k"))
+            audio_bitrate = str(_load_store_br().get("audioBitrate", "48k"))
         except Exception:
-            audio_bitrate = "32k"
+            audio_bitrate = "48k"
     try:
         from core.tts import _parse_audio_bitrate as _parse_br
 
