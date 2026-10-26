@@ -433,15 +433,24 @@ def _load_kokoro():
 
 
 def _unavailable_message(voice: str) -> str:
+    """Explain WHY this voice cannot speak, naming the voice.
+
+    Every branch names the voice: a message that only says "the model is
+    missing" leaves the user guessing which selection it refers to, and the
+    build error is the only place the chosen voice is reported back.
+    """
     if not kokoro_model_ready():
-        return "the Kokoro model is not downloaded (download it in Settings first)"
+        return (
+            f"Kokoro voice {voice} is unavailable — the Kokoro model is not "
+            "downloaded (download it in Settings first)"
+        )
     if not kokoro_available():
         # the engine is an optional DOWNLOAD, not a build property: saying
         # "not part of this build" told the user to give up instead of
         # telling them what to click
         return (
-            "the Kokoro engine is not installed — download it in Settings "
-            "(the model is already on disk), or pick another engine"
+            f"Kokoro voice {voice} is unavailable — the Kokoro engine is not "
+            "installed (download it in Settings; the model is already on disk)"
         )
     return f"Kokoro voice {voice} is unavailable"
 
