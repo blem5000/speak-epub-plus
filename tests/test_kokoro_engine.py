@@ -17,6 +17,23 @@ if str(ROOT) not in sys.path:
 import core.tts_kokoro as tts_kokoro  # noqa: E402
 
 
+def _fake_model_files(root, *, model_bytes=50_000_001, voices_bytes=1_000_001):
+    """Create plausible-sized weight files WITHOUT writing 50 MB each.
+
+    truncate() produces a sparse file of the requested length instantly; the
+    readiness checks only look at the size, so the content is irrelevant. The
+    previous write_bytes(b"\\0" * 50_000_001) paid real disk I/O on every
+    test and stretched the suite from ~30 s to several minutes.
+    """
+    model = root / tts_kokoro.MODEL_FILE
+    voices = root / tts_kokoro.VOICES_FILE
+    with open(model, "wb") as f:
+        f.truncate(model_bytes)
+    with open(voices, "wb") as f:
+        f.truncate(voices_bytes)
+    return model, voices
+
+
 class TestVoiceCatalogue:
     def test_the_four_curated_voices_are_male_english(self):
         assert set(tts_kokoro.KOKORO_VOICES) == {
@@ -93,15 +110,13 @@ class TestModelReadiness:
 
     def test_plausible_sizes_are_ready(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SPEAK_EPUB_KOKORO_MODELS_DIR", str(tmp_path))
-        (tmp_path / tts_kokoro.MODEL_FILE).write_bytes(b"\0" * 50_000_001)
-        (tmp_path / tts_kokoro.VOICES_FILE).write_bytes(b"\0" * 1_000_001)
+        _fake_model_files(tmp_path)
         assert tts_kokoro.kokoro_model_ready() is True
 
     def test_ready_requires_the_engine_too(self, tmp_path, monkeypatch):
         """Model present but packages absent must not report ready."""
         monkeypatch.setenv("SPEAK_EPUB_KOKORO_MODELS_DIR", str(tmp_path))
-        (tmp_path / tts_kokoro.MODEL_FILE).write_bytes(b"\0" * 50_000_001)
-        (tmp_path / tts_kokoro.VOICES_FILE).write_bytes(b"\0" * 1_000_001)
+        _fake_model_files(tmp_path)
         monkeypatch.setattr(tts_kokoro, "kokoro_available", lambda: False)
         assert tts_kokoro.kokoro_ready("am_michael") is False
 
@@ -194,8 +209,7 @@ class TestModelDownloadAlsoInstallsTheEngine:
     def weights_only(self, tmp_path, monkeypatch):
         """Weights present, engine missing — exactly the broken machine."""
         monkeypatch.setenv("SPEAK_EPUB_KOKORO_MODELS_DIR", str(tmp_path))
-        (tmp_path / tts_kokoro.MODEL_FILE).write_bytes(b"\0" * 50_000_001)
-        (tmp_path / tts_kokoro.VOICES_FILE).write_bytes(b"\0" * 1_000_001)
+        _fake_model_files(tmp_path)
         calls = []
 
         def _fake_ensure(on_log=None):
@@ -237,8 +251,7 @@ class TestModelDownloadAlsoInstallsTheEngine:
 class TestStatusPayloadSeparatesFilesFromReadiness:
     def test_weights_without_engine_are_reported_not_ready(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SPEAK_EPUB_KOKORO_MODELS_DIR", str(tmp_path))
-        (tmp_path / tts_kokoro.MODEL_FILE).write_bytes(b"\0" * 50_000_001)
-        (tmp_path / tts_kokoro.VOICES_FILE).write_bytes(b"\0" * 1_000_001)
+        _fake_model_files(tmp_path)
         monkeypatch.setattr(tts_kokoro, "kokoro_available", lambda: False)
 
         payload = tts_kokoro.list_kokoro_voices()
@@ -253,8 +266,7 @@ class TestStatusPayloadSeparatesFilesFromReadiness:
 
     def test_both_present_means_ready(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SPEAK_EPUB_KOKORO_MODELS_DIR", str(tmp_path))
-        (tmp_path / tts_kokoro.MODEL_FILE).write_bytes(b"\0" * 50_000_001)
-        (tmp_path / tts_kokoro.VOICES_FILE).write_bytes(b"\0" * 1_000_001)
+        _fake_model_files(tmp_path)
         monkeypatch.setattr(tts_kokoro, "kokoro_available", lambda: True)
 
         payload = tts_kokoro.list_kokoro_voices()
